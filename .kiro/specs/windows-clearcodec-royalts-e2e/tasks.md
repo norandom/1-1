@@ -26,7 +26,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Native PowerShell preflight reports tool versions/paths and rejects prohibited wrappers.
   - _Boundary: Developer tooling_
   - _Requirements: 7.1,7.5,12.7,13.4_
-- [ ] 1.2 Configure nextest profiles and retain doctests
+- [x] 1.2 Configure nextest profiles and retain doctests
   - Use pinned cargo-nextest with no automatic retries, fail on zero tests, timeout/leak reporting and JUnit; serialize only tests sharing OS resources. Keep cargo test --doc.
   - Done: Rust tier command runs nextest and doctests with propagated failures; compare Windows timing rather than assuming speedup.
   - _Boundary: Rust test configuration_
@@ -348,3 +348,4 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
 ## Implementation Notes
 - Pre-existing baseline: `npm run lint` fails at HEAD (7 errors / 2 warnings in `src/**` — ConnectionCard.tsx, SessionCanvas.tsx, ui/{badge,button,tabs,toggle}.tsx, useClipboard.ts); must be fixed before the lint tier can gate CI (found during 1.1 review; not caused by 1.1).
 - design.md File Structure Plan lists `scripts/Invoke-CI.ps1` but not `scripts/Invoke-CI.Tests.ps1`; add the test file to the plan in the next docs-touching task.
+- nextest os-keyring serialization override exists only in `[profile.ci]`; mirror it into `[profile.dev]` (or use extends) next time `.config/nextest.toml` is touched. Host sets CARGO_TARGET_DIR=D:\BuildArtifacts\cargo-target but nextest junit resolves under workspace target — tier passes explicit `--config-file` since src-tauri workspace root doesn't auto-discover repo-root .config.

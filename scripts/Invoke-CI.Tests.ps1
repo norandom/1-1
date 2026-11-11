@@ -1,7 +1,8 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-  Test tier for scripts/Invoke-CI.ps1 — the native preflight entry point (task 1.1).
+  Test tier for scripts/Invoke-CI.ps1 — native CI entry points (task 1.1
+  preflight tier, task 1.2 rust test tier).
 
 .DESCRIPTION
   Single command (Req 13.4):  pwsh -NoProfile -File scripts/Invoke-CI.Tests.ps1
@@ -14,6 +15,11 @@
 
   Wrapper-rejection fixtures are echo-only: even if the preflight wrongly
   executed them, no WSL or bash process would ever be spawned.
+
+  Rust-tier integration tests compile tiny throwaway fixture crates (under
+  the same temp root, never committed) to prove that nextest failures,
+  doctest failures and zero-test runs propagate to the tier exit code; the
+  application crates in src-tauri/ and native-app/ are not modified.
 #>
 [CmdletBinding()]
 param(
@@ -103,6 +109,82 @@ function Invoke-ChildPreflight {
         throw 'child preflight process timed out after 300s'
     }
     return [pscustomobject]@{ ExitCode = $child.ExitCode; StdOut = $stdoutTask.Result; StdErr = $stderrTask.Result }
+}
+
+function New-RustFixtureCrate {
+    <# Throwaway fixture crate for rust-tier propagation tests (never committed).
+       Kinds: healthy | fail-unit | fail-doctest | zero-tests.
+       Each kind gets a UNIQUE package name: this host honors a shared
+       CARGO_TARGET_DIR cache, and identical package names across fixtures
+       made cargo reuse the first-built test binary (stale-run false
+       positives/negatives), so uniqueness is required for honest evidence. #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][ValidateSet('healthy', 'fail-unit', 'fail-doctest', 'zero-tests')][string]$Kind
+    )
+    New-Item -ItemType Directory -Path (Join-Path $Path 'src') -Force | Out-Null
+    $packageName = "fixture_$Kind"
+    $crateName = $packageName.Replace('-', '_')
+    Set-Content -LiteralPath (Join-Path $Path 'Cargo.toml') -Value ("[package]`nname = `"$packageName`"`nversion = `"0.1.0`"`nedition = `"2021`"`n") -Encoding utf8
+    $lib = switch ($Kind) {
+        'healthy' { @'
+/// Adds two numbers.
+///
+/// ```
+/// assert_eq!(fixture::add(2, 3), 5);
+/// ```
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t_pass() { assert_eq!(crate::add(1, 2), 3); }
+}
+'@ }
+        'fail-unit' { @'
+/// Adds two numbers.
+///
+/// ```
+/// assert_eq!(fixture::add(2, 3), 5);
+/// ```
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t_pass() { assert_eq!(crate::add(1, 2), 3); }
+
+    #[test]
+    fn t_fixture_fail() { panic!("intentional fixture failure"); }
+}
+'@ }
+        'fail-doctest' { @'
+/// Adds two numbers.
+///
+/// ```
+/// assert_eq!(fixture::add(2, 3), 6);
+/// ```
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t_pass() { assert_eq!(crate::add(1, 2), 3); }
+}
+'@ }
+        'zero-tests' { @'
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+'@ }
+    }
+    # Point the doc examples at this fixture's crate name.
+    $lib = $lib.Replace('fixture::add', "$crateName::add")
+    Set-Content -LiteralPath (Join-Path $Path 'src\lib.rs') -Value $lib -Encoding utf8
+    return (Join-Path $Path 'Cargo.toml')
+}
+
+function Read-RustTierReport {
+    param([Parameter(Mandatory)][string]$Path)
+    try { return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json) } catch { return $null }
 }
 
 Write-Output '== drift-rdp preflight test tier (scripts/Invoke-CI.Tests.ps1) =='
@@ -238,6 +320,85 @@ try {
     Assert-That { $bashCombined -match [regex]::Escape($BashGitShim) } 'I04b rejection names the offending git shim path'
     Assert-That { $bashCombined -match 'bash' } 'I04c rejection reason mentions bash'
     Assert-That { $bashCombined -notmatch 'SHIM-EXECUTED' } 'I04d the prohibited shim was never executed'
+
+    # --- task 1.2: rust test tier (pinned nextest + cargo test --doc) ---
+    Write-Output '-- unit: nextest pin and version gate --'
+    Assert-That { $null -ne $DriftNextestMinVersion -and [version]$DriftNextestMinVersion -ge ([version]'0.9.150') } 'R00 harness pin: $DriftNextestMinVersion is at least the 0.9.150 advisory floor'
+    Assert-That { (Test-DriftNextestVersion -VersionOutput 'cargo-nextest 0.9.150 (d225b1daf 2026-10-26)').Ok } 'R01 version gate accepts the exact pinned minimum 0.9.150'
+    Assert-That { -not (Test-DriftNextestVersion -VersionOutput 'cargo-nextest 0.9.149 (abc 2026-01-01)').Ok } 'R02 version gate rejects 0.9.149 (below the pin)'
+    Assert-That { (Test-DriftNextestVersion -VersionOutput 'cargo-nextest 0.9.149 (abc 2026-01-01)').Reason -match [regex]::Escape('cargo install cargo-nextest --locked --version') } 'R02b below-pin rejection names the pinned install command'
+    Assert-That { (Test-DriftNextestVersion -VersionOutput 'cargo-nextest 0.9.151 (abc 2026-01-01)').Ok } 'R03 version gate accepts a newer patch (0.9.151)'
+    Assert-That { (Test-DriftNextestVersion -VersionOutput 'cargo-nextest 0.10.0 (abc 2026-01-01)').Ok } 'R04 version gate accepts a newer minor (0.10.0)'
+    Assert-That { (Test-DriftNextestVersion -VersionOutput 'cargo-nextest 1.0.0 (abc 2026-01-01)').Ok } 'R05 version gate accepts a newer major (1.0.0)'
+    Assert-That { -not (Test-DriftNextestVersion -VersionOutput 'nextest not installed').Ok } 'R06 version gate rejects unparseable version output'
+    Assert-That { (Get-DriftNextestInstallHint) -match [regex]::Escape("cargo install cargo-nextest --locked --version $DriftNextestMinVersion") } 'R07 install hint contains the exact pinned install command'
+
+    Write-Output '-- unit: .config/nextest.toml (design.md file plan) --'
+    $NextestConfigPath = Join-Path $RepoRoot '.config\nextest.toml'
+    Assert-That { Test-Path -LiteralPath $NextestConfigPath -PathType Leaf } 'R08 repo-root .config/nextest.toml exists'
+    Assert-That { try { $c = Get-Content -LiteralPath $NextestConfigPath -Raw; ($c -match '\[profile\.ci\]') -and ($c -match '\[profile\.ci\.junit\]') -and ($c -match 'slow-timeout') -and ($c -match 'leak-timeout') } catch { $false } } 'R09 ci profile defines junit plus slow-timeout and leak-timeout reporting'
+    Assert-That { try { (Get-Content -LiteralPath $NextestConfigPath -Raw) -notmatch '(?m)^\s*retries\s*=' } catch { $false } } 'R10 config sets no automatic retries'
+    Assert-That { try { $c = Get-Content -LiteralPath $NextestConfigPath -Raw; ($c -match 'nextest-version') -and ($c -match [regex]::Escape('required = "0.9.150"')) } catch { $false } } 'R11 config pins a machine-readable minimum nextest version (0.9.150)'
+    Assert-That { try { $c = Get-Content -LiteralPath $NextestConfigPath -Raw; ($c -match '\[test-groups\]') -and ($c -match 'os-keyring') -and ($c -match 'test-group') } catch { $false } } 'R12 config defines the os-keyring resource group and assigns it via an override'
+    Assert-That { $a = New-DriftNextestRunArguments -ConfigPath 'C:\cfg.toml' -ManifestPath 'C:\m\Cargo.toml'; ($a -contains 'run') -and ($a -contains '--profile') -and ($a -contains 'ci') -and ($a -contains '--no-tests') -and ($a -contains 'fail') -and ($a -contains '--config-file') -and ($a -notcontains '--retries') } 'R13 nextest arguments include fail-on-zero and the pinned config, and never --retries'
+
+    Write-Output '-- integration: rust tier fixtures (real cargo, throwaway crates) --'
+    $RustTemp = Join-Path $TempRoot 'rust-fixtures'
+    New-Item -ItemType Directory -Path $RustTemp -Force | Out-Null
+    $HealthyManifest = New-RustFixtureCrate -Path (Join-Path $RustTemp 'healthy') -Kind 'healthy'
+    $FailUnitManifest = New-RustFixtureCrate -Path (Join-Path $RustTemp 'fail-unit') -Kind 'fail-unit'
+    $FailDocManifest = New-RustFixtureCrate -Path (Join-Path $RustTemp 'fail-doctest') -Kind 'fail-doctest'
+    $ZeroManifest = New-RustFixtureCrate -Path (Join-Path $RustTemp 'zero-tests') -Kind 'zero-tests'
+    $RustReportPath = Join-Path $BuildArtifactsRoot "$ProjectName\rust\rust-tier-report.json"
+
+    Write-Output '-- integration: IR01 healthy fixture (nextest + doctests pass) --'
+    $ir1 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'rust', '-ManifestPath', $HealthyManifest)
+    Assert-That { $ir1.ExitCode -eq 0 } 'IR01a rust tier exits 0 on a healthy crate' ("exit={0}; stderr={1}" -f $ir1.ExitCode, $ir1.StdErr)
+    Assert-That { Test-Path -LiteralPath $RustReportPath -PathType Leaf } 'IR01b tier writes the rust report under D:\BuildArtifacts\drift-rdp\rust'
+    $ir1Report = Read-RustTierReport -Path $RustReportPath
+    Assert-That { $null -ne $ir1Report -and $ir1Report.ok } 'IR01c report records ok=true'
+    Assert-That { $null -ne $ir1Report -and ((@($ir1Report.tools) | Where-Object { $_.tool -eq 'cargo-nextest' }).version -match '^\d+\.\d+\.\d+$') -and (([version](@($ir1Report.tools) | Where-Object { $_.tool -eq 'cargo-nextest' }).version) -ge ([version]$DriftNextestMinVersion)) } 'IR01d report records a cargo-nextest version satisfying the pin'
+    Assert-That { $null -ne $ir1Report -and @($ir1Report.artifacts.junitCopied).Count -ge 1 -and (Test-Path -LiteralPath @($ir1Report.artifacts.junitCopied)[0] -PathType Leaf) } 'IR01e JUnit evidence is copied under the scoped output directory'
+    Assert-That { try { (Get-Content -LiteralPath @($ir1Report.artifacts.junitCopied)[0] -Raw) -match '<\?xml' } catch { $false } } 'IR01f copied JUnit file is XML'
+
+    Write-Output '-- integration: IR02 failing unit test propagates --'
+    $ir2 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'rust', '-ManifestPath', $FailUnitManifest)
+    Assert-That { $ir2.ExitCode -eq 1 } 'IR02a failing unit test propagates: tier exits 1' ("exit={0}" -f $ir2.ExitCode)
+    $ir2Report = Read-RustTierReport -Path $RustReportPath
+    Assert-That { $null -ne $ir2Report -and -not $ir2Report.ok -and $ir2Report.nextest.exitCode -ne 0 } 'IR02b report records the nonzero nextest exit code'
+
+    Write-Output '-- integration: IR03 failing doctest propagates (nextest itself passes) --'
+    $ir3 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'rust', '-ManifestPath', $FailDocManifest)
+    Assert-That { $ir3.ExitCode -eq 1 } 'IR03a failing doctest propagates although nextest passed: tier exits 1' ("exit={0}" -f $ir3.ExitCode)
+    $ir3Report = Read-RustTierReport -Path $RustReportPath
+    Assert-That { $null -ne $ir3Report -and $ir3Report.nextest.exitCode -eq 0 -and $ir3Report.doctest.exitCode -ne 0 } 'IR03b report shows nextest passed but cargo test --doc failed'
+
+    Write-Output '-- integration: IR04 zero tests fails the tier --'
+    $ir4 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'rust', '-ManifestPath', $ZeroManifest)
+    Assert-That { $ir4.ExitCode -eq 1 } 'IR04a zero executed tests fails the tier (fail-on-zero-tests)' ("exit={0}" -f $ir4.ExitCode)
+    $ir4Combined = "{0}`n{1}" -f $ir4.StdOut, $ir4.StdErr
+    Assert-That { $ir4Combined -match 'no tests to run' } 'IR04b zero-test failure names the nextest zero-tests error'
+
+    Write-Output '-- integration: IR05 canonical working directory still enforced --'
+    $ir5 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'rust', '-WorkingDirectory', 'C:\Users\mariu\Source\drift-rdp')
+    Assert-That { $ir5.ExitCode -eq 1 } 'IR05a rust tier rejects the junction-view working directory'
+    Assert-That { ("{0}`n{1}" -f $ir5.StdOut, $ir5.StdErr) -match [regex]::Escape($RepoRoot) } 'IR05b rejection names the canonical repository path'
+
+    Write-Output '-- integration: IR06 missing cargo fails cleanly --'
+    $ir6 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'rust') -Environment @{ 'PATH' = "$env:SystemRoot\System32" }
+    Assert-That { $ir6.ExitCode -eq 1 } 'IR06a rust tier fails cleanly when cargo is missing from PATH'
+    Assert-That { ("{0}`n{1}" -f $ir6.StdOut, $ir6.StdErr) -match 'cargo' } 'IR06b missing-tool failure names cargo'
+
+    Write-Output '-- integration: IR07 wsl-delegating cargo-nextest shim rejected before execution --'
+    $NextestShimDir = Join-Path $TempRoot 'nextest-shims'
+    New-Item -ItemType Directory -Path $NextestShimDir -Force | Out-Null
+    $NextestWslShim = Join-Path $NextestShimDir 'cargo-nextest.cmd'
+    Set-Content -LiteralPath $NextestWslShim -Value '@echo SHIM-EXECUTED wsl.exe -e cargo-nextest %*' -Encoding ascii
+    $ir7 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'rust') -Environment @{ 'PATH' = ('{0};{1}' -f $NextestShimDir, $env:PATH) }
+    $ir7Combined = "{0}`n{1}" -f $ir7.StdOut, $ir7.StdErr
+    Assert-That { $ir7.ExitCode -eq 1 } 'IR07a rust tier rejects a wsl-delegating cargo-nextest shim'
+    Assert-That { $ir7Combined -match [regex]::Escape($NextestWslShim) } 'IR07b rejection names the offending shim path'
+    Assert-That { $ir7Combined -notmatch 'SHIM-EXECUTED' } 'IR07c the prohibited shim was inspected and rejected, never executed'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.

@@ -1,0 +1,61 @@
+# drift-rdp nextest tier configuration (task 1.2).
+# Source of truth: design.md "CI ownership and reuse decisions" and File
+# Structure Plan (`.config/nextest.toml` at the repository root).
+#
+# cargo-nextest is a CI/developer executable, NOT an application dependency
+# (tasks.md "Crate and tool choices"); it is never added to a Cargo.toml.
+# 0.9.150 is the minimum supported release per the current upstream advisory.
+# This machine-readable pin is enforced by nextest itself (exit code 92 when
+# the installed binary is older) and independently by scripts/Invoke-CI.ps1
+# ($DriftNextestMinVersion), which reports the exact install command.
+nextest-version = { required = "0.9.150" }
+
+# NOTE on discovery: the Cargo workspace root is src-tauri/, and nextest only
+# auto-discovers .config/nextest.toml at the workspace root, so plain
+# `cargo nextest run` from src-tauri/ does NOT load this file. The native tier
+# command passes it explicitly:
+#   pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier rust
+# Developers can opt in manually from src-tauri/ with:
+#   cargo nextest run --config-file ..\.config\nextest.toml --profile dev
+
+# Developer profile: local runs report slow tests and leaks but never retry,
+# never terminate slow tests and never write JUnit.
+[profile.dev]
+slow-timeout = { period = "120s" }  # report-only: no terminate-after
+leak-timeout = "2s"                 # report tests that leave threads running
+status-level = "leak"               # surface fail/slow/leak events live
+final-status-level = "slow"         # final summary lists slow tests too
+
+# CI profile (used by scripts/Invoke-CI.ps1 -Tier rust and by container jobs).
+[profile.ci]
+fail-fast = false                   # run the full suite; collect every failure (Req 7.3, 13.3)
+slow-timeout = { period = "60s" }   # report-only: slow tests are flagged, not terminated
+leak-timeout = "2s"                 # leak reporting for tests that leave threads running
+status-level = "leak"               # surface fail/slow/leak events live
+final-status-level = "slow"         # final summary lists failures and slow tests
+
+# `retries` is intentionally ABSENT from every profile: this repository must
+# not hide flaky tests behind automatic retries (task 1.2; a flaky test fails
+# the tier and is fixed, not retried). Fail-on-zero-tests is enforced by the
+# tier command itself via `--no-tests fail`.
+
+# JUnit evidence for the CI profile. Relative paths resolve under
+# <workspace>/target/nextest/<profile>/; scripts/Invoke-CI.ps1 copies the
+# report into the scoped output directory D:\BuildArtifacts\drift-rdp\rust\.
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "drift-rdp-rust-ci"
+
+# --- Resource groups: serialize ONLY tests that share OS-level resources ---
+# The two #[ignore]d CredentialStore tests (src-tauri/src/store/credentials.rs)
+# touch the real OS keyring (Windows Credential Manager / macOS Keychain /
+# Secret Service) when run explicitly via --run-ignored; they are serialized
+# against each other only. Every other test in the repository uses no shared
+# OS-level resources (network probes connect to an unbound localhost port) and
+# stays fully parallel — no serialization is invented for them.
+[test-groups]
+os-keyring = { max-threads = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(test_store_and_retrieve_password) or test(test_delete_password)'
+test-group = 'os-keyring'
