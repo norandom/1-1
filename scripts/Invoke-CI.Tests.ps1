@@ -893,9 +893,9 @@ try {
     # bridge on the runner's own Docker engine (dev-host twin:
     # scripts/Invoke-CI.ps1 -Tier dagger -DaggerEntry <entry>), Windows
     # stays a native pwsh/MSVC/WebView2 exception with NO foreign shell,
-    # macOS keeps native bundle jobs for BOTH architectures (the
-    # driver-dependent macOS UI/E2E job is task-2.4-blocked and intentionally
-    # not wired), actions are pinned by commit SHA, no Dagger Cloud token or
+    # macOS keeps native bundle jobs for BOTH architectures (the task 2.4
+    # macOS cold-launch/driver spike is wired as its own native job — CT15),
+    # actions are pinned by commit SHA, no Dagger Cloud token or
     # secret is required, every gate is required, and failure evidence is
     # published (Req 7.1-7.5, 8.4, 12.5, 13.3, 13.4). Static contract
     # assertions only: the first live Actions run happens on push — the
@@ -1017,8 +1017,8 @@ try {
     $ctUploadUses = @($ctUses | Where-Object { $_ -like 'actions/upload-artifact@*' })
     Assert-That {
         $ctAlwaysCount -ge 8 -and
-        $ctUploadUses.Count -eq 7
-    } 'CT14w every job publishes its reports/artifacts via if: always() uploads (failure evidence included)'
+        $ctUploadUses.Count -eq 8
+    } 'CT14w every job publishes its reports/artifacts via if: always() uploads (failure evidence included; 8 upload steps across the 7 jobs incl. the task 2.4 macOS spike)'
     Assert-That {
         $ctWf -notmatch 'DAGGER_CLOUD_TOKEN' -and
         $ctWf -notmatch 'cloud-token' -and
@@ -1033,9 +1033,82 @@ try {
     } 'CT14z Actions node version matches the ci-versions.json node pin'
     Assert-That {
         $ctWf -match [regex]::Escape('task 2.4') -and
-        $ctWf -match 'BLOCKED' -and
+        $ctWf -match [regex]::Escape('CI-runner spike') -and
         $ctWf -match [regex]::Escape('never substitute')
-    } 'CT14aa the workflow records the blocked macOS driver scope (task 2.4) and never presents Linux-container results as native validation'
+    } 'CT14aa the workflow records the task 2.4 macOS driver scope (converted CI-runner spike, user decision 2026-11-11) and never presents Linux-container results as native validation'
+
+    # ─── CT15: task 2.4 — macOS built-app cold launch + WebdriverIO
+    # Tauri-service driver proof as a CI-runner spike (user decision
+    # 2026-11-11: no macOS dev host exists, so the spike runs on an Actions
+    # macOS runner). Design mandate (design.md "Testing Strategy → Delivery
+    # gates and brownfield coverage"): drive macOS through the WebdriverIO
+    # Tauri service EMBEDDED WebDriver server — never safaridriver, never
+    # direct tauri-driver (neither drives WKWebView). The job must fail
+    # loudly with exported evidence on any driver failure (Req 12.5, 12.8),
+    # isolate its app data from the runner profile (Req 12.7), and keep the
+    # spike scoped away from a top-level e2e/ directory (linux-e2e contract).
+    Write-Output '-- contract: CT15 task 2.4 macOS cold-launch spike job: embedded Tauri-service driver, isolation, fail-loudly verdict, no e2e/ flip --'
+
+    $ctSpikeBlock = [regex]::Match($ctWf, '(?ms)^  macos-cold-launch-e2e-spike:.*?(?=^  [a-z][a-z0-9-]*:|\z)').Value
+    Assert-That {
+        $ctSpikeBlock -ne '' -and
+        $ctSpikeBlock -match 'runs-on:\s*macos-15'
+    } 'CT15a the task 2.4 spike job exists on the explicit macos-15 (aarch64) runner image — native macOS validation, never a container substitute (Req 12.5, 12.8)'
+    Assert-That {
+        $ctSpikeBlock -match [regex]::Escape('npx tauri build --target aarch64-apple-darwin') -and
+        $ctSpikeBlock -match ('rustup toolchain install ' + [regex]::Escape($ctPins.rust.toolchain)) -and
+        $ctSpikeBlock -match ('node-version:\s*"?' + [regex]::Escape($ctPins.node.version))
+    } 'CT15b the spike builds the UNMODIFIED old-stack app with the proven macos-bundle command and the ci-versions.json rust/node pins'
+    Assert-That {
+        $ctSpikeBlock -notmatch 'dagger/dagger-for-github' -and
+        $ctWf -notmatch 'safaridriver' -and
+        $ctWf -notmatch 'crabnebula' -and
+        $ctWf -notmatch 'CN_API_KEY'
+    } 'CT15c macOS stays a native exception; the driver path is neither safaridriver nor the secret-keyed CrabNebula driver (design.md embedded-server mandate)'
+    $ctWdioConfPath = Join-Path $RepoRoot 'scripts\macos\e2e-spike\wdio.conf.js'
+    $ctWdioConf = ''
+    if (Test-Path -LiteralPath $ctWdioConfPath -PathType Leaf) { $ctWdioConf = Get-Content -LiteralPath $ctWdioConfPath -Raw }
+    Assert-That {
+        $ctWdioConf -ne '' -and
+        $ctWdioConf -match [regex]::Escape("'@wdio/tauri-service'") -and
+        $ctWdioConf -match [regex]::Escape("driverProvider: 'embedded'") -and
+        $ctWdioConf -match [regex]::Escape('DRIFT_APP_BINARY')
+    } 'CT15d the spike wdio config drives the built app through the @wdio/tauri-service embedded WebDriver server (design.md: direct tauri-driver/safaridriver does not drive WKWebView)'
+    $ctSpikePkgPath = Join-Path $RepoRoot 'scripts\macos\e2e-spike\package.json'
+    $ctSpikePkg = $null
+    if (Test-Path -LiteralPath $ctSpikePkgPath -PathType Leaf) {
+        try { $ctSpikePkg = Get-Content -LiteralPath $ctSpikePkgPath -Raw | ConvertFrom-Json } catch { $ctSpikePkg = $null }
+    }
+    Assert-That {
+        $null -ne $ctSpikePkg -and
+        $null -ne $ctSpikePkg.devDependencies -and
+        $null -ne $ctSpikePkg.devDependencies.'@wdio/tauri-service' -and
+        $null -ne $ctSpikePkg.devDependencies.webdriverio -and
+        $ctSpikePkg.devDependencies.webdriverio -match '^9\.' -and
+        @($ctSpikePkg.devDependencies.PSObject.Properties | Where-Object { "$($_.Value)" -notmatch '^\d+\.\d+\.\d+$' }).Count -eq 0
+    } 'CT15e spike npm deps are exact-pinned (no ^/~ ranges) on the WebdriverIO 9 line with @wdio/tauri-service (design.md Allowed Dependencies; service peer is webdriverio ^9)'
+    $ctSpikeShPath = Join-Path $RepoRoot 'scripts\macos\cold-launch-spike.sh'
+    $ctSpikeSh = ''
+    if (Test-Path -LiteralPath $ctSpikeShPath -PathType Leaf) { $ctSpikeSh = Get-Content -LiteralPath $ctSpikeShPath -Raw }
+    Assert-That {
+        $ctSpikeSh -match 'export HOME=' -and
+        $ctSpikeSh -match [regex]::Escape('run-home') -and
+        $ctSpikeSh -match 'export TMPDIR='
+    } 'CT15f the spike harness scopes HOME and TMPDIR into a per-run evidence tree — Tauri app data and WKWebView state are isolated from the runner user profile (Req 12.7)'
+    Assert-That {
+        $ctSpikeBlock -match [regex]::Escape('cold-launch-driver-status.json') -and
+        $ctSpikeBlock -match [regex]::Escape('first-usable-state.png') -and
+        $ctSpikeBlock -match 'if:\s*always\(\)'
+    } 'CT15g the spike verdict fails the job on a missing/not-ok status or an ok-without-screenshot fake pass, and evidence uploads run if: always() (Req 12.5, 12.8)'
+    Assert-That {
+        -not (Test-Path -LiteralPath (Join-Path $RepoRoot 'e2e')) -and
+        (Test-Path -LiteralPath $ctSpikeShPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $ctWdioConfPath -PathType Leaf)
+    } 'CT15h the spike lives under scripts/macos/ and creates NO top-level e2e/ directory — the linux-e2e e2e/-absence contract stays untouched until group 12 wires the real suite'
+    Assert-That {
+        $ctWf -match [regex]::Escape('native macOS') -and
+        $ctSpikeBlock -match 'timeout-minutes:'
+    } 'CT15i the workflow labels the spike native macOS validation and bounds the job with a timeout (3h cap spirit; runner wait excluded)'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.

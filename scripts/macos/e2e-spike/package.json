@@ -1,0 +1,18 @@
+{
+  "name": "drift-macos-e2e-spike",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Task 2.4 CI-runner spike: minimal WebdriverIO config driving the built Drift app on macOS through the @wdio/tauri-service embedded WebDriver server. Deliberately separate from the repo-root dependency graph (old stack stays untouched); exact pins only — no lockfile can be generated on the current dev host (registry unreachable there), so the CI job runs npm install against these exact direct pins. The full suite + root lockfile land with group 11/12.",
+  "scripts": {
+    "test:e2e": "wdio run wdio.conf.js"
+  },
+  "devDependencies": {
+    "@wdio/cli": "9.31.9",
+    "@wdio/local-runner": "9.31.9",
+    "@wdio/mocha-framework": "9.31.9",
+    "@wdio/spec-reporter": "9.31.2",
+    "@wdio/tauri-service": "1.5.1",
+    "webdriverio": "9.31.9"
+  }
+}

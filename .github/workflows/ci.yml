@@ -15,9 +15,14 @@
 # Full command contract: .dagger/README.md.
 #
 # Scope notes (honest limitations):
-# - task 2.4 (macOS WebdriverIO Tauri-service driver proof) is BLOCKED — no
-#   macOS host — so the macOS jobs below are bundle jobs only; no
-#   driver-dependent macOS UI/E2E step is wired yet (later spec tasks).
+# - task 2.4 (macOS WebdriverIO Tauri-service driver proof) is wired as a
+#   CI-runner spike — converted per user decision 2026-11-11 because no
+#   macOS host exists in this environment. The macos-cold-launch-e2e-spike
+#   job below builds the unmodified old-stack app on a real macOS runner
+#   (native macOS validation — never a container substitute) and attempts
+#   the embedded-server driver session; it fails loudly if the driver proof
+#   fails, with evidence uploaded if: always(). The full macOS UI/E2E suite
+#   remains later spec work (group 12).
 # - The Windows job wires the native tier/build gates and installer (Req
 #   8.4); its driver-dependent UI/E2E work is likewise later spec work.
 #
@@ -242,3 +247,75 @@ jobs:
           name: macos-bundle-${{ matrix.target }}
           path: src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
           if-no-files-found: error
+
+  # ─── Native macOS exception: task 2.4 CI-runner spike (user decision ───
+  # 2026-11-11 — no macOS dev host exists in this environment) ───
+  # SPIKE job, not a duplicate of macos-bundle: build the UNMODIFIED
+  # old-stack app on a real macOS runner (this is native macOS validation —
+  # Linux-container results never substitute for it), then (1) prove
+  # built-app cold launch at the OS level (Req 12.8) and (2) attempt the
+  # WebdriverIO Tauri-service EMBEDDED WebDriver session per design.md
+  # ("Use the WebdriverIO Tauri service embedded macOS server; direct
+  # tauri-driver does not drive WKWebView" — Testing Strategy, "Delivery
+  # gates and brownfield coverage"). The job FAILS LOUDLY if the driver
+  # proof fails (Req 12.5, 12.8); evidence (status, screenshots, wdio
+  # output, app logs, exit codes) uploads if: always().
+  macos-cold-launch-e2e-spike:
+    name: "macos-cold-launch-e2e-spike (task 2.4: built-app cold launch + Tauri-service embedded driver)"
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.23.4" # pinned — .config/ci-versions.json node.version
+      - name: Install pinned Rust toolchain + aarch64 target
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          rustup default 1.98.1
+          rustup target add aarch64-apple-darwin
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build Tauri app (unmodified old stack, same command as macos-bundle)
+        run: npx tauri build --target aarch64-apple-darwin
+      - name: Install pinned spike dependencies (exact versions, no lockfile — research.md task 2.4)
+        run: npm install --no-fund --no-audit
+        working-directory: scripts/macos/e2e-spike
+      - name: Run the task 2.4 spike (OS cold launch + embedded-driver session; evidence always exported)
+        run: |
+          tr -d '\r' < scripts/macos/cold-launch-spike.sh > /tmp/cold-launch-spike.sh
+          bash /tmp/cold-launch-spike.sh
+        env:
+          DRIFT_EVIDENCE_DIR: ${{ github.workspace }}/ci-artifacts/macos-e2e-spike
+          DRIFT_APP_BINARY: ${{ github.workspace }}/src-tauri/target/aarch64-apple-darwin/release/rdp-client
+      - name: Spike verdict — fail loudly unless the built-app driver proof passed (no fake pass)
+        if: always()
+        run: |
+          python3 - "$PWD/ci-artifacts/macos-e2e-spike" <<'PY'
+          import json, os, sys
+          evidence = sys.argv[1]
+          status_path = os.path.join(evidence, "cold-launch-driver-status.json")
+          if not os.path.isfile(status_path):
+              print("no cold-launch-driver-status.json exported - an exit-0 spike without its status is a fake pass (Req 12.5, 12.8)")
+              sys.exit(1)
+          try:
+              status = json.load(open(status_path))
+          except ValueError as error:
+              print(f"invalid cold-launch-driver-status.json: {error}")
+              sys.exit(1)
+          if status.get("ok") is not True:
+              print(f"macOS cold-launch/driver spike FAILED (reason: {status.get('reason')}) - exported evidence in {evidence} (fail loudly, Req 12.5, 12.8)")
+              sys.exit(1)
+          shot = os.path.join(evidence, "first-usable-state.png")
+          if not (os.path.isfile(shot) and os.path.getsize(shot) > 4096):
+              print("ok=true but no non-trivial first-usable-state screenshot exported - missing evidence fails the job (no fake pass)")
+              sys.exit(1)
+          print(f"macOS cold-launch driver proof ok: {status}")
+          PY
+      - name: Publish spike evidence (status, screenshots, wdio output, app logs)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-cold-launch-e2e-spike-evidence
+          path: ci-artifacts/macos-e2e-spike/
+          if-no-files-found: warn
