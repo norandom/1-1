@@ -890,7 +890,12 @@ function Invoke-DaggerTier {
        linux-build entry also chains `export --path` (AppImage/deb + build
        log), and the tier FAILS when a green call did not actually export
        the bundle artifacts/log — missing artifacts fail the job (Req 7.2,
-       7.3; no fake pass). Linux containers are not native Windows/macOS
+       7.3; no fake pass). Task 2.5: the linux-e2e entry chains
+       `export --path` (cold-launch status, screenshots incl. the FAILURE
+       screenshot, logs) and the tier then reads the exported
+       cold-launch-status.json — a FAILED cold launch fails the tier with
+       the failure screenshot exported (Req 12.1, 12.5, 12.7, 12.8; no
+       fake pass). Linux containers are not native Windows/macOS
        validation (design.md "CI ownership and reuse decisions"). Returns
        the dagger exit code, or 1 when rejected before invocation. #>
     [CmdletBinding()]
@@ -983,6 +988,10 @@ function Invoke-DaggerTier {
     $junitExported = @()
     $bundleArtifacts = @()
     $bundleLog = $null
+    $coldLaunchOk = $null
+    $coldLaunchReason = $null
+    $coldLaunchShot = $null
+    $coldLaunchFailShot = $null
     $callName = ''
     if ($pins) { $runnerHost = "$($pins.dagger.runnerHostScheme)://$($pins.dagger.engineImage)" }
     if ($failures.Count -eq 0) {
@@ -1004,8 +1013,12 @@ function Invoke-DaggerTier {
             if ($stagedSource -ne '') { $daggerArgs += @('--source', $stagedSource) }
             # Artifact-emitting entries return their /test-results Directory:
             # chain the CLI's export so the evidence lands under scoped
-            # outputs. Task 2.2 adds linux-build (AppImage/deb + build log).
-            if ($DaggerEntry -in @('frontend', 'rust-checks', 'linux-build')) {
+            # outputs. Task 2.2 adds linux-build (AppImage/deb + build log);
+            # task 2.5 adds linux-e2e (cold-launch status, screenshots incl.
+            # the failure screenshot, logs) — the export runs BEFORE the
+            # tier's cold-launch verdict so failed launches still export
+            # their failure evidence.
+            if ($DaggerEntry -in @('frontend', 'rust-checks', 'linux-build', 'linux-e2e')) {
                 $artifactDir = Get-ScopedOutputPath -BuildArtifactsRoot $BuildArtifactsRoot -ProjectName $ProjectName -Subdir "$ReportSubdir\artifacts\$DaggerEntry"
                 $daggerArgs += @('export', '--path', $artifactDir)
             }
@@ -1065,6 +1078,58 @@ function Invoke-DaggerTier {
                     [Console]::WriteLine("bundle log: $($bundleLog.FullName)")
                 }
             }
+            # Task 2.5 cold-launch gate (Req 12.1, 12.5, 12.7, 12.8): the
+            # linux-e2e entry returns its evidence Directory on BOTH verdicts
+            # (a failed cold launch does not throw in the module — throwing
+            # would make the export chain impossible and lose the failure
+            # screenshot), so THIS tier is the fail-loudly gate: parse the
+            # exported cold-launch-status.json and fail the job when ok is
+            # not true or the evidence is missing. No fake pass: an exit-0
+            # dagger call never bypasses the cold-launch verdict.
+            if ($DaggerEntry -eq 'linux-e2e') {
+                $coldStatusFile = $null
+                $coldStatus = $null
+                if ($null -ne $artifactDir -and (Test-Path -LiteralPath $artifactDir)) {
+                    $coldStatusFile = Get-ChildItem -LiteralPath $artifactDir -Recurse -File -Filter 'cold-launch-status.json' -ErrorAction SilentlyContinue | Select-Object -First 1
+                    $coldShots = @(Get-ChildItem -LiteralPath $artifactDir -Recurse -File -Filter 'cold-launch-screenshot.png' -ErrorAction SilentlyContinue)
+                    $coldFailShots = @(Get-ChildItem -LiteralPath $artifactDir -Recurse -File -Filter 'cold-launch-failure-screenshot.png' -ErrorAction SilentlyContinue)
+                    if ($coldShots.Count -gt 0) { $coldLaunchShot = $coldShots[0].FullName }
+                    if ($coldFailShots.Count -gt 0) { $coldLaunchFailShot = $coldFailShots[0].FullName }
+                }
+                if ($null -eq $coldStatusFile) {
+                    $coldFailureMessage = "linux-e2e cold-launch evidence missing after a successful dagger call: no cold-launch-status.json under '$artifactDir' (Req 12.5, 12.8 — the built-app Linux cold launch must be proven; an exit-0 call without its status is a fake pass)"
+                    $failures.Add($coldFailureMessage)
+                    [Console]::Error.WriteLine("[FAIL] $coldFailureMessage")
+                } else {
+                    try {
+                        $coldStatus = Get-Content -LiteralPath $coldStatusFile.FullName -Raw | ConvertFrom-Json
+                    } catch {
+                        $coldStatus = $null
+                    }
+                    if ($null -eq $coldStatus) {
+                        $coldFailureMessage = "linux-e2e cold-launch status at '$($coldStatusFile.FullName)' is not valid JSON — the status contract is part of the task 2.5 evidence gate"
+                        $failures.Add($coldFailureMessage)
+                        [Console]::Error.WriteLine("[FAIL] $coldFailureMessage")
+                    } else {
+                        $coldLaunchOk = [bool]$coldStatus.ok
+                        if ($coldStatus.PSObject.Properties['reason']) { $coldLaunchReason = [string]$coldStatus.reason }
+                        if (-not $coldLaunchOk) {
+                            $failShotNote = if ($null -ne $coldLaunchFailShot) { " — failure screenshot exported: $coldLaunchFailShot" } else { ' (no failure screenshot was exported — the harness reason explains why)' }
+                            $coldFailureMessage = "linux-e2e cold launch FAILED (harness reason: '$coldLaunchReason')$failShotNote; the tier fails loudly, no fake pass (Req 12.5, 12.8)"
+                            $failures.Add($coldFailureMessage)
+                            [Console]::Error.WriteLine("[FAIL] $coldFailureMessage")
+                        } elseif ($null -eq $coldLaunchShot) {
+                            $coldFailureMessage = "linux-e2e cold launch passed but the first-usable-state screenshot was not exported under '$artifactDir' — missing evidence fails the job (no fake pass)"
+                            $failures.Add($coldFailureMessage)
+                            [Console]::Error.WriteLine("[FAIL] $coldFailureMessage")
+                        } else {
+                            $coldColors = ''
+                            if ($coldStatus.PSObject.Properties['distinctColors']) { $coldColors = " ($([string]$coldStatus.distinctColors) distinct colors)" }
+                            [Console]::WriteLine("cold launch: PASS — first-usable-state screenshot exported$coldColors`: $coldLaunchShot")
+                        }
+                    }
+                }
+            }
         } else {
             [Console]::Error.WriteLine("dagger: exit $daggerExit (entry '$DaggerEntry' failed; exit code propagated, Req 7.3, 13.3)")
             [Console]::Error.WriteLine(($outputLines | Select-Object -Last 20) -join [Environment]::NewLine)
@@ -1097,6 +1162,10 @@ function Invoke-DaggerTier {
                 junitExported        = @($junitExported)
                 bundleArtifactsExported = @($bundleArtifacts | ForEach-Object { $_.FullName })
                 bundleLogExported    = $(if ($null -ne $bundleLog) { $bundleLog.FullName } else { $null })
+                coldLaunchOk         = $coldLaunchOk
+                coldLaunchReason     = $coldLaunchReason
+                coldLaunchScreenshotExported = $coldLaunchShot
+                coldLaunchFailureScreenshotExported = $coldLaunchFailShot
                 failures             = $failures
                 totalDurationSeconds = [Math]::Round($totalStopwatch.Elapsed.TotalSeconds, 2)
             }

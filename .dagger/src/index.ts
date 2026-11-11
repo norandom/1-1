@@ -20,9 +20,13 @@
  *                  VERIFIES the AppImage and deb exist (missing artifacts
  *                  throw — Req 7.2, 7.3), and returns /test-results with
  *                  the bundles + logs for the tier's scoped host export.
- *   linux-e2e    — validates E2E prerequisites and fails loudly while the
- *                  e2e/ suite does not exist (spec tasks 2.5+/12.x own the
- *                  suite and driver wiring); it never fakes a pass.
+ *   linux-e2e    — executable cold-launch CI gate (task 2.5): reuses the
+ *                  linux-build bundle pipeline as its prerequisite, then
+ *                  launches the BUILT AppImage headless under Xvfb with
+ *                  isolated XDG app data via scripts/linux/cold-launch.sh.
+ *                  Returns /test-results/e2e with the status JSON,
+ *                  screenshots (incl. the failure screenshot) and logs;
+ *                  the tier fails when ok != true — no fake pass.
  *   contract     — prints the machine-readable command contract (the twin of
  *                  .dagger/README.md).
  *
@@ -67,6 +71,14 @@ const LINUX_BUNDLE_TARGET = "x86_64-unknown-linux-gnu"
 const LINUX_BUNDLE_DIR = "src-tauri/target/" + LINUX_BUNDLE_TARGET + "/release/bundle"
 const LINUX_APPIMAGE_GLOB = LINUX_BUNDLE_DIR + "/appimage/*.AppImage"
 const LINUX_DEB_GLOB = LINUX_BUNDLE_DIR + "/deb/*.deb"
+
+/** In-container evidence layout for the linux-e2e cold-launch entry (task
+ * 2.5; mirrored in pins.ts and scripts/linux/cold-launch.sh): the harness
+ * writes its status, screenshots and logs under /test-results/e2e, and the
+ * entry returns that subdirectory so the tier's scoped export stays lean
+ * (the heavy bundles stay in the linux-build artifacts). */
+const LINUX_E2E_DIR = "/test-results/e2e"
+const LINUX_E2E_STATUS = LINUX_E2E_DIR + "/cold-launch-status.json"
 
 /**
  * Enforce the task 2.1 source contract: a source directory must never include
@@ -246,6 +258,10 @@ export class Drift {
         "--no-install-recommends",
         ...pins.tauriLinuxAptPackages,
         ...pins.tauriLinuxBundleAptPackages,
+        // Task 2.5: the cold-launch runtime extras ride the SAME cached
+        // layer (before the source mount) so linux-build and linux-e2e
+        // share one provisioning; linux-build simply does not use them.
+        ...pins.tauriLinuxE2EAptPackages,
       ])
       .withExec(["node", "--version"])
       .withExec(["npm", "--version"])
@@ -328,8 +344,9 @@ export class Drift {
   }
 
   /**
-   * Linux bundle build (Req 7.2; task 2.2). Reuses the repository's current
-   * Tauri packaging — npm ci plus `npx tauri build --target
+   * Linux bundle build (Req 7.2; task 2.2) — shared pipeline for linuxBuild
+   * and linuxE2E (task 2.5). Reuses the repository's current Tauri
+   * packaging — npm ci plus `npx tauri build --target
    * x86_64-unknown-linux-gnu` (the same command .github/workflows/ci.yml
    * runs), driven by src-tauri/tauri.conf.json (beforeBuildCommand
    * `npm run build`; bundle targets "all" → AppImage/deb on Linux) — inside
@@ -337,13 +354,15 @@ export class Drift {
    * /test-results/linux-build.log; after a successful build the produced
    * AppImage and deb are VERIFIED (missing artifacts throw — a green build
    * without bundles is a fake pass and missing artifacts fail the job, Req
-   * 7.3), and the bundles + logs are returned as the /test-results Directory
-   * for the tier's scoped host export (`dagger ... export --path`).
-   * Linux-container bundle results never substitute for native Windows or
-   * macOS artifacts.
+   * 7.2, 7.3), and the verified bundles + logs are staged under
+   * /test-results. `linuxBuild` returns that Directory for the tier's
+   * scoped host export; `linuxE2E` chains the cold-launch harness on top
+   * of the SAME container so identical inputs replay the build layers from
+   * the engine cache (the 2.5 cold launch never rebuilds what 2.2 already
+   * cached). Linux-container bundle results never substitute for native
+   * Windows or macOS artifacts.
    */
-  @func()
-  async linuxBuild(source: Directory): Promise<Directory> {
+  private async linuxBundleBuildContainer(source: Directory): Promise<Container> {
     await assertNeverImportHostArtifacts(source)
     const required = ["package.json", "package-lock.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml"]
     const missing: string[] = []
@@ -455,15 +474,44 @@ export class Drift {
         "ls -lR /test-results/bundle > /test-results/bundle-manifest.txt; cat /test-results/bundle-manifest.txt",
     ])
     await done.sync()
+    return done
+  }
+
+  /** Linux bundle export (Req 7.2; task 2.2): the shared bundle pipeline's
+   * /test-results with the verified AppImage/deb + logs, for the tier's
+   * scoped host export (`dagger ... export --path`). */
+  @func()
+  async linuxBuild(source: Directory): Promise<Directory> {
+    const done = await this.linuxBundleBuildContainer(source)
     return done.directory("/test-results")
   }
 
   /**
-   * Linux E2E contract (Req 12.5). The e2e/ suite does not exist yet (spec
-   * tasks 2.5+/12.x own the WebdriverIO suite and the WebKitGTK driver
-   * wiring), so this entry point validates prerequisites and fails loudly
-   * instead of faking a pass. Once the suite lands, this is the single
-   * place that runs it in the pinned container.
+   * Linux E2E — executable built-app cold-launch CI gate (Req 12.1, 12.5,
+   * 12.7, 12.8; task 2.5). Chains the cold-launch harness
+   * (scripts/linux/cold-launch.sh, staged with the source) on top of the
+   * SAME verified bundle container as linux-build: the built AppImage is
+   * launched headless under Xvfb with per-run isolated XDG app data, must
+   * reach first usable state (Drift window mapped, process alive, PAINTED
+   * screenshot) and shut down gracefully. The harness writes its verdict
+   * and evidence to /test-results/e2e (status JSON, screenshot, FAILURE
+   * screenshot on failure, logs), and this entry returns that Directory.
+   *
+   * Fail-loudly contract (no fake pass): prerequisite failures (missing
+   * bundle inputs, failing build, missing bundles, missing harness, or a
+   * harness that produced NO status at all) THROW — a dagger call that
+   * cannot produce evidence must not exit 0. A FAILED cold launch
+   * (ok=false), in contrast, does NOT throw here: the evidence Directory is
+   * returned precisely so the tier can `export --path` the failure
+   * screenshot into the scoped artifacts directory and THEN fail the job
+   * with exit 1 (scripts/Invoke-CI.ps1 reads cold-launch-status.json);
+   * throwing would lose the failure evidence because a failed dagger call
+   * cannot chain an export.
+   *
+   * The full WebdriverIO suite on the WebKitGTK driver is later spec work
+   * (tasks 12.x) and will extend this entry; until then this is the
+   * minimal cold-launch proof. Linux-container E2E results never
+   * substitute for the native Windows/macOS E2E runs.
    *
    * Callable as `dagger call linux-e-2-e`: the dagger v0.21.11 TypeScript
    * SDK kebab-cases method names and splits digit/letter boundaries, so
@@ -471,18 +519,31 @@ export class Drift {
    * scripts/Invoke-CI.ps1 maps the contract name `linux-e2e` to it).
    */
   @func()
-  async linuxE2E(source: Directory): Promise<string> {
-    const entries = await source.entries()
-    if (!entries.includes("e2e")) {
+  async linuxE2E(source: Directory): Promise<Directory> {
+    const built = await this.linuxBundleBuildContainer(source)
+    // tr strips any stray CR so a Windows checkout of the harness cannot
+    // break the in-container shell (defense in depth; the repo keeps LF).
+    const runCtr = built.withExec(
+      [
+        "sh",
+        "-c",
+        "tr -d '\\r' < scripts/linux/cold-launch.sh > /tmp/cold-launch.sh && sh /tmp/cold-launch.sh",
+      ],
+      { expect: ReturnType.Any }
+    )
+    await runCtr.sync()
+    const status = await readText(runCtr.file(LINUX_E2E_STATUS))
+    if (status === "") {
       throw new Error(
-        "linux-e2e: prerequisite e2e/ suite is not present in the mounted source; " +
-          "it is delivered by spec tasks 2.5+/12.x (Req 12.1, 12.5). This entry point " +
-          "refuses to fake a pass — Linux-container E2E results also never substitute " +
-          "for the native Windows/macOS E2E runs."
+        "linux-e2e: the cold-launch harness produced no /test-results/e2e/cold-launch-status.json — " +
+          "the run failed before any evidence could be collected (missing harness in the staged " +
+          "source or a crashed harness; the step log is in the tier output). This entry point " +
+          "refuses to fake a pass (Req 12.5, 12.8)"
       )
     }
-    const entry = contract.containerEntries.find((e) => e.entry === "linux-e2e")
-    return JSON.stringify(entry)
+    // ok=false is handled by the tier AFTER the evidence export (see the
+    // docblock): return the evidence directory either way.
+    return runCtr.directory(LINUX_E2E_DIR)
   }
 
   /**

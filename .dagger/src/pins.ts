@@ -47,6 +47,17 @@ export const pins = {
   // used by the bundler's binary inspection, libfuse2 covers linuxdeploy's
   // AppImage runtime when it does not extract-and-run.
   tauriLinuxBundleAptPackages: ["file", "libfuse2"],
+  // Task 2.5 cold-launch runtime extras (the built app must RUN, not just
+  // build; provisioned once as the same cached-layer pattern): xvfb is the
+  // headless display, x11-utils proves the display is up (xdpyinfo) and
+  // records the mapped window (xwininfo), xdotool finds the Drift window
+  // and sends the WM_DELETE_WINDOW graceful close, imagemagick captures the
+  // evidence screenshots (import) and counts distinct colors (identify) as
+  // the painted-UI proof. The WebKitGTK runtime libraries themselves come
+  // with libwebkit2gtk-4.1-dev above (proved in the task 2.5 spike: the app
+  // renders through Mesa's llvmpipe software rasterizer pulled in by the
+  // GTK stack — no GPU, FUSE or dbus daemon needed).
+  tauriLinuxE2EAptPackages: ["xvfb", "x11-utils", "xdotool", "imagemagick"],
 } as const
 
 /**
@@ -164,10 +175,29 @@ export const contract = {
     },
     {
       entry: "linux-e2e",
-      image: pins.rust.image,
-      runsOn: "Linux container (Dagger) — WebKitGTK driver (design.md E2E stack)",
-      commands: ["npm ci", "npm run test:e2e -- --spec e2e/specs/**"],
-      status: "blocked until the e2e/ suite lands (spec tasks 2.5+/12.x); the entry point refuses to fake a pass and fails loudly when prerequisites are missing",
+      image: pins.rust.image + " + " + pins.node.image,
+      runsOn: "Linux container (Dagger) — WebKitGTK + Xvfb cold launch (design.md E2E stack)",
+      commands: [
+        "rebuild/verify the bundle via the shared linux-build pipeline (missing bundles throw)",
+        "apt-get install " + pins.tauriLinuxE2EAptPackages.join(" ") + " (once, cached layer)",
+        "sh scripts/linux/cold-launch.sh — Xvfb display, per-run isolated HOME/XDG app data (Req 12.7), AppImage --appimage-extract-and-run (no FUSE)",
+        "first-usable-state proof: Drift window mapped + process alive + painted screenshot (distinct colors)",
+        "graceful WM_DELETE_WINDOW shutdown; status JSON + screenshots + logs under /test-results/e2e",
+      ],
+      emits: {
+        status: "/test-results/e2e/cold-launch-status.json",
+        screenshot: "/test-results/e2e/cold-launch-screenshot.png",
+        failureScreenshot: "/test-results/e2e/cold-launch-failure-screenshot.png (captured before failing)",
+        returned: "Directory (export with: dagger call linux-e2e --source <staged> export --path <dir>)",
+      },
+      caches: [
+        cacheVolumeIds.npmRegistry + " @ /root/.npm",
+        cacheVolumeIds.cargoRegistry + " @ /usr/local/cargo/registry",
+        cacheVolumeIds.cargoGit + " @ /usr/local/cargo/git",
+        cacheVolumeIds.cargoTarget + " @ /src/src-tauri/target",
+      ],
+      status:
+        "executable cold-launch CI gate (task 2.5): built-app Linux cold launch under Xvfb with isolated app data; a FAILED cold launch fails the tier (exit 1) after the cold-launch-failure-screenshot is exported — no fake pass. The full WebdriverIO WebKitGTK-driver suite is later spec work (12.x). Linux-container results never substitute for native Windows/macOS E2E.",
     },
   ],
   nativeTiers: [

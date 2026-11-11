@@ -642,8 +642,12 @@ try {
     Write-Output '-- contract: CT12 task 2.2 Linux bundle: AppImage/deb + logs export, missing-artifact gate --'
 
     # a) the module entry executes the bundle and returns the artifact directory
-    $ctLbBody = [regex]::Match($ctIndexTs, 'async linuxBuild\([\s\S]*?\r?\n  \}').Value
-    Assert-That { $ctLbBody -match 'Promise<Directory>' } 'CT12a linuxBuild returns the bundle artifact directory (exportable via dagger export --path)'
+    #    (task 2.5 moved the build steps into the shared linuxBundleBuildContainer
+    #    used by BOTH linuxBuild and linuxE2E — CT12a targets the entry method,
+    #    CT12c/d target the shared pipeline that performs the build+verify).
+    $ctLbEntryBody = [regex]::Match($ctIndexTs, 'async linuxBuild\([\s\S]*?\r?\n  \}').Value
+    $ctLbBody = [regex]::Match($ctIndexTs, 'linuxBundleBuildContainer\([\s\S]*?\r?\n  \}').Value
+    Assert-That { $ctLbEntryBody -match 'Promise<Directory>' } 'CT12a linuxBuild returns the bundle artifact directory (exportable via dagger export --path)'
     Assert-That { $ctIndexTs -match [regex]::Escape('npx tauri build --target') -and $ctIndexTs -match [regex]::Escape('x86_64-unknown-linux-gnu') } 'CT12b linuxBuild reuses the current Tauri packaging (npx tauri build --target x86_64-unknown-linux-gnu, the same command .github/workflows/ci.yml runs)'
     Assert-That {
         $ctIndexTs -match [regex]::Escape('"/appimage/*.AppImage"') -and
@@ -750,6 +754,139 @@ try {
         $ctReadmeLb -match [regex]::Escape('missing artifacts fail the job') -and
         $ctReadmeLb -match [regex]::Escape('linux-build.log')
     } 'CT12s .dagger/README.md documents the linux-build export convention and the missing-artifact gate'
+
+    # --- task 2.5: Linux cold-launch E2E bootstrap in Dagger — the BUILT app
+    # launches headless under Xvfb with isolated app data (Req 12.1, 12.5,
+    # 12.7, 12.8), the evidence (status, screenshots incl. the FAILURE
+    # screenshot, logs) exports through the tier, and a FAILED cold launch
+    # fails the tier with the failure screenshot exported — no fake pass.
+    # Static + child-process assertions only: no engine or container is
+    # required here (the live cold-launch run and the sabotage failure-path
+    # demonstration are recorded in the task evidence).
+
+    Write-Output '-- contract: CT13 task 2.5 linux-e2e cold launch: Xvfb launch, isolated app-data, evidence export, fail-loudly gate --'
+
+    # a) the module entry runs the real cold launch and returns the evidence
+    #    directory (exportable), reusing the bundle pipeline as prerequisite.
+    $ctE2eBody = [regex]::Match($ctIndexTs, 'async linuxE2E\([\s\S]*?\r?\n  \}').Value
+    Assert-That { $ctE2eBody -match 'Promise<Directory>' } 'CT13a linuxE2E returns the evidence directory (exportable via dagger export --path)'
+    Assert-That { $ctE2eBody -match [regex]::Escape('cold-launch.sh') -and $ctE2eBody -match [regex]::Escape('linuxBundleBuildContainer') } 'CT13b linuxE2E chains the repo cold-launch harness on top of the verified bundle pipeline (built app, prerequisite gate)'
+    Assert-That { $ctE2eBody -match [regex]::Escape('/test-results/e2e/cold-launch-status.json') } 'CT13c linuxE2E enforces the /test-results/e2e/cold-launch-status.json evidence contract'
+    Assert-That {
+        $ctE2eBody -match [regex]::Escape('ReturnType.Any') -and
+        $ctE2eBody -match [regex]::Escape('produced no /test-results/e2e/cold-launch-status.json')
+    } 'CT13d linuxE2E throws loudly when the harness produced no status (evidence loss is never a pass)'
+
+    # b) the harness script: Xvfb, isolated XDG app data, failure screenshot
+    #    BEFORE failing, graceful shutdown, no-FUSE AppImage path (Req 12.7).
+    $ctHarnessPath = Join-Path $RepoRoot 'scripts\linux\cold-launch.sh'
+    $ctHarness = ''
+    if (Test-Path -LiteralPath $ctHarnessPath -PathType Leaf) { $ctHarness = Get-Content -LiteralPath $ctHarnessPath -Raw }
+    Assert-That { $ctHarness -ne '' } 'CT13e the cold-launch harness exists at scripts/linux/cold-launch.sh (staged with the source)'
+    Assert-That {
+        $ctHarness -match 'Xvfb' -and
+        $ctHarness -match [regex]::Escape('--appimage-extract-and-run')
+    } 'CT13f the harness launches the built AppImage under Xvfb via --appimage-extract-and-run (no FUSE dependency)'
+    Assert-That {
+        $ctHarness -match [regex]::Escape('XDG_DATA_HOME') -and
+        $ctHarness -match [regex]::Escape('XDG_CONFIG_HOME') -and
+        $ctHarness -match [regex]::Escape('HOME=') -and
+        $ctHarness -notmatch [regex]::Escape('XDG_DATA_HOME=/root')
+    } 'CT13g the harness isolates app data per run (HOME + XDG_DATA_HOME/XDG_CONFIG_HOME/XDG_CACHE_HOME, never host or root state; Req 12.7)'
+    Assert-That {
+        $ctHarness -match [regex]::Escape('cold-launch-failure-screenshot') -and
+        $ctHarness -match [regex]::Escape('capture_failure_screenshot')
+    } 'CT13h the harness captures a failure screenshot BEFORE writing the failed status (screenshot-on-failure mandate)'
+    Assert-That {
+        $ctHarness -match [regex]::Escape('windowclose') -or
+        $ctHarness -match [regex]::Escape('WM_DELETE_WINDOW')
+    } 'CT13i the harness attempts graceful shutdown (WM_DELETE_WINDOW close) before any signal escalation'
+
+    # c) pins parity: the e2e runtime extras are pinned in both files and the
+    #    contract marks linux-e2e as the executable cold-launch gate.
+    $ctE2eExtras = @()
+    if ($ctPins -and $ctPins.PSObject.Properties['tauriLinuxE2EAptPackages']) { $ctE2eExtras = @($ctPins.tauriLinuxE2EAptPackages) }
+    Assert-That {
+        $ctE2eExtras.Count -gt 0 -and
+        $ctE2eExtras -contains 'xvfb' -and
+        @($ctE2eExtras | Where-Object { $ctPinsTs -notmatch [regex]::Escape(('"' + $_ + '"')) }).Count -eq 0
+    } 'CT13j the e2e apt extras (incl. xvfb) stay mirrored between ci-versions.json and pins.ts'
+    Assert-That {
+        $ctPinsTs -match [regex]::Escape('executable cold-launch CI gate (task 2.5)') -and
+        $ctPinsTs -match [regex]::Escape('cold-launch-failure-screenshot')
+    } 'CT13k the contract marks linux-e2e as the executable cold-launch gate with the failure-screenshot evidence contract'
+
+    # d) tier behavior through shims (hermetic temp BuildArtifactsRoot so the
+    #    real evidence directory is never touched): export chaining, the
+    #    failed-cold-launch gate, and the missing-status no-fake-pass gate.
+    $ctE2eRoot = Join-Path $TempRoot 'e2e-artifacts-root'
+    $ctE2eRecOut = Join-Path $ctDaggerShimDir 'e2e-recorder-out.txt'
+    $ctE2e1 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'linux-e2e', '-DaggerCliPath', $ctRecorder, '-BuildArtifactsRoot', $ctE2eRoot) -Environment @{ 'DRIFT_DAGGER_RECORDER_OUT' = $ctE2eRecOut }
+    Assert-That { $ctE2e1.ExitCode -eq 7 } 'CT13l linux-e2e dagger tier propagates the shim exit code through the staging/export flow'
+    $ctE2eRec = ''
+    if (Test-Path -LiteralPath $ctE2eRecOut -PathType Leaf) { $ctE2eRec = Get-Content -LiteralPath $ctE2eRecOut -Raw }
+    Assert-That { $ctE2eRec -match [regex]::Escape('linux-e-2-e') -and $ctE2eRec -match 'export' -and $ctE2eRec -match '--path' -and $ctE2eRec -match [regex]::Escape('artifacts\linux-e2e') } 'CT13m linux-e2e entry call chains export --path into the scoped artifacts directory (evidence incl. failure screenshots)'
+
+    #    ok-shim with three faces: 0 = exports nothing (no fake pass), 1 =
+    #    exports passing cold-launch evidence, 2 = exports FAILED cold-launch
+    #    evidence with the failure screenshot.
+    $ctColdShim = Join-Path $ctDaggerShimDir 'dagger-cold.ps1'
+    Set-Content -LiteralPath $ctColdShim -Value @(
+        'param()'
+        'if ($env:DRIFT_DAGGER_RECORDER_OUT) { "ARGS=$($args -join '' '')" | Set-Content -LiteralPath $env:DRIFT_DAGGER_RECORDER_OUT -Encoding ascii }'
+        '$pathIndex = [array]::IndexOf($args, "--path")'
+        'if ($pathIndex -ge 0 -and ($pathIndex + 1) -lt $args.Count) {'
+        '  $exportDir = $args[$pathIndex + 1]'
+        '  New-Item -ItemType Directory -Path $exportDir -Force | Out-Null'
+        '  if ($env:DRIFT_DAGGER_FAKE_COLD_LAUNCH -eq "1") {'
+        '    Set-Content -LiteralPath (Join-Path $exportDir "cold-launch-status.json") -Value ''{"ok":true,"windowId":"0x3c00007","exitCode":0,"shutdownPath":"graceful-close","distinctColors":128}'''
+        '    Set-Content -LiteralPath (Join-Path $exportDir "cold-launch-screenshot.png") -Value "fake-png"'
+        '  }'
+        '  if ($env:DRIFT_DAGGER_FAKE_COLD_LAUNCH -eq "2") {'
+        '    Set-Content -LiteralPath (Join-Path $exportDir "cold-launch-status.json") -Value ''{"ok":false,"reason":"drift-window-not-found","exitCode":1}'''
+        '    Set-Content -LiteralPath (Join-Path $exportDir "cold-launch-failure-screenshot.png") -Value "fake-failure-png"'
+        '  }'
+        '}'
+        'exit 0'
+    ) -Encoding utf8
+    $ctE2e2 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'linux-e2e', '-DaggerCliPath', $ctColdShim, '-BuildArtifactsRoot', $ctE2eRoot) -Environment @{ 'DRIFT_DAGGER_FAKE_COLD_LAUNCH' = '0' }
+    $ctE2e2Combined = "{0}`n{1}" -f $ctE2e2.StdOut, $ctE2e2.StdErr
+    Assert-That { $ctE2e2.ExitCode -eq 1 } 'CT13n exit-0 dagger call with NO cold-launch status fails the tier (no fake pass, Req 12.5, 12.8)'
+    Assert-That { $ctE2e2Combined -match [regex]::Escape('cold-launch-status.json') } 'CT13o the missing-status failure names the cold-launch status contract'
+    $ctE2e3 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'linux-e2e', '-DaggerCliPath', $ctColdShim, '-BuildArtifactsRoot', $ctE2eRoot) -Environment @{ 'DRIFT_DAGGER_FAKE_COLD_LAUNCH' = '2' }
+    $ctE2e3Combined = "{0}`n{1}" -f $ctE2e3.StdOut, $ctE2e3.StdErr
+    Assert-That { $ctE2e3.ExitCode -eq 1 } 'CT13p a FAILED cold launch (ok=false) fails the tier even though the dagger call exited 0 (fail loudly, Req 12.5)'
+    Assert-That {
+        $ctE2e3Combined -match [regex]::Escape('cold launch') -and
+        $ctE2e3Combined -match [regex]::Escape('drift-window-not-found') -and
+        $ctE2e3Combined -match [regex]::Escape('cold-launch-failure-screenshot.png')
+    } 'CT13q the failed-cold-launch failure names the harness reason and the exported failure screenshot'
+    $ctE2e3Report = Read-RustTierReport -Path (Join-Path $ctE2eRoot "$ProjectName\dagger\dagger-tier-report-linux-e2e.json")
+    Assert-That {
+        $null -ne $ctE2e3Report -and
+        $ctE2e3Report.ok -eq $false -and
+        $ctE2e3Report.coldLaunchOk -eq $false -and
+        "$ctE2e3Report.coldLaunchFailureScreenshotExported" -match [regex]::Escape('cold-launch-failure-screenshot.png')
+    } 'CT13r the failing run reports ok=false with coldLaunchOk=false and the failure screenshot recorded'
+    $ctE2e4 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'linux-e2e', '-DaggerCliPath', $ctColdShim, '-BuildArtifactsRoot', $ctE2eRoot) -Environment @{ 'DRIFT_DAGGER_FAKE_COLD_LAUNCH' = '1' }
+    Assert-That { $ctE2e4.ExitCode -eq 0 } 'CT13s exit-0 dagger call with exported ok=true status + screenshot passes the tier'
+    $ctE2e4Report = Read-RustTierReport -Path (Join-Path $ctE2eRoot "$ProjectName\dagger\dagger-tier-report-linux-e2e.json")
+    Assert-That {
+        $null -ne $ctE2e4Report -and
+        $ctE2e4Report.ok -eq $true -and
+        $ctE2e4Report.coldLaunchOk -eq $true -and
+        "$ctE2e4Report.coldLaunchScreenshotExported" -match [regex]::Escape('cold-launch-screenshot.png')
+    } 'CT13t the passing run records coldLaunchOk=true and the exported screenshot in the report'
+
+    # e) README documents the executable cold-launch gate and the Linux-only
+    #    wording (Linux-container results never substitute native validation).
+    $ctReadmeE2e = ''
+    if (Test-Path -LiteralPath (Join-Path $RepoRoot '.dagger\README.md') -PathType Leaf) { $ctReadmeE2e = Get-Content -LiteralPath (Join-Path $RepoRoot '.dagger\README.md') -Raw }
+    Assert-That {
+        $ctReadmeE2e -match [regex]::Escape('linux-e2e') -and
+        $ctReadmeE2e -match [regex]::Escape('cold-launch') -and
+        $ctReadmeE2e -match [regex]::Escape('cold-launch-failure-screenshot')
+    } 'CT13u .dagger/README.md documents the linux-e2e cold-launch gate with the failure-screenshot export'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.

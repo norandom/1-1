@@ -43,5 +43,11 @@
   "tauriLinuxBundleAptPackages": [
     "file",
     "libfuse2"
+  ],
+  "tauriLinuxE2EAptPackages": [
+    "xvfb",
+    "x11-utils",
+    "xdotool",
+    "imagemagick"
   ]
 }

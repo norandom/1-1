@@ -43,7 +43,7 @@ itself; GitHub-hosted Linux runners use their Docker engine instead.
 | `frontend`      | `node:22.23.4-bookworm` (+digest)  | `npm ci` → `npm run lint` → `npx tsc --noEmit` → `npx vitest run --reporter=default --reporter=junit --outputFile.junit=/test-results/vitest-junit.xml` → `npm run build` |
 | `rust-checks`   | `rust:1.98.1-bookworm` (+digest)   | apt Tauri libs (once, cached layer) → `rustup component add rustfmt clippy` → install `cargo-nextest 0.9.150` (pinned tarball) → `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo check` → `cargo-nextest nextest run --config-file .config/nextest.toml --profile ci --no-tests fail` → `cp src-tauri/target/nextest/ci/junit.xml /test-results/rust-junit.xml` → `cargo test --doc` |
 | `linux-build`   | `rust:1.98.1-bookworm` + `node:22.23.4-bookworm` | apt Tauri libs + bundle extras (once, cached layer) → merge `/usr/local` from the pinned node image (node+npm, no unpinned installs) → `npm ci` → `npx tauri build --target x86_64-unknown-linux-gnu` (log → `/test-results/linux-build.log`) → verify `bundle/appimage/*.AppImage` + `bundle/deb/*.deb` (missing artifacts throw) |
-| `linux-e2e`     | `rust:1.98.1-bookworm`             | `npm ci` → `npm run test:e2e` (WebKitGTK driver per design.md E2E stack) |
+| `linux-e2e`     | `rust:1.98.1-bookworm` + `node:22.23.4-bookworm` | shared `linux-build` bundle pipeline (missing bundles throw) → apt cold-launch extras `xvfb x11-utils xdotool imagemagick` (once, cached layer) → `sh scripts/linux/cold-launch.sh`: Xvfb display + isolated `HOME`/`XDG_*` app data (Req 12.7) → launch AppImage `--appimage-extract-and-run` (no FUSE) → first-usable-state proof (Drift window mapped, process alive, painted screenshot) → graceful `WM_DELETE_WINDOW` shutdown → status JSON + screenshots + logs under `/test-results/e2e` |
 | `contract`      | —                                  | prints this contract as JSON |
 
 ### Task 2.1: JUnit artifacts, gating and caches
@@ -93,9 +93,12 @@ mapping (see `src/pins.ts`, `daggerCallNames`).
   section: it runs the repo's current Tauri packaging, exports AppImage/deb
   plus the build log under `dagger/artifacts/linux-build/`, and missing
   artifacts fail the job.
-- `linux-e2e` **fails loudly while the `e2e/` suite does not exist** (spec
-  tasks 2.5+/12.x own the WebdriverIO suite and driver wiring) — it refuses
-  to fake a pass.
+- `linux-e2e` is an **executable built-app cold-launch CI gate** (task 2.5)
+  — see the task 2.5 section below: the built AppImage launches headless
+  under Xvfb with isolated app data, and a failed cold launch fails the
+  tier with the failure screenshot exported. The full WebdriverIO
+  WebKitGTK-driver suite is later spec work (tasks 12.x) and will extend
+  the same entry.
 
 ### Task 2.2: Linux bundles — AppImage/deb export and the missing-artifact gate
 
@@ -129,6 +132,43 @@ mapping (see `src/pins.ts`, `daggerCallNames`).
   flags, so the `features-default` key scheme still applies), host exports
   are scoped exports only. These are Linux-container bundle artifacts —
   they never substitute for native Windows/macOS build validation.
+
+### Task 2.5: linux-e2e — built-app Linux cold launch under Xvfb
+
+- The entry chains `scripts/linux/cold-launch.sh` (staged with the source)
+  on top of the **same verified bundle container** as `linux-build`
+  (`linuxBundleBuildContainer`): identical inputs replay the build layers
+  from the engine cache, so the cold launch runs the BUILT AppImage —
+  `--appimage-extract-and-run`, no FUSE — inside the pinned containers.
+- **First usable state, proven**: a 1280x800 Xvfb display, the `Drift`
+  window found mapped (xwininfo evidence), the process tree alive, and a
+  PAINTED screenshot (distinct-color count; a blank root fails). Shutdown
+  is a graceful `WM_DELETE_WINDOW` close with SIGTERM/SIGKILL escalation
+  recorded. The GPU path runs on Mesa's llvmpipe software rasterizer — no
+  GPU or dbus daemon needed (spike-proven, see research.md task 2.5).
+- **Isolated app data (Req 12.7)**: every launch scopes `HOME`,
+  `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and
+  `XDG_RUNTIME_DIR` into a per-run `/tmp/drift-e2e-home` tree; the app log
+  confirms `App data directory: .../drift-e2e-home/share/com.drift.app`
+  and `appdata-files.txt` records exactly what the run wrote (the
+  container is additionally isolated from the host by construction).
+- **Evidence export + fail-loudly (no fake pass)**: the harness always
+  writes `/test-results/e2e/` — `cold-launch-status.json` (verdict),
+  `cold-launch-screenshot.png`, and on failure
+  `cold-launch-failure-screenshot.png` captured BEFORE the failed verdict
+  — and the entry returns that Directory. The module THROWS for
+  prerequisite/evidence-loss failures (missing bundles, missing harness,
+  no status at all), while a FAILED launch (ok=false) returns the evidence
+  Directory so the tier can export the failure screenshot and THEN fail
+  with exit 1: `scripts/Invoke-CI.ps1 -Tier dagger -DaggerEntry linux-e2e`
+  reads the exported status — an exit-0 dagger call never bypasses the
+  cold-launch verdict (Req 12.1, 12.5, 12.8).
+- The cold-launch runtime extras (`xvfb x11-utils xdotool imagemagick`)
+  are pinned in `.config/ci-versions.json` + `src/pins.ts`
+  (`tauriLinuxE2EAptPackages`) and provisioned once as the same cached
+  layer as the Tauri/bundle packages (shared by linux-build and linux-e2e).
+- These are Linux-container results — they never substitute for the native
+  Windows/macOS cold-launch validation (Req 12.8 native proofs).
 
 ## Native Windows validation (pwsh, scripts/Invoke-CI.ps1)
 
