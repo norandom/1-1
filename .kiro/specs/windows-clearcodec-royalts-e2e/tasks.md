@@ -1,0 +1,350 @@
+# Implementation Plan - bounded effort and crate reuse
+
+This replaces the earlier 44-item task plan; no implementation tasks were completed, so no completion evidence is discarded. The user requested task generation and explicitly selected nextest, native Windows shells and Dagger-based Actions. This is a reviewable plan, not authorization to implement or a claim that CI has migrated.
+
+## Effort controls
+- Execute sequentially within each group; prior groups are prerequisites. No parallel markers: shared manifests, actor code and CI files make parallel work more costly than useful here.
+- Normal tasks target 1-3 focused engineering hours; these are planning slices, not delivery promises. At 3 hours without the stated deliverable, record the result and split the remaining work before continuing. Do not hide multi-day work inside a task.
+- Feasibility spikes have a hard 3-hour investigation cap each. Missing upstream capability or a second failed integration approach returns to design with evidence; no custom codec, private fork, CI platform, framework rewrite or silent requirement reduction.
+- Group checkpoints: tooling/CI parity; old-stack safety net; upstream compile proof; persistence recovery; integrated UI; real-server acceptance. Record actual effort per group and re-estimate remaining work before the next checkpoint.
+- TDD applies to behavior changes; retain red/green evidence. Do not build generic mocking, workflow or dependency-management frameworks.
+- Keep requirements and design approvals distinct from task generation. Tasks remain unchecked and unapproved.
+
+## Crate and tool choices
+- Reuse IronRDP components for codecs/compositor/protocol, Tokio channels/time(test-util) for scheduling and deterministic tests, serde/serde_json for v2 migration, uuid/thiserror/keyring/image and std collections already in the manifest.
+- Prefer promoting existing tempfile for same-directory atomic replacement over adding atomic-write-file. Its fit is explicitly tested on all OSes; do not claim durable power-loss transactions from rename alone.
+- cargo-nextest is a CI/developer executable, not an application dependency. Keep cargo test --doc; pin a supported release (at least 0.9.150 per current upstream advisory), test resource grouping and Windows process-launch overhead.
+- Dagger TypeScript SDK matches the existing TypeScript toolchain. Use Podman or Docker engine through native host CLI. No Rust Dagger SDK, Compose stack, database, graph library, retry framework, criterion, proptest or mockall by default.
+- IronRDP 0.5.0 is a proposed EGFX pin from prior design, not a verified compatible set. A compile probe and Cargo.lock are required before adopting it.
+- Sources and dependency decisions are recorded in research.md; tasks name outcomes, while design owns code paths.
+
+
+
+- [ ] 1. Execution tooling and CI contracts
+- [x] 1.1 Pin native tool entry points and isolated outputs
+  - Inspect wrapper targets before execution; reject WSL/Git Bash delegation. Run from the canonical repository path `D:\Source\drift-rdp` — the `C:\Users\mariu\Source\drift-rdp` junction view must not be used as cwd (detect and reject it so cache keys and BuildArtifacts scoping stay stable). Use configured caches and scoped D:/BuildArtifacts outputs.
+  - Done: Native PowerShell preflight reports tool versions/paths and rejects prohibited wrappers.
+  - _Boundary: Developer tooling_
+  - _Requirements: 7.1,7.5,12.7,13.4_
+- [ ] 1.2 Configure nextest profiles and retain doctests
+  - Use pinned cargo-nextest with no automatic retries, fail on zero tests, timeout/leak reporting and JUnit; serialize only tests sharing OS resources. Keep cargo test --doc.
+  - Done: Rust tier command runs nextest and doctests with propagated failures; compare Windows timing rather than assuming speedup.
+  - _Boundary: Rust test configuration_
+  - _Requirements: 7.1,7.3,13.3,13.4_
+- [ ] 1.3 Prove native Dagger-to-Podman connectivity
+  - Time-box to 3 hours; native Windows CLI connects to the existing Podman engine, which may be WSL-backed. No direct WSL commands, no new VM provisioning or Compose stack.
+  - Done: Pinned engine runs a trivial container and exports an artifact under the scoped output directory, or records a blocking compatibility result.
+  - _Boundary: Dagger bootstrap_
+  - _Requirements: 7.1,12.7,13.4_
+- [ ] 1.4 Define one command contract for container and native jobs
+  - Use a small TypeScript Dagger module with frontend, rust-checks, linux-build and linux-e2e entry points; a native PowerShell entry point invokes the same tier commands for OS-specific checks. Keep toolchain/image versions pinned.
+  - Done: Version/config files and command list distinguish Linux container checks from native Windows/macOS validation.
+  - _Boundary: CI contract_
+  - _Requirements: 7.1,7.2,8.4,12.5,13.3,13.4_
+
+- [ ] 2. Dagger Actions foundation on the old protocol stack
+- [ ] 2.1 Move portable checks into Dagger
+  - Reuse npm lockfile and existing Rust commands; provision Linux Tauri libraries once. Cache registry/git and target separately by OS/arch/toolchain/features; never import host target/node_modules.
+  - Done: Dagger frontend and Rust checks emit tests/JUnit and fail on an intentionally failing fixture; doctests remain included.
+  - _Boundary: Dagger checks_
+  - _Requirements: 7.1,7.3,13.3_
+- [ ] 2.2 Move Linux bundles into Dagger
+  - Reuse current Tauri packaging; export AppImage/deb plus logs. Keep cache/output in engine storage and scoped host exports.
+  - Done: Linux bundle artifacts exist and missing artifacts fail the job.
+  - _Boundary: Linux build_
+  - _Requirements: 7.2,7.3_
+- [ ] 2.3 Prove native Windows cold launch on the old stack
+  - 3-hour setup spike: minimum native compile fixes, MSVC/WebView2, pinned Edge driver and isolated data; no protocol upgrade.
+  - Done: Built-app Windows cold launch passes or a specific prerequisite blocks upgrade.
+  - _Boundary: Windows E2E bootstrap_
+  - _Requirements: 8.1,12.1,12.5,12.7,12.8_
+- [ ] 2.4 Prove native macOS cold launch on the old stack
+  - 3-hour setup spike: prove the WebdriverIO Tauri service embedded server on the built app, not safaridriver; isolate data.
+  - Done: Built-app macOS cold launch passes or unsupported driver evidence blocks upgrade.
+  - _Boundary: macOS E2E bootstrap_
+  - _Requirements: 12.1,12.5,12.7,12.8_
+- [ ] 2.5 Prove Dagger Linux cold launch on the old stack
+  - 3-hour setup spike: WebKitGTK/Xvfb inside the pinned image with isolated app-data; export failure screenshots.
+  - Done: Built-app Linux cold launch passes through the Dagger entry point or its prerequisite blocks upgrade.
+  - _Boundary: Linux E2E bootstrap_
+  - _Requirements: 12.1,12.5,12.7,12.8_
+- [ ] 2.6 Wire thin Actions jobs and native platform exceptions
+  - Dagger action handles portable/Linux jobs; Windows uses PowerShell MSVC/WebView2; macOS uses native bundle/UI jobs. Preserve both macOS architectures. Pin actions/engine; no cloud token required.
+  - Done: Workflow retains push/PR triggers, publishes failure reports and artifacts, and requires every gate; Windows contains no bash/wsl shell.
+  - _Boundary: Actions integration_
+  - _Requirements: 7.1,7.2,7.3,7.4,7.5,8.4,12.5,13.3_
+- [ ] 2.7 Verify old/new job parity before removing duplicate logic
+  - Compare exact commands, features, test inventory and artifacts; remove replaced Linux shell steps only after parity. Keep native checks, not duplicate full Linux runs. Record wall-time and cache-hit observations (non-blocking; cold-build cost accepted for MVP). Evidence wording must never present Linux container results as native Windows/macOS validation.
+  - Done: Parity record identifies every old gate and replacement; failed checks still block artifact acceptance.
+  - _Boundary: CI migration validation_
+  - _Requirements: 7.1,7.2,7.3,12.8_
+
+- [ ] 3. Brownfield characterization gate
+- [ ] 3.1 Classify baseline and pin persistence behavior
+  - Classify every Req 1-7 criterion as existing, defect or future delta; 4.4 is not an old-stack gate. Reuse tempfile and serde_json fixtures for CRUD/import/probe/keyring failure seams.
+  - Done: Tests preserve fields, secret exclusion, validation, imports and cleanup; missing baseline coverage is explicit.
+  - _Boundary: Persistence baseline_
+  - _Requirements: 1.1,1.2,1.3,1.4,1.5,6.1,6.2,6.3,12.6_
+- [ ] 3.2 Pin actor admission and lifecycle behavior
+  - Use existing Tokio channels and test-util paused time; extract only a narrow transport seam. Test 9/10/11 admission, retries, cancellation and teardown races.
+  - Done: Deterministic lifecycle tests run without sleeps or a replacement actor framework.
+  - _Boundary: Session baseline_
+  - _Requirements: 2.1,2.2,2.3,2.4,2.5,12.6,13.2_
+- [ ] 3.3 Pin input and display controls
+  - Reuse existing input/display tests; add modifier, pointer scaling, resize debounce, special keys, clipboard and screenshot checks at current seams.
+  - Done: Automated tests and required real-server checks cover each control; no assumption that mock frames prove clipboard/NLA.
+  - _Boundary: Input baseline_
+  - _Requirements: 3.1,3.2,3.3,3.4,3.5,3.6,12.6,12.9_
+- [ ] 3.4 Pin shell and renderer behavior
+  - Reuse Vitest and existing image crate; cover full/dirty frames, GPU-failure canvas path, HUD, themes/settings/toasts/status and shortcuts.
+  - Done: Characterization records existing behavior and known defects without freezing incorrect defaults or tab identity.
+  - _Boundary: Shell/render baseline_
+  - _Requirements: 4.1,4.2,4.3,5.1,5.2,5.3,5.4,12.6_
+- [ ] 3.5 Record reproducible performance and interoperability baselines
+  - Run the design workload matrix and old-stack TLS/NLA smoke; record hardware/build, actual route, server/policy and timings. If a workload cannot run, agree a budget before upgrade.
+  - Done: Baseline artifact contains benchmark results and real-server checks; missing mandatory evidence blocks the upgrade.
+  - _Boundary: Baseline integration_
+  - _Requirements: 2.1,4.1,4.3,7.1,7.2,7.3,12.6,12.9_
+
+- [ ] 4. Bounded Rust dependency upgrade
+- [ ] 4.1 Resolve an upstream-only IronRDP set
+  - 3-hour spike: verify the proposed EGFX version against actual registry/source; pin a compatible component set and MSRV in lockfile. Check decode/error callbacks, AVC-disabled flags and compositor output. Prove the decode-error and unsupported-codec hook surface needed by Req 9.6/9.7, and define per-codec decode fixtures for ClearCodec plus every codec CodecPolicy will advertise (Planar, Uncompressed, RFX-Progressive). Do not assume latest documentation matches 0.5.0.
+  - Done: Small compile probe demonstrates required upstream APIs and feature graph; decode/error hooks for 9.6/9.7 proven or the advertised caps shrink to proven codecs; per-codec fixtures defined; the resolved set is recorded and group-9 tasks stay blocked until it is. Stop on missing capability, not a custom codec/fork.
+  - _Boundary: Protocol dependencies_
+  - _Requirements: 9.1,9.2,9.3,9.5,9.6,9.7_
+- [ ] 4.2 Adapt connector and transport APIs
+  - Reuse ironrdp-tokio, TLS/rustls and existing connection flow; no protocol implementation or runtime replacement.
+  - Done: Connector compiles and TLS/NLA smoke still succeeds on the pinned stack.
+  - _Boundary: Connector adapter_
+  - _Requirements: 2.1,8.3_
+- [ ] 4.3 Adapt session APIs preserving lifecycle
+  - Keep actor commands/watch channels and existing reconnect path; adapt DVC accessors and builder only.
+  - Done: Nextest characterization and native smoke pass on all supported OSes; actor behavior stays stable.
+  - _Boundary: Session adapter_
+  - _Requirements: 2.2,2.3,2.4,2.5,3.1,3.2,3.3,3.4,3.5,3.6_
+- [ ] 4.4 Remove H.264 transport atomically across Rust and UI
+  - Explicit integration task: remove encoder, decoder and kind 3 together; reuse current kind-1/2 packet layout.
+  - Done: Frontend/backend packet tests pass and cargo tree feature audit contains no openh264 encoder dependency.
+  - _Boundary: Frame transport integration_
+  - _Requirements: 4.4,9.4,9.5_
+
+- [ ] 5. Windows and controlled test sessions
+- [ ] 5.1 Complete native Windows integration
+  - Reuse keyring windows-native, platform cfg and existing wgpu; verify credential round-trip, Windows identity, GPU init/fallback and installer bootstrap. Deliver the explicit NSIS bundle-config change: WebView2 bootstrapper mode pinned in config (downloadBootstrapper default, offline behavior documented); CI fails if the configured mode regresses.
+  - Done: Native Windows smoke stores/retrieves credentials, reaches usable canvas and produces a runnable installer with the bootstrapper mode pinned in bundle config.
+  - _Boundary: Windows integration_
+  - _Requirements: 8.1,8.2,8.3,8.4,8.6_
+- [ ] 5.2 Normalize shortcut labels and settings defaults
+  - Reuse existing platform helper and serde defaults; pin frontend/backend default parity rather than introduce code generation.
+  - Done: Windows/Linux Ctrl and macOS Cmd hints work; persisted settings and fresh defaults match.
+  - _Boundary: Settings/platform UI_
+  - _Requirements: 5.1,5.2,5.4,8.5_
+- [ ] 5.3 Gate synthetic sessions behind test support
+  - Reuse current mock loop, Tokio time and actor state; add loss/cancel controls and build-gated fixture seeding for synthetic saved connections in test builds, with no network. Harness owns isolated app-data/credential namespaces and scoped cleanup; production cannot register or call seeding.
+  - Done: Tests cover frames and reconnect/cancel; production rejects persisted or command mock flags.
+  - _Boundary: Test session boundary_
+  - _Requirements: 12.2,12.7,12.10_
+- [ ] 5.4 Add build-gated frame observations
+  - Count actual emitted packet kinds; register spy/control commands only in test builds.
+  - Done: Mock E2E sees bitmap packets; production build lacks test events/commands even with environment flags.
+  - _Boundary: Test instrumentation_
+  - _Requirements: 12.4,12.10_
+
+- [ ] 6. JSON library storage with minimal new code
+- [ ] 6.1 Model v2 data and tree invariants
+  - Reuse serde/serde_json, uuid and std HashMap/HashSet. Keep flat entities with parent IDs; no graph crate, database or ORM.
+  - Done: Tests validate unique IDs, ownership, ancestor cycles, deep nesting and descendant queries.
+  - _Boundary: Library model_
+  - _Requirements: 10.1,10.5,10.8_
+- [ ] 6.2 Prove atomic replacement with the existing tempfile crate
+  - 3-hour spike: promote tempfile to runtime use only if NamedTempFile new_in/persist fits replacement and failure behavior on all OSes. Use a narrow writer wrapper; atomic visibility is not a claim of power-loss durability.
+  - Done: Tests preserve prior file on failed replacement, use same-directory staging and retain recoverable error state; if unsupported, return to design before a second crate.
+  - _Boundary: Atomic writer_
+  - _Requirements: 6.1,10.10,10.12_
+- [ ] 6.3 Implement migration and write-blocked recovery
+  - Reuse versioned serde fixtures; preserve every field and ID; create backup without clobber, fail closed on existing invalid backup or unsupported schema.
+  - Done: Fault tests cover backup/commit failure, malformed data, interrupted staging and restart; recovery cannot save an empty replacement.
+  - _Boundary: Migration_
+  - _Requirements: 6.1,6.2,10.10,10.12_
+- [ ] 6.4 Implement library and folder CRUD/read models
+  - Keep one store owner and serialized transactions; register thin commands and typed wrappers.
+  - Done: Create/rename/read operations round-trip with nested descendants; errors preserve prior snapshot.
+  - _Boundary: Library commands integration_
+  - _Requirements: 10.1,10.2,10.3,10.5,10.7_
+- [ ] 6.5 Implement atomic cross-library moves
+  - Validate proposed snapshot then persist/publish; preserve IDs, credentials, settings and active session references.
+  - Done: Cycle/missing-target rejection, subtree moves and failed-write rollback pass tests.
+  - _Boundary: Tree transactions_
+  - _Requirements: 10.8,10.15_
+- [ ] 6.6 Integrate connection CRUD and duplication
+  - Adapt existing validation/import/probes; allocate fresh duplicate ID/name without keyring copying. Keep mock data inert in production.
+  - Done: Existing CRUD/import tests pass in v2; duplicate has no copied password and correct folder.
+  - _Boundary: Connection store integration_
+  - _Requirements: 1.1,1.2,1.3,1.4,1.5,6.2,10.7,10.19,12.10_
+
+- [ ] 7. Session identity and destructive operations
+- [ ] 7.1 Make connect admission idempotent by connection
+  - Reuse SessionManager map and Tokio command serialization; return the existing live session ID or restart a terminal entry with stable ID; UI focus is owned by the later tab integration task.
+  - Done: Concurrent Connect requests yield one actor and returned session ID; explicit close then Connect gets a new identity.
+  - _Boundary: Session identity_
+  - _Requirements: 2.2,10.4,10.6,11.4,11.8,11.9_
+- [ ] 7.2 Delete folders without deleting connections
+  - Remove entire folder subtree and move descendants to library root in a single store transaction.
+  - Done: Exact removed/moved counts match preview; credentials and active sessions survive failed/successful operations.
+  - _Boundary: Folder deletion_
+  - _Requirements: 10.16,10.18_
+- [ ] 7.3 Coordinate connection/library deletion with actors
+  - Explicit integration task: serialize affected connect/delete operations, cancel retries, await stop up to five seconds, persist deletion then clean keyring best-effort.
+  - Done: Timeout/persist failure retains saved data; race/restart tests confirm stopped-session and cleanup semantics.
+  - _Boundary: Deletion integration_
+  - _Requirements: 1.5,6.2,10.2,10.17,10.18_
+
+- [ ] 8. Tree, dashboard and tab UX
+- [ ] 8.1 Pin annotated interaction states as component fixtures
+  - Use existing Radix/shadcn and Vitest patterns; cover tree/rail/filter, focus/menus, dashboards with tabs. Avoid introducing another component system.
+  - Done: UX acceptance states define expected keyboard, status and focus outcomes before component changes.
+  - _Boundary: UX fixtures_
+  - _Requirements: 10.13,10.14,11.6,11.7_
+- [ ] 8.2 Build typed tree state and node-aware editing
+  - Reuse Zustand, current form and IPC wrappers; persist selection/expansion; filter includes ancestors and restores prior state.
+  - Done: Store tests cover filter/selection; create/edit uses selected destination; QuickConnect aggregates libraries.
+  - _Boundary: Tree state integration_
+  - _Requirements: 10.1,10.3,10.9,10.11,1.1,1.2_
+- [ ] 8.3 Render accessible tree and context actions
+  - Reuse Radix primitives and existing status subscriptions; implement roving focus, named status, explicit rail toggle and confirmations.
+  - Done: Keyboard/component checks cover arrows/Home/End/Enter/Shift+F10, all menus, duplication and confirmation counts.
+  - _Boundary: Tree UI_
+  - _Requirements: 10.3,10.4,10.7,10.11,10.13,10.14,10.18,10.19_
+- [ ] 8.4 Add movement through one shared action
+  - Gate dnd-kit on a hard-capped (3-hour) React 19 peer-compatibility spike with a recorded go/no-go before this task; on no-go, use native HTML5 drag. The keyboard Move dialog shares the same action either way, and the native fallback must retain the keyboard equivalent.
+  - Done: Drag and keyboard subtree moves persist; rejected writes restore visible location and focus.
+  - _Boundary: Move UI_
+  - _Requirements: 10.8,10.14,10.15_
+- [ ] 8.5 Connect dashboards and start view
+  - Reuse card/form/quick-connect patterns; select nodes without closing sessions and show descendants.
+  - Done: Dashboard double-click and tree Connect share one action; empty/no-selection states and live status are correct.
+  - _Boundary: Dashboard integration_
+  - _Depends: 7.1_
+  - _Requirements: 10.5,10.6,11.5,11.6_
+- [ ] 8.6 Hoist persistent session tabs and fix routes
+  - Reuse session store; use session ID routes and named keyboard close controls; wire active/hover/focus states and consume backend existing-session IDs to focus the exact tab.
+  - Done: Two-session tests switch/close/reconnect exactly the intended session and restore adjacent/dashboard focus.
+  - _Boundary: Tab integration_
+  - _Depends: 7.1_
+  - _Requirements: 11.1,11.2,11.3,11.4,11.5,11.6,11.7,11.8,11.9_
+- [ ] 8.7 Expose store recovery and disable mutation controls
+  - Bind backend recovery state to a persistent instructions view; disable CRUD/import/move/autosave without losing stored originals. Restore controls only after valid restore/reload.
+  - Done: Corrupt-file startup and failed migration E2E show instructions and reject every mutation path; valid recovery reload restores the UI.
+  - _Boundary: Recovery UI integration_
+  - _Depends: 6.3_
+  - _Requirements: 10.12,10.15_
+
+- [ ] 9. Upstream EGFX and bounded rendering
+- [ ] 9.1 Implement capability policy from proven upstream APIs
+  - Use only supported non-AVC flags/versions from the pinned crate; distinguish channel selection and observed update codec.
+  - Done: Tests cover supported EGFX codecs, no-EGFX bitmap fallback and absence of AVC advertisement.
+  - _Boundary: Codec policy_
+  - _Requirements: 9.1,9.3,9.5_
+- [ ] 9.2 Connect upstream compositor to existing frame paths
+  - Reuse GraphicsPipelineClient surface lifecycle and frame acknowledgement; adapt decoded output to SharedFrame and current packets, no custom codec.
+  - Done: Fixtures cover ClearCodec and allowed alternate codecs plus surface reset/resize; GPU/canvas receive matching pixels.
+  - _Boundary: EGFX adapter integration_
+  - _Requirements: 4.1,4.2,9.2,9.4_
+- [ ] 9.3 Make unsupported/decode errors terminal
+  - Use observable upstream error/unhandled hooks from dependency spike; avoid protocol parser duplication.
+  - Done: Unsupported AVC terminates without retry; three failed frames terminate and successful decode resets counter.
+  - _Boundary: Codec error policy_
+  - _Requirements: 9.6,9.7_
+- [ ] 9.4 Batch dirty regions without a new buffering crate
+  - Use existing framebuffer and rectangle math; union dirty bounds, choose rectangle/full packet at reset and initial delivery.
+  - Done: Disjoint/overlapping updates and resize fixtures produce correct complete pixels.
+  - _Boundary: Frame batching_
+  - _Requirements: 4.1,4.4,9.8_
+- [ ] 9.5 Bound UI delivery with existing Tokio primitives
+  - One in-flight packet plus pending damage accumulator; generation-scoped consumption acknowledgement; five-second stall and full refresh on recovery.
+  - Done: Delayed/dropped/stale acknowledgement tests preserve latest full image and bound pending delivery.
+  - _Boundary: Frame acknowledgement integration_
+  - _Requirements: 9.8,4.1,4.3_
+
+- [ ] 10. Font smoothing and display fidelity
+- [ ] 10.1 Persist and import the smoothing preference
+  - Reuse serde default and mirrored types, form and existing RDP parser; preserve explicit false and legacy default true.
+  - Done: Import/save/reload/migration tests pass for missing/true/false preferences.
+  - _Boundary: Connection preferences_
+  - _Requirements: 14.1,14.3_
+- [ ] 10.2 Apply font-smoothing flags and policy help
+  - Use upstream performance flags; do not conflate codec with server smoothing acceptance.
+  - Done: Both flag states verified; help explains policy override and next-connect application.
+  - _Boundary: Font smoothing integration_
+  - _Requirements: 14.2,14.4_
+- [ ] 10.3 Implement native-pixel and fit coordinates
+  - Reuse SessionCanvas and input mapper; handle devicePixelRatio, viewport scrolling and DPI changes once.
+  - Done: Text fixtures match decoded pixels in native mode; pointer/scroll mapping passes at four DPIs in both modes.
+  - _Boundary: Display integration_
+  - _Requirements: 3.2,4.1,14.5_
+
+- [ ] 11. Regression journeys and release evidence
+- [ ] 11.1 Verify CRUD, migration and recovery journeys
+  - Implement/rerun create/edit/import/duplicate/delete and v1/recovery journeys using the existing harness; run the same specs in the three OS jobs.
+  - Done: Fixtures preserve fields and secrets; rollback/recovery mutations fail safely and restart state is correct.
+  - _Boundary: Storage E2E_
+  - _Requirements: 1.1,1.2,1.3,1.4,1.5,10.1,10.2,10.7,10.10,10.12,10.16,10.17,10.18,10.19,12.3,12.5,12.7_
+- [ ] 11.2 Verify tree and keyboard journeys
+  - Run filter/ancestor, rail persistence, keyboard menus/Move, subtree move and dashboard scenarios against the shared harness.
+  - Done: All three OS jobs cover successful and rejected moves with correct focus, status and visible hierarchy.
+  - _Boundary: Tree E2E_
+  - _Requirements: 10.3,10.4,10.5,10.6,10.8,10.9,10.11,10.13,10.14,10.15,12.3,12.5_
+- [ ] 11.3 Verify session, settings and production-build journeys
+  - Cover concurrent Connect, tab switch/close/reconnect, dashboard with live sessions, themes/settings restart and build-feature exclusion.
+  - Done: Three OS jobs exercise only intended session changes; release builds reject mocks and expose no test controls/events.
+  - _Boundary: Session E2E_
+  - _Requirements: 5.1,5.2,5.3,11.1,11.2,11.3,11.4,11.5,11.6,11.7,11.8,11.9,12.3,12.4,12.5,12.10_
+- [ ] 11.4 Verify Windows workstation interoperability
+  - Run a checklist against one provisioned Windows workstation target: NLA where applicable, retry/cancel, input, clipboard, resize, actual codec observations. Reuse fixtures and logs; record server-specific applicability. Additional server versions are separately scheduled executions, not hidden work.
+  - Done: One target report identifies client/server builds, required results and actual route; missing targets or applicable checks remain blockers.
+  - _Boundary: Real-server validation_
+  - _Requirements: 2.1,2.3,2.4,3.1,3.2,3.3,3.4,3.5,3.6,9.1,9.2,9.3,12.9_
+- [ ] 11.5 Verify Windows Server interoperability
+  - Run a checklist against one provisioned Windows Server target: NLA where applicable, retry/cancel, input, clipboard, resize, actual codec observations. Reuse fixtures and logs; record server-specific applicability. Additional server versions are separately scheduled executions, not hidden work.
+  - Done: One target report identifies client/server builds, required results and actual route; missing targets or applicable checks remain blockers.
+  - _Boundary: Real-server validation_
+  - _Requirements: 2.1,2.3,2.4,3.1,3.2,3.3,3.4,3.5,3.6,9.1,9.2,9.3,12.9_
+- [ ] 11.6 Verify grd interoperability
+  - Run a checklist against one provisioned grd target: NLA where applicable, retry/cancel, input, clipboard, resize, actual codec observations. Reuse fixtures and logs; record server-specific applicability. Additional server versions are separately scheduled executions, not hidden work.
+  - Done: One target report identifies client/server builds, required results and actual route; missing targets or applicable checks remain blockers.
+  - _Boundary: Real-server validation_
+  - _Requirements: 2.1,2.3,2.4,3.1,3.2,3.3,3.4,3.5,3.6,9.1,9.2,9.3,12.9_
+- [ ] 11.7 Verify text fidelity at 100% client DPI
+  - Batch fixed text cases with smoothing on/off, native/fit modes and EGFX/bitmap fallback at 100% DPI. Reuse provisioned targets and capture procedure; extra client OS executions are explicit instances with recorded effort.
+  - Done: all eight combinations have a report separating decoded/canvas pixel equality, OS screenshots and physical observations; policy overrides and unavailable routes remain explicit.
+  - _Boundary: Text fidelity validation_
+  - _Requirements: 12.9,14.4,14.5,14.6_
+- [ ] 11.8 Verify text fidelity at 125% client DPI
+  - Batch fixed text cases with smoothing on/off, native/fit modes and EGFX/bitmap fallback at 125% DPI. Reuse provisioned targets and capture procedure; extra client OS executions are explicit instances with recorded effort.
+  - Done: all eight combinations have a report separating decoded/canvas pixel equality, OS screenshots and physical observations; policy overrides and unavailable routes remain explicit.
+  - _Boundary: Text fidelity validation_
+  - _Requirements: 12.9,14.4,14.5,14.6_
+- [ ] 11.9 Verify text fidelity at 150% client DPI
+  - Batch fixed text cases with smoothing on/off, native/fit modes and EGFX/bitmap fallback at 150% DPI. Reuse provisioned targets and capture procedure; extra client OS executions are explicit instances with recorded effort.
+  - Done: all eight combinations have a report separating decoded/canvas pixel equality, OS screenshots and physical observations; policy overrides and unavailable routes remain explicit.
+  - _Boundary: Text fidelity validation_
+  - _Requirements: 12.9,14.4,14.5,14.6_
+- [ ] 11.10 Verify text fidelity at 200% client DPI
+  - Batch fixed text cases with smoothing on/off, native/fit modes and EGFX/bitmap fallback at 200% DPI. Reuse provisioned targets and capture procedure; extra client OS executions are explicit instances with recorded effort.
+  - Done: all eight combinations have a report separating decoded/canvas pixel equality, OS screenshots and physical observations; policy overrides and unavailable routes remain explicit.
+  - _Boundary: Text fidelity validation_
+  - _Requirements: 12.9,14.4,14.5,14.6_
+- [ ] 11.11 Verify performance and memory budgets
+  - Use baseline workload and same machine; reuse image crate for pixel diffs and std Instant/logs, no benchmark framework unless justified by failed measurement.
+  - Done: Recorded p95/memory/queue budgets meet design; delayed consumers recover full-image equality.
+  - _Boundary: Performance validation_
+  - _Requirements: 4.1,4.2,4.3,9.8_
+- [ ] 11.12 Run final native/container gates and evidence audit
+  - Collect already-defined nextest plus doctests, frontend suites, fmt/clippy/check, all installers and native first-usable-state smoke; keep Windows/macOS exceptions explicit. Evidence wording must never present Linux container results as native Windows/macOS validation.
+  - Done: Every AC has fresh evidence; no blocked tasks, skipped required jobs or test-first audit gaps; tier commands are documented.
+  - _Boundary: Final validation_
+  - _Requirements: 7.1,7.2,7.3,8.1,8.2,8.3,8.4,8.5,8.6,12.1,12.6,12.8,12.9,13.1,13.2,13.3,13.4_
+
+## Implementation Notes
+- Pre-existing baseline: `npm run lint` fails at HEAD (7 errors / 2 warnings in `src/**` — ConnectionCard.tsx, SessionCanvas.tsx, ui/{badge,button,tabs,toggle}.tsx, useClipboard.ts); must be fixed before the lint tier can gate CI (found during 1.1 review; not caused by 1.1).
+- design.md File Structure Plan lists `scripts/Invoke-CI.ps1` but not `scripts/Invoke-CI.Tests.ps1`; add the test file to the plan in the next docs-touching task.
