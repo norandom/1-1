@@ -1006,6 +1006,10 @@ try {
         $ctE2eBlock -match [regex]::Escape('.ok == true') -and
         $ctE2eBlock -match 'if:\s*always\(\)'
     } 'CT14u the linux-e2e verdict step fails the job unless the exported cold-launch status is ok=true (fail loudly, Req 12.5)'
+    Assert-That {
+        $ctE2eBlock -match [regex]::Escape('cold-launch-screenshot.png') -and
+        $ctE2eBlock -match [regex]::Escape('first-usable-state screenshot')
+    } 'CT14ab the linux-e2e verdict also requires the exported first-usable-state screenshot when ok=true — the runner twin mirrors the dev-host tier gate (Invoke-CI.ps1 ok-without-screenshot check, task 2.7 hardening; no fake pass)'
 
     # v) gates required, evidence published, no secrets, honest limitations.
     Assert-That { $ctWf -notmatch 'continue-on-error' } 'CT14v no step continues past a failed gate — every gate is required (Req 7.3, 13.3)'
