@@ -31,7 +31,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Rust tier command runs nextest and doctests with propagated failures; compare Windows timing rather than assuming speedup.
   - _Boundary: Rust test configuration_
   - _Requirements: 7.1,7.3,13.3,13.4_
-- [ ] 1.3 Prove native Dagger-to-Podman connectivity
+- [x] 1.3 Prove native Dagger-to-Podman connectivity
   - Time-box to 3 hours; native Windows CLI connects to the existing Podman engine, which may be WSL-backed. No direct WSL commands, no new VM provisioning or Compose stack.
   - Done: Pinned engine runs a trivial container and exports an artifact under the scoped output directory, or records a blocking compatibility result.
   - _Boundary: Dagger bootstrap_

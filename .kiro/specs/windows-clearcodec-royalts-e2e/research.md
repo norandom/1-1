@@ -1,0 +1,227 @@
+> Historical discovery log: the amendment below supersedes earlier macOS driver, sequencing, migration-failure and cross-library-move assumptions.
+
+# Gap Analysis — windows-clearcodec-royalts-e2e
+
+Generated: 2026-11-11 · Method: codebase investigation (main context + explore subagent) + external dependency research (docs.rs, crates.io, IronRDP GitHub issues) · Based on requirements.md (Req 1–13, not yet user-approved).
+
+## 1. Current State — Reusable Assets
+
+| Area | Assets | State |
+|---|---|---|
+| RDP session | `rdp/session.rs` (SessionActor, 1162 lines), `rdp/client.rs` (connector, TLS, NLA) | Working; ironrdp 0.14 facade, ironrdp-graphics **0.7.0** (locked) |
+| Frame pipeline | `renderer/shared_frame.rs` (double-buffer + condvar), `renderer/gpu.rs` (wgpu surface on main window), `rdp/frame_transport.rs` (IPC packet protocol kinds 1/2/3), `lib.rs` L51–122 render thread | Working; visible path is IPC→webview canvas; GPU surface dormant (renders behind webview) |
+| H.264 transport (to remove) | `renderer/h264_encoder.rs` (openh264), `session.rs` `try_send_h264_frame` L245–272 + call sites L280/L624–631, `frame_transport.rs` kind 3, `src/lib/frame-protocol.ts` `tryParseH264Packet`, `src/lib/h264-decoder.ts` (WebCodecs) | Isolated; no RDP-protocol coupling — removal is mechanical |
+| UI shell | `layout/Sidebar.tsx` (flat 2-item nav, 264 lines), `session/SessionTabs.tsx`, `connections/*` (grid/card/form/quick-connect), `App.tsx` routes | Working; superseded by Req 10/11 |
+| State/persistence | `stores/connectionStore.ts`, `types.ts` ↔ `store/connections.rs` (flat JSON array, camelCase serde), `store/credentials.rs` (keyring, 2 ignored tests) | Working; flat model — no folder concept |
+| Platform | `main.rs` windows_subsystem attr, `icons/icon.ico`, Titlebar uses `platform()` from tauri-plugin-os, `useKeyboard.ts` uses `isMod = metaKey \|\| ctrlKey` | Partial Windows readiness |
+| CI | `.github/workflows/ci.yml` — tsc/vitest/check/test/fmt/clippy + build matrix (mac aarch64/x64, linux x64) | No windows runner |
+| Tests | 29 vitest (types, connectionStore, input-mapper 18, frame-protocol 1 — no dirty-rects/h264 tests), 22 Rust tests (network 5, display 5, frame_transport 1, connections store 9, credentials 2 ignored) | Unit tier only; no E2E |
+| Misc | `native-app/` (3-line hello-world, no deps — dead scaffold), mock frame loop `session.rs` L940–995 (basis for E2E mock mode) | Usable |
+
+Known defects relevant to delta: **(D1)** `SessionTabs.tsx` navigates `/session/${sessionId}` but `SessionView.tsx` L128–130 treats the route param as `connectionId`; **(D2)** `connectionTimeout` default TS 10000 vs Rust 30000.
+
+## 2. Requirement-to-Asset Map
+
+| Req | Existing coverage | Gap |
+|---|---|---|
+| 1–3, 5, 6 (baseline) | Implemented | None (regression baseline only) |
+| 4 Rendering (modified) | Bitmap packet path (kinds 1/2) complete | H264 kind-3 removal; EGFX frame source (see Req 9) |
+| 7 Platform/CI (modified) | mac+linux matrix | Windows matrix entries — see Req 8 |
+| 8 Windows | `windows_subsystem` attr, icon.ico, isMod shortcuts, platform() titlebar | **Missing**: keyring `windows-native` feature; `client.rs` L126–127 platform `UNSPECIFIED` → `WINDOWS`; CI windows job + `x86_64-pc-windows-msvc` target + NSIS/MSI artifact (bundle config block absent); shortcut *labels* hardcoded "Cmd"; `titleBarStyle: Overlay` is macOS-only (verify Windows behavior) |
+| 9 ClearCodec | IronRDP stack present; fast-path bitmap route working | **Missing (large)**: locked ironrdp-graphics 0.7.0 predates ClearCodec (0.9.0); no `ironrdp-egfx` dependency; connector never advertises EGFX; see §3 |
+| 10 Tree sidebar | connectionStore CRUD, search, tags, status in SessionInfo | **Missing**: folder entity + tree data model + migration; tree UI components (expand/collapse, context menus, DnD, per-row status, filter-over-tree); collapse-rail behavior |
+| 11 Document tabs | SessionTabs (inside SessionView), sessionStore sessions Map | **Missing**: persistent global tab bar across routes; route unification on sessionId (fixes D1); start view when no tabs |
+| 12 E2E | mock frame loop exists (unreachable from UI?); vitest/cargo tiers | **Missing**: driver harness (tauri-driver etc.), tri-platform CI wiring, mock-session connection mode, E2E scenarios |
+| 13 TDD | vitest + cargo test infra | **Missing**: process adoption; per-tier single commands documented; coverage of frame-protocol dirty rects etc. |
+
+## 3. Deep-Dive: ClearCodec Feasibility (Req 9) — Highest Risk Item
+
+Findings from IronRDP upstream (docs.rs, issues #1174/#1175/#1464, CHANGELOGs):
+
+1. **ClearCodec decode exists**: `ironrdp-graphics` ≥ 0.9.0 (`clearcodec` module, `ClearCodecDecoder`, BGRA out, glyph/V-bar caches). Added 2026 (issue #1174, dispatch #1175 merged 2026-07-30).
+2. **ClearCodec is an EGFX codec** (MS-RDPEGFX 2.2.4.1) — it arrives over the Graphics Pipeline dynamic virtual channel, **not** the fast-path bitmap route Drift currently uses. Enabling ClearCodec means enabling client-side EGFX.
+3. **Client EGFX is now wired upstream** (tracking issue #1464, closed 2026-08-30): surface compositor (#1460), session-side render drain (#1461), native-client DVC registration (#1462), connector `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` flag (#1237, merged 2026-08-30), Progressive dispatch (#1443), `AVC_DISABLED` preservation (#1490).
+4. **"No H.264" maps cleanly**: `GraphicsPipelineClient::new(handler, h264_decoder: None)` — ClearCodec/Planar/Uncompressed/Progressive decode with no external decoder; AVC frames are logged and skipped; caps advertise `AVC_DISABLED`. We must simply not provide an H.264 decoder and strip openh264.
+5. **Version reality**: Drift locks ironrdp 0.14 / ironrdp-graphics 0.7.0. The complete client EGFX stack landed **after** ironrdp 0.17.0 (2026-07-10); docs.rs lists ironrdp-egfx 0.5.0 as latest. **Constraint**: a major IronRDP upgrade is mandatory; exact facade version containing all pieces (or git pin) must be pinned in design. **Unknown**: whether a released ironrdp facade ≥ 0.17.1 includes #1461/#1462/#1237, or whether Drift must depend on git rev or re-implement the wiring in `SessionActor` (upstream wiring targets `ironrdp-client`, which Drift does not use — Drift has its own actor around `ActiveStage`).
+6. **Breaking changes en route** (affect `client.rs`/`session.rs` rewrite): #1435 removed connector dep from session + new `ActiveStageBuilder`/`ConnectionActivationFactory`; #1377 typed DVC accessors (`get_dvc::<T>()`, `DvcClientProcessor`); #1389/#1391 client Config/PropertySet refactor; #1465 bandwidth-measure fix needed for FreeRDP-based servers (grd).
+7. **Negotiation correctness rule** (upstream #1464 item 5): advertise only decodable codecs — caps = ClearCodec + Planar + Uncompressed (+Progressive), AVC disabled, `WANT_32_BPP_SESSION` set with the GFX flag. Feeds Req 9.1/9.3.
+8. **Fallback**: if server lacks EGFX (older Windows, some servers), IronRDP stays on fast-path bitmaps — Req 9.3 satisfied structurally; E2E/manual verification per server class (Research).
+
+## 4. Deep-Dive: Windows (Req 8)
+
+- `keyring` 3: add `windows-native` feature (Windows Credential Manager). CredentialStore code is platform-agnostic; only Cargo.toml changes + CI coverage.
+- `client.rs`: add `#[cfg(target_os = "windows")] platform: MajorPlatformType::WINDOWS` (currently falls to UNSPECIFIED).
+- CI: new `windows-latest` entries for check/test/clippy + build matrix `x86_64-pc-windows-msvc`; artifact globs add `*.exe`/`*.msi`/NSIS. Tauri bundle config: add `windows` block (nsis/wix) if defaults insufficient; WebView2 bootstrapper default.
+- wgpu 24 → DX12 backend on Windows; GpuRenderer uses raw-window-handle — verify surface creation on HWND (Research: smoke test).
+- Shortcuts: handlers already cross-platform (`isMod`); only display labels ("Cmd+K") need platform awareness via `platform()`.
+- `titleBarStyle: "Overlay"` is ignored on Windows (standard decorations) — acceptable baseline; custom chrome out of scope.
+- MSRV: rust-version 1.77.2 — verify new IronRDP stack's MSRV (Research; upstream may require newer).
+
+## 5. Deep-Dive: GUI Refactor (Req 10–11)
+
+- **Data model options**: (A) add `folderId: Option<String>` to ConnectionConfig + `Folder` entity in connections.json array — minimal migration, flat store logic mostly reusable; (B) nested `children` tree — prettier JSON, harder diff/moves; (C) Royal TS-style discriminated "documents" model — most faithful, largest change. Recommendation leans A for delta (design decides).
+- Migration: existing flat array → folders default root; version field or presence-based detection; test with golden JSON files.
+- UI: replace `Sidebar.tsx` nav with tree (new `ConnectionTree.tsx` + `TreeNode.tsx`, keep framer-motion/shadcn/Radix patterns); context menus via Radix ContextMenu; DnD via HTML5 dnd or dnd-kit (new dep — design decision); status icons subscribe to sessionStore.
+- Tabs: hoist SessionTabs to App-level persistent bar keyed by sessionId; unify routes on sessionId (D1 fix); start view replaces ConnectionGrid home.
+- ConnectionGrid/card UX (latency-on-mount etc.) is superseded; salvage: ConnectionForm (modal), QuickConnect (Cmd+K) remain.
+
+## 6. Deep-Dive: E2E + TDD (Req 12–13)
+
+- **Driver options**: (A) `tauri-driver` + WebdriverIO — official path; Windows→msedgedriver (WebView2), macOS→safaridriver, Linux→WebKitGTK driver. (B) Playwright attaching via CDP — WebView2-only realistically, not tri-platform. (C) Vitest browser-mode against dev server — cannot exercise Tauri IPC. Leans A; tri-OS CI stability (safaridriver permissions, headed runners) is the main unknown (Research).
+- **Mock session mode**: `run_mock_frame_loop` exists but is internal; expose as hidden connection flag (e.g. `mock: true` or host `mock://`) so E2E can create a "connection" that renders synthetic frames + status transitions without a server. Also enables Req 12.4 (assert only kinds 1/2 on the wire).
+- **TDD**: per-tier single commands (`npm run test:e2e`, existing vitest/cargo); task list must sequence test-first; frame-protocol tests extended (dirty rects, unknown kind, kind-3 removal).
+
+## 7. Implementation Approach Options (per area)
+
+| Area | Option A: Extend | Option B: New components | Option C: Hybrid (recommended) |
+|---|---|---|---|
+| ClearCodec/EGFX | — | Reimplement EGFX wiring in SessionActor on current 0.14 | **Upgrade IronRDP + adapt SessionActor to upstream wiring patterns**; new `rdp/egfx.rs` module for DVC registration + compositor drain into SharedFrame/IPC |
+| Windows | cfg sprinkles in place | — | Mostly A: feature flags + CI + bundle config in place |
+| Tree sidebar | Bloat Sidebar.tsx | All-new tree components + store slice | New `ConnectionTree` components + extend connectionStore model (A for store, B for UI) |
+| Tabs | Move SessionTabs to App | New DocumentTabs | Adapt existing SessionTabs → App-level (extend) + route unification |
+| E2E | — | New harness dir + workflow job | New harness; extend connection model with mock flag |
+
+## 8. Effort & Risk
+
+| Req | Effort | Risk | Justification |
+|---|---|---|---|
+| 8 Windows | M | Medium | Known patterns; DX12/wgpu + WebView2 CI quirks unverified here |
+| 9 ClearCodec | **XL** | **High** | Major IronRDP upgrade (0.14→≥0.17+, breaking APIs), EGFX wiring in custom actor, codec negotiation correctness, frame pipeline rework |
+| 10 Tree | L | Medium | Data migration + DnD + new UI surface |
+| 11 Tabs | M | Low | Layout refactor; route fix is contained |
+| 12 E2E | L | Medium | Tri-OS driver matrix; mock mode plumbing |
+| 13 TDD | S | Low | Process discipline |
+
+## 9. Research Items for Design Phase
+
+1. Pin exact IronRDP release (≥ facade containing #1461/#1462/#1237) vs git dependency; check MSRV vs 1.77.2 and adapter effort for `ActiveStageBuilder`/typed DVC API in Drift's actor.
+2. Whether Drift reuses upstream `ironrdp-client` graphics-DVC registration or hand-wires `DrdynvcClient::with_dynamic_channel` in `SessionActor` (Drift does not use ironrdp-client).
+3. EGFX caps set to advertise (ClearCodec+Planar+Uncompressed+Progressive? AVC_DISABLED interplay with Windows servers — will Windows fall back to EGFX non-AVC or to fast-path?) + behavior vs real Windows Server targets (manual interop plan).
+4. wgpu-on-HWND smoke test for GpuRenderer (DX12) — GPU surface stays dormant but must not panic.
+5. tauri-driver tri-OS CI: safaridriver permissions on macOS runners, msedgedriver version matching WebView2 runtime, headed vs headless (Xvfb) on Linux.
+6. DnD choice for tree (native HTML5 vs dnd-kit dep).
+7. Frame-packet protocol versioning while removing kind 3 (frontend/backend contract test).
+8. Migration test strategy for connections.json (golden files, version field?).
+
+## 10. Recommendations (non-binding, for design)
+
+- Sequence delta as: **(1)** Windows platform (independent, unlocks CI tri-OS early), **(2)** E2E harness + mock mode (regression safety net), **(3)** tree/tabs GUI refactor (covered by new E2E), **(4)** IronRDP upgrade + ClearCodec/EGFX last (highest risk, benefits from safety net).
+- Keep fast-path bitmap route intact as the non-EGFX fallback (Req 9.3) — EGFX is additive.
+- Strip openh264 early (mechanical, testable via kind-3 absence) independent of EGFX work.
+
+---
+
+# Gap Analysis Addendum — Amended Requirements 10/11 (2026-11-11)
+
+Trigger: requirements amendment after user review — Req 10 now includes **multi-document connection libraries** (top-level tree nodes, create/rename/delete) and a **folder/library dashboard** (main panel lists contained connections incl. nested, live status, double-click connect); Req 11.5 shows the selected node's dashboard when no tab is open. Windows/ClearCodec/E2E/TDD analysis in §3–4, 6–9 is unaffected and not repeated.
+
+## A1. Multi-Document Libraries — Gap
+
+**Assets that survive**: UUID v4 connection ids (`connections.rs` L114 — unique across libraries, so keyring `account = connection id` needs no change); CRUD validation/import logic; camelCase serde contract; `ConnectionStore` mutex pattern.
+
+**Missing**:
+
+| Layer | Gap |
+|---|---|
+| Data model | No `Library` entity; `connections.json` is one flat array; no folder→library ownership |
+| Rust store | `ConnectionStore` (HashMap + single file) → needs library-aware layout + migration marker |
+| IPC | No `create_library` / `rename_library` / `delete_library` commands; existing CRUD commands not library-scoped |
+| TS | `lib/tauri.ts` wrappers + `connectionStore` assume flat list; no tree/uiState store slice for selection |
+| UI | Library tree nodes, library-level context menu, cross-library DnD, per-library filter scope |
+
+**Data-model options (updates §5; the "leans A" note there is superseded)**:
+
+- **A′ — single file, library+folder ids**: `connections.json` becomes `{ libraries: [...], connections: [{..., libraryId, folderId}] }`. Minimal migration; one file to back up; no per-library sharing.
+- **B′ — per-library files**: each library its own JSON file + small index. Royal TS-faithful (a library ≈ an `.rtsz` document); enables later export/share/sync per library; more store/IO rework.
+- **C′ — discriminated document tree**: one tree of nodes (`library | folder | connection`). Most uniform for tree ops (moves become node reparenting); largest refactor of store + TS types.
+
+All three satisfy Req 10; A′ is lowest risk, B′ best matches Royal TS mental model and future sharing, C′ cleanest for deep nesting. Design decision — new Research item A-1.
+
+**Migration**: flat array v1 → default library at root (Req 10.10). Presence-of-`libraries` key or explicit `version` field; golden-file tests (extends §9 item 8). Delete-library must warn about contained connections (destructive cascade — design defines confirmation UX; keyring cleanup best-effort per connection).
+
+## A2. Folder Dashboard — Gap
+
+**Reusable**: `ConnectionCard` patterns (status color, latency-on-mount, accent, entry animations), grid CSS, sessionStore live status subscription, `PerformanceHUD` thresholds n/a here.
+
+**Missing**: dashboard view component bound to the selected tree node; selection state store (new uiState slice: selectedNodeId, expandedNodes, collapse state — collapse pref currently in settingsStore, keep); double-click handler shared by tree + dashboard; start view (quick connect + tree pointer) when nothing selected; **QuickConnect must search across all libraries** (currently lists `connectionStore.connections` flat — works but must aggregate libraries once A′/B′/C′ lands).
+
+**Route impact**: main area now hosts tabs ∪ dashboard ∪ start view; complements Req 11 route unification (sessionId). Suggest route-per-view (e.g. `/library/:id`, `/folder/:id`, `/session/:sessionId`) — design decision, not gap.
+
+## A3. Updated Effort & Risk
+
+| Req | Was | Now | Why |
+|---|---|---|---|
+| 10 Tree+libraries | L / Medium | **L–XL / Medium-High** | Library entity + migration + cross-library DnD; C′ pushes toward XL |
+| 11 Tabs+dashboard | M / Low | **M / Low-Medium** | Dashboard/start view added; route unification unchanged |
+
+Sequencing recommendation (§10) unchanged; note the GUI refactor now carries more of the delta's weight if C′ is chosen.
+
+## A4. Added Research Items for Design
+
+- **A-1**: Library storage layout — A′ vs B′ vs C′ (drives store, migration, IPC, and future sharing).
+- **A-2**: Delete-library cascade UX + keyring cleanup contract.
+- **A-3**: QuickConnect + filter scope across libraries (aggregate query shape).
+- **A-4**: E2E scenario list should explicitly cover library create/rename/delete + dashboard selection and double-click connect (Req 12.3 "sidebar tree interactions" subsumes it; enumerate in design/tests).
+- **A-5**: Royal TS "open/close document" semantics deliberately not required (Req 10.2 stops at create/rename/delete) — confirm acceptable.
+
+---
+
+# Design Discovery & Synthesis Log (2026-11-11)
+
+## Discovery Additions (version pinning — resolves Research Item 1)
+
+- `ironrdp` facade latest = **0.17.0** (2026-07-10, MSRV Rust 1.89, edition 2024). Its feature set has **no `egfx` feature**, and it predates the 2026-08-27/30 end-to-end EGFX merges (#1461/#1462/#1237).
+- `ironrdp-egfx` latest = **0.5.0** (2026-10-27, edition 2024). Features: `openh264`, `openh264-bundled`, `openh264-libloading` — **all optional, off by default**; ClearCodec/Planar/Uncompressed/RFX-Progressive decode with no features enabled. Depends on the pdu/graphics ≥ 0.9 generation.
+- **Decision**: depend on IronRDP component crates directly (facade README explicitly supports this); pin the set aligned with egfx 0.5.0; never enable openh264 features; bump `rust-version` 1.77.2 → 1.89. Exact pin + `ActiveStageBuilder`/typed-DVC adaptation = **Task 0 alignment spike** (design.md Risks).
+
+## Synthesis Outcomes
+
+**Generalizations**
+- Platform matrix (Req 7 + 8) treated as one capability-matrix concern: cfg flags, CI jobs, bundle config, shortcut labels.
+- Libraries/folders/connections unified as `NodeId`-keyed tree nodes → single DnD/context/dashboard/filter implementation (Req 10).
+- Test tiers generalized into single-command pyramid contract (`test:unit`, `test:e2e`, `cargo test`) feeding tri-OS CI (Req 12 + 13).
+
+**Build vs Adopt**
+- ADOPT: `ironrdp-egfx` 0.5 (EGFX client + ClearCodec decode) — building this is out of the question; upstream wiring patterns guide `rdp/egfx.rs`.
+- ADOPT: WebdriverIO + tauri-driver for E2E; dnd-kit for tree DnD (fallback native HTML5 if React 19 peer conflict).
+- BUILD: CodecPolicy (caps single-source-of-truth), LibraryStore v2 + migration, ConnectionTree/Dashboard/DocumentTabs UI, mock-session exposure, frame-kind spy. No existing crate covers these app-specific seams.
+
+**Simplifications**
+- Data model = option **A′** (single `connections.json` v2 with `libraries`/`folders`/`connections`); per-library files (B′) and discriminated tree (C′) rejected for now — B′ is a recorded Revalidation Trigger, not lost.
+- SessionActor preserved (not rewritten to ironrdp-client); EGFX is an additive frame source; frame packet kinds 1/2 contract frozen so frontend changes stay minimal.
+- DashboardCard drops ConnectionCard's latency-on-mount probing (status-first, cheaper).
+
+## Consulted Guidance
+- `design-principles.md` (boundary-first, dependency direction, mermaid rules), `design-synthesis.md`, `design-review-gate.md`, design template; steering product/tech/structure (authored this session from assessment).
+
+## Review amendment (2026-11-11)
+- Direct tauri-driver/safaridriver does not provide the macOS WKWebView path. Prove the WebdriverIO Tauri service embedded macOS server before upgrading IronRDP. Source: https://tauri.app/develop/tests/webdriver/
+- ClearType requires a separate font-smoothing preference/request. ClearCodec does not establish font smoothing. Source: https://learn.microsoft.com/en-us/windows-server/administration/performance-tuning/role/remote-desktop/session-hosts
+- Foundation now precedes protocol changes: baseline characterization and tri-OS cold launch. Test presence is not full baseline coverage.
+- Cross-library moves are atomic and supported. Migration/load failure enters write-blocked recovery.
+- Task numbers shifted by one to insert foundation group 1; historical task references above are superseded by tasks.md.
+- Requirements/design approvals are reset for amended content; readiness remains false. No passing runtime tests are claimed.
+
+
+## Effort-control, nextest and Dagger decisions
+The user selected cargo-nextest and Dagger-based Actions with native Windows shell execution. The new task plan supersedes previous task-number references; no implementation is marked complete.
+- Reuse existing tempfile first for replacement; its persist API and sync limitations need platform tests: https://docs.rs/tempfile/latest/tempfile/struct.NamedTempFile.html
+- Alternative atomic-write-file is not selected by default: https://docs.rs/atomic-write-file/latest/atomic_write_file/
+- Tokio test-util offers paused time on current-thread test runtimes, not std::time control: https://docs.rs/tokio/latest/tokio/time/fn.pause.html
+- Nextest runs native Rust tests but needs separate doctests: https://nexte.st/ ; Windows overhead should be measured: https://nexte.st/docs/installation/windows/
+- Upstream currently advises nextest 0.9.150+; pin an applicable release when implementing, rather than float latest.
+- Dagger engine selection supports Podman; native engine connectivity remains a local feasibility gate: https://docs.dagger.io/reference/cli/
+- Actions integration remains a thin bridge: https://github.com/dagger/dagger-for-github
+- IronRDP client docs demonstrate upstream compositor ownership: https://docs.rs/ironrdp-egfx/latest/ironrdp_egfx/client/index.html . Fetching the proposed 0.5.0 docs failed during planning, so version compatibility is unverified until the compile probe.
+- Local command discovery found nextest.exe plus PowerShell wrappers for Dagger and Podman. Wrapper delegates were not executed or fully audited; existence is not proof of usable native engine connectivity.
+
+## Dagger-Podman connectivity spike (task 1.3, 2026-11-11) - PROVEN
+
+Outcome: native Windows Dagger-to-Podman connectivity proven within the 3h cap; no blocking result. Full evidence tree (disposable BuildArtifacts, not committed): `D:\BuildArtifacts\drift-rdp\dagger-bootstrap\` (EVIDENCE.md, logs 01-12 incl. podman inventory, proof artifacts, scratch TS module).
+
+- Engine: existing WSL-backed Podman machine `podman-machine-default` (Fedora 44, kernel 6.18.58.1-microsoft-standard-WSL2, server 5.8.9) via native client 5.8.3; rootful default connection `ssh://root@127.0.0.1:62042/run/podman/podman.sock`. No direct WSL commands, no new VM, no Compose.
+- Dagger pin: CLI v0.21.11 + engine `registry.dagger.io/engine:v0.21.11`. Discovery is NOT DOCKER_HOST (unset): user launcher `C:\Users\mariu\.local\bin\dagger.cmd` -> `D:\Source\PowerShell\scripts\Invoke-Dagger.ps1` sets `_EXPERIMENTAL_DAGGER_RUNNER_HOST=image+podman://registry.dagger.io/engine:v0.21.11`. Task 1.4 must encode this env in Invoke-CI/workflow instead of relying on the personal launcher. Pins also live in `developer-tools.psd1`.
+- Proof: `dagger query` core API ran alpine:3.21 withExec, exported artifact to scoped dir (exit 0); cache-bypass fresh-exec marker proves real execution. Scratch TS SDK module `dagger call proof export` also exit 0. Independently reproduced by the task-1.3 reviewer.
+- Caching finding for 2.7: identical withExec inputs replay cached stdout (content-addressed); cache-parity and E2E determinism work must account for it.
+- Module layout: dagger 0.21 `dagger init` defaults may place sources elsewhere; 1.4 must pin `sourceSubpath` explicitly (design file plan reserves `.dagger/`).
+- State left: podman machine running (as found); engine container `dagger-engine-v0.21.11` running (was stopped on arrival).
