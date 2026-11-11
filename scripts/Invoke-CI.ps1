@@ -44,15 +44,20 @@
   list: npm ci, lint, tsc --noEmit, vitest, build; failures propagate to the
   tier exit code and evidence lands under D:\BuildArtifacts\<project>\frontend.
 
-  The dagger tier (task 1.4; Requirements 7.1, 7.2, 8.4, 12.5): invokes the
-  Linux-container entries of the .dagger module (frontend, rust-checks,
+  The dagger tier (tasks 1.4 + 2.1; Requirements 7.1, 7.2, 8.4, 12.5): invokes
+  the Linux-container entries of the .dagger module (frontend, rust-checks,
   linux-build, linux-e2e) or the `contract` introspection. Engine wiring is
   the tier's own job, not a personal launcher's: it loads the pinned versions
   from .config/ci-versions.json, resolves the REAL dagger.exe (never a .cmd
   launcher), makes the native podman client reachable, sets
   _EXPERIMENTAL_DAGGER_RUNNER_HOST=image+podman://<pinned engine image>
-  itself (task 1.3 finding), and propagates the dagger exit code. Linux
-  containers are not Windows/macOS validation: native tiers stay native.
+  itself (task 1.3 finding), and propagates the dagger exit code. Task 2.1:
+  source-consuming entries receive a staged clean source (host
+  node_modules/target are never imported), frontend and rust-checks chain
+  `export --path` so their JUnit evidence lands under
+  D:\BuildArtifacts\<project>\dagger\artifacts\<entry>\, and the tier report
+  is per-entry (dagger-tier-report-<entry>.json). Linux containers are not
+  Windows/macOS validation: native tiers stay native.
 
   Single command per tier (Req 13.4):
     preflight:    pwsh -NoProfile -File scripts/Invoke-CI.ps1
@@ -448,6 +453,38 @@ function Resolve-DriftDaggerCli {
     return $null
 }
 
+function Copy-DriftCleanSource {
+    <# Stage a clean repository source for the Dagger container entries (task
+       2.1): the tier stages a mirror that NEVER contains host build outputs —
+       node_modules, src-tauri/target, dist — nor .git or the generated
+       .dagger/sdk tree (the module itself is loaded by the CLI from the real
+       repository .dagger/). Staging is explicit so the never-import contract
+       never depends on the dagger CLI's own, version-specific sync filtering
+       (measured on 0.21.11: the CLI itself already skips node_modules and
+       untracked files). Caches stay engine-managed; host target/node_modules
+       are never imported into a container. Returns the staged root; throws
+       when robocopy reports errors (exit >= 8). #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$StagedRoot
+    )
+    $excludeDirs = @(
+        'node_modules', (Join-Path $RepoRoot 'node_modules'),
+        '.git',         (Join-Path $RepoRoot '.git'),
+        'dist',         (Join-Path $RepoRoot 'dist'),
+        'target',       (Join-Path $RepoRoot 'src-tauri\target'),
+        '.dagger'
+    ) | Select-Object -Unique
+    New-Item -ItemType Directory -Path $StagedRoot -Force | Out-Null
+    $null = & robocopy $RepoRoot $StagedRoot /MIR /XD @($excludeDirs) /NFL /NDL /NJH /NJS /NP /R:2 /W:1
+    $robocopyExit = $LASTEXITCODE
+    if ($robocopyExit -ge 8) {
+        throw [System.InvalidOperationException]::new("robocopy failed while staging the clean source for the dagger tier (exit $robocopyExit)")
+    }
+    return $StagedRoot
+}
+
 function Invoke-RustTest {
     <# Rust test tier (task 1.2): pinned cargo-nextest run plus cargo test
        --doc (nextest does not run doctests), with failures propagated to the
@@ -834,16 +871,22 @@ function Invoke-FrontendTest {
 }
 
 function Invoke-DaggerTier {
-    <# Dagger tier (task 1.4; Req 7.1, 7.2, 8.4, 12.5): invokes a
+    <# Dagger tier (tasks 1.4 + 2.1; Req 7.1, 7.2, 8.4, 12.5): invokes a
        Linux-container entry point of the .dagger module. Engine wiring is
        done HERE, from the pinned .config/ci-versions.json — never by a
        personal launcher: _EXPERIMENTAL_DAGGER_RUNNER_HOST is set to
        image+podman://<pinned engine image> (task 1.3 finding), the REAL
        dagger.exe is resolved (Resolve-DriftDaggerCli), the native podman
        client is made reachable, and the dagger exit code propagates.
-       Linux containers are not native Windows/macOS validation (design.md
-       "CI ownership and reuse decisions"). Returns the dagger exit code, or
-       1 when rejected before invocation. #>
+       Task 2.1: source-consuming entries receive a STAGED clean source
+       (Copy-DriftCleanSource — host node_modules/target are never imported);
+       the frontend and rust-checks entries chain `export --path` so their
+       /test-results JUnit lands under D:\BuildArtifacts\<project>\dagger\
+       artifacts\<entry>\; the report is PER-ENTRY (dagger-tier-report-
+       <entry>.json, no last-writer-wins clobbering). Linux containers are
+       not native Windows/macOS validation (design.md "CI ownership and reuse
+       decisions"). Returns the dagger exit code, or 1 when rejected before
+       invocation. #>
     [CmdletBinding()]
     param(
         [string]$Tier = 'dagger',
@@ -853,12 +896,15 @@ function Invoke-DaggerTier {
         [string]$BuildArtifactsRoot = 'D:\BuildArtifacts',
         [string]$ProjectName = 'drift-rdp',
         [string]$ReportSubdir = 'dagger',
-        [string]$ReportName = 'dagger-tier-report.json',
+        # Empty default resolves to a PER-ENTRY report name (task 2.1), so
+        # consecutive entries no longer overwrite one shared report.
+        [string]$ReportName = '',
         [switch]$NoReport
     )
     $ErrorActionPreference = 'Stop'
     $totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) { $WorkingDirectory = (Get-Location).ProviderPath }
+    if ([string]::IsNullOrWhiteSpace($ReportName)) { $ReportName = "dagger-tier-report-$DaggerEntry.json" }
     $canonicalRoot = Get-CanonicalRepoRoot
     $moduleDir = Join-Path $canonicalRoot '.dagger'
     $pinsPath = Join-Path $canonicalRoot '.config\ci-versions.json'
@@ -918,19 +964,45 @@ function Invoke-DaggerTier {
     }
 
     # 5) invoke: engine env set HERE from the pin (task 1.3 finding), then
-    #    propagate the dagger exit code (including success).
+    #    propagate the dagger exit code (including success). Task 2.1:
+    #    - source-consuming entries receive a STAGED clean source (host
+    #      node_modules/target/dist/.git/.dagger are never imported);
+    #    - frontend and rust-checks return their /test-results Directory, so
+    #      the call chains `export --path` into the scoped artifacts dir.
     $daggerExit = $null
     $outputLines = @()
     $runnerHost = ''
+    $stagedSource = ''
+    $artifactDir = $null
+    $junitExported = @()
+    $callName = ''
     if ($pins) { $runnerHost = "$($pins.dagger.runnerHostScheme)://$($pins.dagger.engineImage)" }
     if ($failures.Count -eq 0) {
         $callName = Get-DriftDaggerCallName -Entry $DaggerEntry
         $daggerArgs = @('-m', $moduleDir, 'call', $callName)
         # Entries that consume repository source receive it as a --source
-        # Directory argument resolved by the dagger CLI from the canonical
-        # repository root (this SDK version has no host-directory access
-        # inside module code).
-        if ($callName -ne 'contract') { $daggerArgs += @('--source', $canonicalRoot) }
+        # Directory argument: the STAGED clean copy, not the host repository
+        # root (this SDK version has no host-directory access inside module
+        # code and the CLI cannot exclude host paths).
+        if ($callName -ne 'contract') {
+            try {
+                $stagedRoot = Get-ScopedOutputPath -BuildArtifactsRoot $BuildArtifactsRoot -ProjectName $ProjectName -Subdir "$ReportSubdir\staged-source"
+                $stagedSource = Copy-DriftCleanSource -RepoRoot $canonicalRoot -StagedRoot $stagedRoot
+                [Console]::WriteLine("staged source: $stagedSource (host node_modules/target/dist/.git/.dagger excluded; never imported)")
+            } catch {
+                $failures.Add("clean-source staging failed: $($_.Exception.Message)")
+                [Console]::Error.WriteLine("staged source: REJECTED — $($_.Exception.Message)")
+            }
+            if ($stagedSource -ne '') { $daggerArgs += @('--source', $stagedSource) }
+            # JUnit-emitting entries return their /test-results Directory:
+            # chain the CLI's export so the JUnit lands under scoped outputs.
+            if ($DaggerEntry -in @('frontend', 'rust-checks')) {
+                $artifactDir = Get-ScopedOutputPath -BuildArtifactsRoot $BuildArtifactsRoot -ProjectName $ProjectName -Subdir "$ReportSubdir\artifacts\$DaggerEntry"
+                $daggerArgs += @('export', '--path', $artifactDir)
+            }
+        }
+    }
+    if ($failures.Count -eq 0) {
         [Console]::WriteLine("runner host: $runnerHost (set by this tier from the pin, not by a launcher)")
         [Console]::WriteLine("invoking: dagger $($daggerArgs -join ' ')")
         $oldPath = $env:PATH
@@ -953,6 +1025,13 @@ function Invoke-DaggerTier {
         if ($daggerExit -eq 0) {
             [Console]::WriteLine("dagger: exit 0")
             [Console]::WriteLine(($outputLines | Select-Object -Last 5) -join [Environment]::NewLine)
+            # Collect the exported JUnit evidence (task 2.1 artifacts).
+            if ($null -ne $artifactDir -and (Test-Path -LiteralPath $artifactDir)) {
+                $junitExported = @(Get-ChildItem -LiteralPath $artifactDir -Filter '*.xml' -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+            }
+            if ($junitExported.Count -gt 0) {
+                [Console]::WriteLine("junit evidence: $($junitExported -join ', ')")
+            }
         } else {
             [Console]::Error.WriteLine("dagger: exit $daggerExit (entry '$DaggerEntry' failed; exit code propagated, Req 7.3, 13.3)")
             [Console]::Error.WriteLine(($outputLines | Select-Object -Last 20) -join [Environment]::NewLine)
@@ -980,6 +1059,9 @@ function Invoke-DaggerTier {
                 runnerHost           = $runnerHost
                 enginePin            = $(if ($pins) { $pins.dagger.engineImage } else { $null })
                 daggerExitCode       = $daggerExit
+                stagedSource         = $stagedSource
+                artifactDir          = $artifactDir
+                junitExported        = @($junitExported)
                 failures             = $failures
                 totalDurationSeconds = [Math]::Round($totalStopwatch.Elapsed.TotalSeconds, 2)
             }

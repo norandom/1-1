@@ -45,6 +45,22 @@ export const pins = {
 } as const
 
 /**
+ * Engine-managed cache volume ids (task 2.1). Keys separate OS/arch/
+ * toolchain/features per design.md "CI ownership and reuse decisions"; the
+ * version segments MUST stay in sync with the image pins above (enforced by
+ * scripts/Invoke-CI.Tests.ps1 CT11b-e against .config/ci-versions.json).
+ * Caches live inside the engine (never imported from or exported to the
+ * host); "features-default" is the cargo feature set of the current command
+ * list (no --features flags) — new feature combinations get a new key.
+ */
+export const cacheVolumeIds = {
+  npmRegistry: "drift-npm-registry-linux-x86_64-node-22.23.4",
+  cargoRegistry: "drift-cargo-registry-linux-x86_64-rust-1.98.1",
+  cargoGit: "drift-cargo-git-linux-x86_64-rust-1.98.1",
+  cargoTarget: "drift-cargo-target-linux-x86_64-rust-1.98.1-features-default",
+} as const
+
+/**
  * Contract entry name -> actual `dagger call` function name.
  *
  * The dagger v0.21.11 TypeScript SDK normalizes method names to kebab-case
@@ -81,10 +97,12 @@ export const contract = {
         "npm ci",
         "npm run lint",
         "npx tsc --noEmit",
-        "npx vitest run",
+        "npx vitest run --reporter=default --reporter=junit --outputFile.junit=/test-results/vitest-junit.xml",
         "npm run build",
       ],
-      status: "executable (task 2.1 owns JUnit emission and failing-fixture gate parity)",
+      emits: { junit: "/test-results/vitest-junit.xml", returned: "Directory (export with: dagger call frontend --source <staged> export --path <dir>)" },
+      caches: [cacheVolumeIds.npmRegistry + " @ /root/.npm"],
+      status: "executable CI gate (task 2.1): emits JUnit, fails loudly on failing fixtures; never imports host node_modules/target",
     },
     {
       entry: "rust-checks",
@@ -98,9 +116,16 @@ export const contract = {
         "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
         "cargo check --manifest-path src-tauri/Cargo.toml",
         "cargo-nextest nextest run --config-file .config/nextest.toml --profile ci --manifest-path src-tauri/Cargo.toml --no-tests fail",
+        "cp src-tauri/target/nextest/ci/junit.xml /test-results/rust-junit.xml",
         "cargo test --doc --manifest-path src-tauri/Cargo.toml",
       ],
-      status: "executable (task 2.1 owns JUnit emission and failing-fixture gate parity)",
+      emits: { junit: "/test-results/rust-junit.xml", returned: "Directory (export with: dagger call rust-checks --source <staged> export --path <dir>)" },
+      caches: [
+        cacheVolumeIds.cargoRegistry + " @ /usr/local/cargo/registry",
+        cacheVolumeIds.cargoGit + " @ /usr/local/cargo/git",
+        cacheVolumeIds.cargoTarget + " @ /src/src-tauri/target",
+      ],
+      status: "executable CI gate (task 2.1): emits JUnit (nextest ci profile), keeps cargo test --doc, fails loudly on failing fixtures",
     },
     {
       entry: "linux-build",

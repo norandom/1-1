@@ -9,7 +9,11 @@ interface UseClipboardOptions {
 export function useClipboard({ sessionId }: UseClipboardOptions) {
   const [syncEnabled, setSyncEnabled] = useState(true);
   const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
+  // Mirror the latest sessionId into the ref from an effect — refs must not be
+  // written during render.
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   const toggleSync = useCallback(() => {
     setSyncEnabled((prev) => !prev);

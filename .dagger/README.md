@@ -16,15 +16,20 @@ and the WSL-backed Podman engine is reached only through native clients
 
 Machine-readable twin: `dagger -m .dagger call contract` (source:
 `src/pins.ts`). Entries that consume repository source receive it as a
-`--source <repository root>` Directory argument resolved by the dagger CLI
+`--source <staged source>` Directory argument resolved by the dagger CLI
 (the dagger 0.21.11 TypeScript SDK has no host-directory access inside module
-code), e.g. `dagger -m .dagger call frontend --source .` — run from the
-repository root, or through `scripts/Invoke-CI.ps1 -Tier dagger` which passes
-the canonical root itself. Known cost: the 0.21 CLI cannot exclude host paths
-for Directory arguments, so the first sync includes host `node_modules`
-(~254 MB today); engine snapshots are content-addressed and incremental, and
-task 2.1 revisits source loading with a newer engine/SDK that allows host
-excludes.
+code). Task 2.1 source contract — **never import host build outputs**:
+`scripts/Invoke-CI.ps1 -Tier dagger` stages a clean mirror first
+(`D:\BuildArtifacts\drift-rdp\dagger\staged-source`) that excludes
+`node_modules`, `src-tauri/target`, `dist`, `.git` and `.dagger`, and the
+module rejects any source Directory that still contains them
+(`assertNeverImportHostArtifacts`). This makes the contract explicit and
+independent of the CLI's own sync filtering — which is implicit and
+version-specific: measured on 0.21.11, passing the dirty repository root
+directly did NOT import `node_modules` (the engine tree hashed identically
+to the staged clean source and the call reused the cached result), and an
+untracked, not-gitignored `e2e/` sentinel was not synced either. A fresh CI
+checkout satisfies the guard trivially.
 
 ## Linux container checks (Dagger module, this directory)
 
@@ -35,11 +40,41 @@ itself; GitHub-hosted Linux runners use their Docker engine instead.
 
 | Entry point     | Pinned image                       | Commands (the tier's actual command list) |
 |-----------------|------------------------------------|-------------------------------------------|
-| `frontend`      | `node:22.23.4-bookworm` (+digest)  | `npm ci` → `npm run lint` → `npx tsc --noEmit` → `npx vitest run` → `npm run build` |
-| `rust-checks`   | `rust:1.98.1-bookworm` (+digest)   | apt Tauri libs → `rustup component add rustfmt clippy` → install `cargo-nextest 0.9.150` (pinned tarball) → `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo check` → `cargo-nextest nextest run --config-file .config/nextest.toml --profile ci --no-tests fail` → `cargo test --doc` |
+| `frontend`      | `node:22.23.4-bookworm` (+digest)  | `npm ci` → `npm run lint` → `npx tsc --noEmit` → `npx vitest run --reporter=default --reporter=junit --outputFile.junit=/test-results/vitest-junit.xml` → `npm run build` |
+| `rust-checks`   | `rust:1.98.1-bookworm` (+digest)   | apt Tauri libs (once, cached layer) → `rustup component add rustfmt clippy` → install `cargo-nextest 0.9.150` (pinned tarball) → `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo check` → `cargo-nextest nextest run --config-file .config/nextest.toml --profile ci --no-tests fail` → `cp src-tauri/target/nextest/ci/junit.xml /test-results/rust-junit.xml` → `cargo test --doc` |
 | `linux-build`   | `rust:1.98.1-bookworm` + `node:22.23.4-bookworm` | `npm ci` → `npx tauri build --target x86_64-unknown-linux-gnu` (AppImage/deb export) |
 | `linux-e2e`     | `rust:1.98.1-bookworm`             | `npm ci` → `npm run test:e2e` (WebKitGTK driver per design.md E2E stack) |
 | `contract`      | —                                  | prints this contract as JSON |
+
+### Task 2.1: JUnit artifacts, gating and caches
+
+- `frontend` and `rust-checks` run their test step with
+  `expect: ReturnType.Any`, collect the JUnit the reporter still wrote, and
+  then **throw with the JUnit embedded** when the exit code is non-zero — a
+  failing fixture fails the dagger call (Req 7.3, 13.3: no fake pass) while
+  the evidence stays in the tier's `entry-<name>-output.txt`.
+- On success both entries return the `/test-results` Directory;
+  `scripts/Invoke-CI.ps1 -Tier dagger` chains `export --path
+  D:\BuildArtifacts\drift-rdp\dagger\artifacts\<entry>\` so the JUnit
+  (`vitest-junit.xml` / `rust-junit.xml`) is a scoped host CI artifact, and
+  the tier writes **per-entry reports** `dagger-tier-report-<entry>.json`
+  (the legacy shared `dagger-tier-report.json` is gone — no last-writer-wins).
+- Doctests remain included: `cargo test --doc` stays the last rust-checks
+  step (nextest does not run doctests) and its failures propagate.
+- Caches are **engine-managed CacheVolumes** (never imported from or exported
+  to the host), keyed by OS/arch/toolchain/features (`src/pins.ts`
+  `cacheVolumeIds`):
+
+| Cache volume id | Mounted at | Used by |
+|-----------------|------------|---------|
+| `drift-npm-registry-linux-x86_64-node-22.23.4` | `/root/.npm` | frontend |
+| `drift-cargo-registry-linux-x86_64-rust-1.98.1` | `/usr/local/cargo/registry` | rust-checks |
+| `drift-cargo-git-linux-x86_64-rust-1.98.1` | `/usr/local/cargo/git` | rust-checks |
+| `drift-cargo-target-linux-x86_64-rust-1.98.1-features-default` | `/src/src-tauri/target` | rust-checks |
+
+- The Linux Tauri apt libraries are provisioned **once** as a cached
+  container layer, chained *before* the source mount so the layer survives
+  source changes; `rustChecksContainer()` is the single reusable builder.
 
 Note on call names: the dagger v0.21.11 TypeScript SDK kebab-cases method
 names and splits digit/letter boundaries, so the E2E entry registers as the
@@ -49,10 +84,11 @@ mapping (see `src/pins.ts`, `daggerCallNames`).
 
 ### Execution status and the 2.x split (tasks.md)
 
-- `frontend` and `rust-checks` are **executable now** — each runs its real
-  command list above in the pinned container and fails loudly on any step
-  (Req 7.1, 13.3). Task 2.1 owns making them CI gates with JUnit emission,
-  the intentionally-failing-fixture gate, and cache/artifact parity.
+- `frontend` and `rust-checks` are **executable CI gates** (task 2.1) — each
+  runs its real command list above in the pinned container, emits tests/JUnit
+  (exported under `dagger/artifacts/<entry>/`), and fails loudly on any step
+  including an intentionally failing fixture (Req 7.1, 7.3, 13.3). Doctests
+  remain included in rust-checks.
 - `linux-build` **validates its contract** (inputs present, images pinned)
   and returns an explicit `contract-validated` / deferred status — task 2.2
   owns executing the Tauri bundle and exporting AppImage/deb artifacts. It

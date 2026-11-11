@@ -43,7 +43,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,8.4,12.5,13.3,13.4_
 
 - [ ] 2. Dagger Actions foundation on the old protocol stack
-- [ ] 2.1 Move portable checks into Dagger
+- [x] 2.1 Move portable checks into Dagger
   - Reuse npm lockfile and existing Rust commands; provision Linux Tauri libraries once. Cache registry/git and target separately by OS/arch/toolchain/features; never import host target/node_modules.
   - Done: Dagger frontend and Rust checks emit tests/JUnit and fail on an intentionally failing fixture; doctests remain included.
   - _Boundary: Dagger checks_
@@ -354,3 +354,4 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
 - CT04d cross-checks image tags between pins.ts and ci-versions.json but not the `@sha256:` digests — digest drift would go unnoticed; tighten when touched.
 - Invoke-DaggerTier writes one `dagger-tier-report.json` per run regardless of entry (last-writer-wins); use per-entry report names when 2.1 turns these into CI artifacts. Per-entry evidence survives in `entry-<name>-output.txt`.
 - Cosmetic: Invoke-CI.Tests.ps1 header comment says "CT01-CT11"; actual sections are CT01-CT10.
+- 2.1: lint baseline repaired (9 src/** problems; .dagger/sdk globally ignored) — `npm run lint` now gates CI. Dagger CLI sync itself already excludes node_modules/untracked (task-1.4 README claim corrected); explicit staging + module guard remain the never-import contract. cargo-nextest tarball ships without a leading directory — installer now self-verifies with `cargo-nextest --version`.

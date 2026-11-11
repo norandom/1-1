@@ -475,6 +475,13 @@ try {
         $ctPinsTs -match [regex]::Escape(($ctPins.rust.image -split '@')[0]) -and
         $ctPinsTs -match [regex]::Escape($ctPins.dagger.engineImage)
     } 'CT04d module pins.ts mirrors the node/rust image tags and engine image from ci-versions.json'
+    Assert-That {
+        $ctPins -and $ctPinsTs -ne '' -and
+        $ctPins.node.image -match '@sha256:[0-9a-f]{64}$' -and
+        $ctPins.rust.image -match '@sha256:[0-9a-f]{64}$' -and
+        $ctPinsTs -match [regex]::Escape(($ctPins.node.image -split '@')[1]) -and
+        $ctPinsTs -match [regex]::Escape(($ctPins.rust.image -split '@')[1])
+    } 'CT04d1 module pins.ts mirrors the full @sha256 image digests from ci-versions.json (digest drift cross-check)'
     Assert-That { $ctPinsTs -match [regex]::Escape('entry: "linux-e2e"') } 'CT04c1 the contract name linux-e2e is declared in pins.ts (SDK callable is linux-e-2-e)'
 
     Write-Output '-- contract: CT05 command-list document distinguishes container from native --'
@@ -538,6 +545,83 @@ try {
     Assert-That { $ctCiSrc -match [regex]::Escape('-Tier frontend') } 'CT10a Invoke-CI.ps1 documents the frontend tier command'
     Assert-That { $ctCiSrc -match [regex]::Escape('-Tier dagger') } 'CT10b Invoke-CI.ps1 documents the dagger tier command'
     Assert-That { $ctCiSrc -match [regex]::Escape("'frontend', 'rust-checks', 'linux-build', 'linux-e2e', 'contract'") } 'CT10c -DaggerEntry ValidateSet exposes exactly the module entry points plus contract introspection'
+
+    # --- task 2.1: portable checks in Dagger — clean source, JUnit, caches ---
+    # Requirements 7.1, 7.3, 13.3 + tasks.md task 2.1: the frontend/rust-checks
+    # Dagger entries emit tests/JUnit, keep doctests, cache registry/git/target
+    # separately by OS/arch/toolchain/features, never import host
+    # target/node_modules, and the tier writes PER-ENTRY reports and exports
+    # the JUnit artifacts under scoped outputs.
+
+    Write-Output '-- contract: CT11 task 2.1 portable checks: clean source, JUnit, caches, per-entry reports --'
+    $ctIndexTsPath = Join-Path $RepoRoot '.dagger\src\index.ts'
+    $ctIndexTs = ''
+    if (Test-Path -LiteralPath $ctIndexTsPath -PathType Leaf) { $ctIndexTs = Get-Content -LiteralPath $ctIndexTsPath -Raw }
+
+    # a) lint gate parity: the generated dagger SDK tree must be globally
+    #    ignored so clean vs post-dagger lint runs agree (Implementation Notes).
+    $ctEslintPath = Join-Path $RepoRoot 'eslint.config.js'
+    $ctEslint = ''
+    if (Test-Path -LiteralPath $ctEslintPath -PathType Leaf) { $ctEslint = Get-Content -LiteralPath $ctEslintPath -Raw }
+    Assert-That { $ctEslint -match [regex]::Escape('.dagger/sdk') } 'CT11a eslint.config.js globally ignores .dagger/sdk (clean vs post-dagger lint runs agree)'
+
+    # b) engine-managed cache volume ids keyed by OS/arch/toolchain/features
+    Assert-That { $ctPins -and $ctPinsTs -match [regex]::Escape('drift-npm-registry-linux-x86_64-node-' + $ctPins.node.version) } 'CT11b npm registry cache id is keyed by OS/arch/toolchain (node pin)'
+    Assert-That { $ctPins -and $ctPinsTs -match [regex]::Escape('drift-cargo-registry-linux-x86_64-rust-' + $ctPins.rust.toolchain) } 'CT11c cargo registry cache id is keyed by OS/arch/toolchain (rust pin)'
+    Assert-That { $ctPins -and $ctPinsTs -match [regex]::Escape('drift-cargo-git-linux-x86_64-rust-' + $ctPins.rust.toolchain) } 'CT11d cargo git cache id is keyed by OS/arch/toolchain (rust pin)'
+    Assert-That { $ctPins -and $ctPinsTs -match [regex]::Escape('drift-cargo-target-linux-x86_64-rust-' + $ctPins.rust.toolchain + '-features-default') } 'CT11e cargo target cache id is keyed by OS/arch/toolchain/features'
+
+    # c) module mounts the caches at the canonical tool cache paths and emits junit
+    Assert-That {
+        $ctIndexTs -match [regex]::Escape('"/root/.npm"') -and
+        $ctIndexTs -match [regex]::Escape('"/usr/local/cargo/registry"') -and
+        $ctIndexTs -match [regex]::Escape('"/usr/local/cargo/git"') -and
+        $ctIndexTs -match [regex]::Escape('"/src/src-tauri/target"')
+    } 'CT11f module mounts npm registry + cargo registry/git/target as separate engine-managed cache volumes'
+    Assert-That { $ctIndexTs -match [regex]::Escape('/test-results/vitest-junit.xml') -and $ctIndexTs -match [regex]::Escape('/test-results/rust-junit.xml') } 'CT11g frontend vitest and rust nextest write JUnit under /test-results'
+    Assert-That { ([regex]::Matches($ctIndexTs, 'Promise<Directory>')).Count -ge 2 } 'CT11h frontend and rustChecks return the JUnit artifact directory (exportable via dagger export --path)'
+    Assert-That { $ctIndexTs -match [regex]::Escape('ReturnType.Any') } 'CT11i test steps run with expect any so failing tests still emit their JUnit before the entry fails loudly'
+    Assert-That { $ctIndexTs -match [regex]::Escape('"--doc"') -and $ctIndexTs -match [regex]::Escape('"cargo"') -and $ctIndexTs -match [regex]::Escape('"test"') } 'CT11j doctests remain included in rust-checks (cargo test --doc)'
+    Assert-That { $ctIndexTs -match 'node_modules' -and $ctIndexTs -match 'src-tauri/target' -and $ctIndexTs -match 'never include host build outputs' } 'CT11k module rejects sources containing host node_modules or src-tauri/target (never import host artifacts)'
+
+    # d) tier behavior through the recording shim: per-entry reports, clean
+    #    staged source, artifact export chaining.
+    $ctDaggerReportDir = Join-Path $BuildArtifactsRoot "$ProjectName\dagger"
+    $ctLegacyReport = Join-Path $ctDaggerReportDir 'dagger-tier-report.json'
+    if (Test-Path -LiteralPath $ctLegacyReport) { Remove-Item -LiteralPath $ctLegacyReport -Force }
+    $ctStagedRoot = Join-Path $ctDaggerReportDir 'staged-source'
+    $ctRecorderOut3 = Join-Path $ctDaggerShimDir 'recorder-out-3.txt'
+    $ctD4 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'frontend', '-DaggerCliPath', $ctRecorder) -Environment @{ 'DRIFT_DAGGER_RECORDER_OUT' = $ctRecorderOut3 }
+    Assert-That { $ctD4.ExitCode -eq 7 } 'CT11l frontend dagger tier propagates the shim exit code through the staging/export flow'
+    $ctRec3 = ''
+    if (Test-Path -LiteralPath $ctRecorderOut3 -PathType Leaf) { $ctRec3 = Get-Content -LiteralPath $ctRecorderOut3 -Raw }
+    Assert-That { $ctRec3 -match '--source' -and $ctRec3 -match [regex]::Escape('staged-source') } 'CT11m tier passes the staged clean source directory, not the host repository root'
+    Assert-That { $ctRec3 -match 'export' -and $ctRec3 -match '--path' -and $ctRec3 -match [regex]::Escape('artifacts\frontend') } 'CT11n frontend entry call chains export --path into the scoped artifacts directory'
+    Assert-That {
+        (Test-Path -LiteralPath (Join-Path $ctStagedRoot 'package.json') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $ctStagedRoot 'package-lock.json') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $ctStagedRoot 'src-tauri\Cargo.toml') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $ctStagedRoot 'src-tauri\Cargo.lock') -PathType Leaf)
+    } 'CT11o staged source carries the lockfiles (npm ci and cargo reuse them)'
+    Assert-That {
+        -not (Test-Path -LiteralPath (Join-Path $ctStagedRoot 'node_modules')) -and
+        -not (Test-Path -LiteralPath (Join-Path $ctStagedRoot 'src-tauri\target')) -and
+        -not (Test-Path -LiteralPath (Join-Path $ctStagedRoot '.git')) -and
+        -not (Test-Path -LiteralPath (Join-Path $ctStagedRoot '.dagger')) -and
+        -not (Test-Path -LiteralPath (Join-Path $ctStagedRoot 'dist'))
+    } 'CT11p staged source never contains host node_modules, src-tauri/target, .git, .dagger or dist'
+    $ctD4Report = Read-RustTierReport -Path (Join-Path $ctDaggerReportDir 'dagger-tier-report-frontend.json')
+    Assert-That { $null -ne $ctD4Report -and $ctD4Report.entry -eq 'frontend' -and $ctD4Report.daggerExitCode -eq 7 } 'CT11q dagger tier writes a per-entry report (dagger-tier-report-frontend.json)'
+    Assert-That { -not (Test-Path -LiteralPath $ctLegacyReport) } 'CT11r the legacy last-writer-wins dagger-tier-report.json is gone for good'
+    Assert-That { try { [string]$ctD4Report.artifactDir -match [regex]::Escape('artifacts\frontend') } catch { $false } } 'CT11s per-entry report records the scoped artifact directory'
+    Assert-That { $ctRec -notmatch 'export' } 'CT11t the contract entry still takes no --source and no export (string contract return)'
+    $ctRecorderOut4 = Join-Path $ctDaggerShimDir 'recorder-out-4.txt'
+    $ctD5 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'rust-checks', '-DaggerCliPath', $ctRecorder) -Environment @{ 'DRIFT_DAGGER_RECORDER_OUT' = $ctRecorderOut4 }
+    Assert-That { $ctD5.ExitCode -eq 7 } 'CT11u rust-checks dagger tier propagates the shim exit code'
+    $ctRec4 = ''
+    if (Test-Path -LiteralPath $ctRecorderOut4 -PathType Leaf) { $ctRec4 = Get-Content -LiteralPath $ctRecorderOut4 -Raw }
+    Assert-That { $ctRec4 -match 'rust-checks' -and $ctRec4 -match 'export' -and $ctRec4 -match [regex]::Escape('artifacts\rust-checks') } 'CT11v rust-checks entry call chains export --path into its own scoped artifacts directory'
+    Assert-That { $null -ne (Read-RustTierReport -Path (Join-Path $ctDaggerReportDir 'dagger-tier-report-rust-checks.json')) } 'CT11w dagger tier writes dagger-tier-report-rust-checks.json (per-entry, no clobbering)'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.

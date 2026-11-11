@@ -148,53 +148,68 @@ export function SessionCanvas({
     return nextSurface;
   }, []);
 
+  // Latest-ref indirection for the recursive draw scheduler: the rAF callback
+  // must be able to re-schedule itself when new dirty rects arrive mid-draw,
+  // but a useCallback cannot reference its own binding before declaration.
+  // The effect below owns the implementation; scheduleDraw stays referentially
+  // stable so frame-subscription effects do not resubscribe on every render.
+  const scheduleDrawRef = useRef<() => void>(() => undefined);
+
   const scheduleDraw = useCallback(() => {
-    if (renderScheduledRef.current) {
-      return;
-    }
+    scheduleDrawRef.current();
+  }, []);
 
-    renderScheduledRef.current = true;
-
-    requestAnimationFrame(() => {
-      renderScheduledRef.current = false;
-
-      const canvas = canvasRef.current;
-      const surface = surfaceRef.current;
-      if (!canvas || !surface?.imageData || !surface.dirty) {
+  useEffect(() => {
+    const draw = () => {
+      if (renderScheduledRef.current) {
         return;
       }
 
-      if (canvas.width !== surface.width || canvas.height !== surface.height) {
-        canvas.width = surface.width;
-        canvas.height = surface.height;
-      }
+      renderScheduledRef.current = true;
 
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        return;
-      }
+      requestAnimationFrame(() => {
+        renderScheduledRef.current = false;
 
-      ctx.imageSmoothingEnabled = false;
+        const canvas = canvasRef.current;
+        const surface = surfaceRef.current;
+        if (!canvas || !surface?.imageData || !surface.dirty) {
+          return;
+        }
 
-      const dirty = surface.dirty;
-      surface.dirty = null;
+        if (canvas.width !== surface.width || canvas.height !== surface.height) {
+          canvas.width = surface.width;
+          canvas.height = surface.height;
+        }
 
-      ctx.putImageData(
-        surface.imageData,
-        0,
-        0,
-        dirty.x,
-        dirty.y,
-        dirty.width,
-        dirty.height
-      );
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          return;
+        }
 
-      onFramePresented?.();
+        ctx.imageSmoothingEnabled = false;
 
-      if (surface.dirty) {
-        scheduleDraw();
-      }
-    });
+        const dirty = surface.dirty;
+        surface.dirty = null;
+
+        ctx.putImageData(
+          surface.imageData,
+          0,
+          0,
+          dirty.x,
+          dirty.y,
+          dirty.width,
+          dirty.height
+        );
+
+        onFramePresented?.();
+
+        if (surface.dirty) {
+          draw();
+        }
+      });
+    };
+
+    scheduleDrawRef.current = draw;
   }, [onFramePresented]);
 
   useEffect(() => {
@@ -343,7 +358,7 @@ export function SessionCanvas({
       renderScheduledRef.current = false;
       surfaceRef.current = null;
     };
-  }, [ensureSurface, scheduleDraw, subscribeToFrames]);
+  }, [ensureSurface, onFramePresented, scheduleDraw, subscribeToFrames]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -366,7 +381,7 @@ export function SessionCanvas({
 
     observer.observe(containerRef.current);
     return () => observer.disconnect();
-  }, [onResize]);
+  }, [onResize, surfaceHeight, surfaceWidth]);
 
   // Auto-focus the canvas when it mounts (so keyboard works immediately)
   useEffect(() => {

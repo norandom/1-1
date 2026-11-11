@@ -137,13 +137,21 @@ export function ConnectionCard({ connection, index, onEdit }: Props) {
     }
   };
 
+  // Render-pure clock for relative timestamps: Date.now() must not run during
+  // render, so the value lives in state and a minute interval keeps it fresh.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const handleDelete = async () => {
     await deleteConnection(connection.id);
   };
 
   const relativeTime = (dateStr?: string) => {
     if (!dateStr) return 'Never connected';
-    const diff = Date.now() - new Date(dateStr).getTime();
+    const diff = nowMs - new Date(dateStr).getTime();
     const mins = Math.floor(diff / 60000);
     if (mins < 1) return 'Just now';
     if (mins < 60) return `${mins}m ago`;
