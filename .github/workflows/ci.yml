@@ -1,3 +1,30 @@
+# Drift CI — thin trigger/artifact layer (spec windows-clearcodec-royalts-e2e, task 2.6).
+#
+# Ownership (Req 7.4; design.md "CI ownership and reuse decisions"): Dagger
+# owns portable/Linux check and build logic. The dagger-* jobs below call the
+# pinned .dagger module entries through the Dagger-for-GitHub bridge; the
+# pinned CLI (0.21.11) launches the pinned engine image on the runner's own
+# Docker engine — GitHub-hosted Linux runners never set the image+podman
+# runner host and never need a Dagger Cloud token or any other credential.
+# Native Windows (MSVC/WebView2, pwsh tiers) and native macOS bundles remain
+# the explicit platform exceptions; Linux-container results never substitute
+# for native Windows/macOS validation.
+#
+# Dev-host twin of the dagger jobs (Req 13.4, one command per tier):
+#   pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier dagger -DaggerEntry <frontend|rust-checks|linux-build|linux-e2e|contract>
+# Full command contract: .dagger/README.md.
+#
+# Scope notes (honest limitations):
+# - task 2.4 (macOS WebdriverIO Tauri-service driver proof) is BLOCKED — no
+#   macOS host — so the macOS jobs below are bundle jobs only; no
+#   driver-dependent macOS UI/E2E step is wired yet (later spec tasks).
+# - The Windows job wires the native tier/build gates and installer (Req
+#   8.4); its driver-dependent UI/E2E work is likewise later spec work.
+#
+# Pins: actions are pinned by commit SHA; the Dagger CLI, node, rust toolchain
+# and cargo-nextest versions mirror .config/ci-versions.json (never floating;
+# runner images are explicit, never -latest).
+
 name: CI
 
 on:
@@ -10,151 +37,203 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  # ─── TypeScript ─────────────────────────────────────
-  typecheck:
-    name: typecheck
-    runs-on: ubuntu-latest
+  # ─── Portable/Linux checks: Dagger module entries (thin jobs) ────────
+  dagger-frontend:
+    name: dagger frontend (Linux container)
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare scoped artifact directory
+        run: mkdir -p ci-artifacts/frontend
+      - name: dagger call frontend (npm ci, lint, tsc, vitest JUnit, build)
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npx tsc --noEmit
+          version: "0.21.11" # pinned Dagger CLI — .config/ci-versions.json dagger.cliVersion
+          module: .dagger
+          call: frontend --source . export --path ci-artifacts/frontend
+      - name: Publish JUnit and failure evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dagger-frontend-artifacts
+          path: ci-artifacts/frontend/
+          if-no-files-found: warn
 
-  frontend-test:
-    name: frontend-test
-    runs-on: ubuntu-latest
+  dagger-rust-checks:
+    name: dagger rust-checks (Linux container)
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare scoped artifact directory
+        run: mkdir -p ci-artifacts/rust-checks
+      - name: dagger call rust-checks (fmt, clippy, check, nextest, doc)
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npx vitest run
+          version: "0.21.11" # pinned Dagger CLI — .config/ci-versions.json dagger.cliVersion
+          module: .dagger
+          call: rust-checks --source . export --path ci-artifacts/rust-checks
+      - name: Publish JUnit and failure evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dagger-rust-checks-artifacts
+          path: ci-artifacts/rust-checks/
+          if-no-files-found: warn
 
-  # ─── Rust ───────────────────────────────────────────
-  rust-check:
-    name: rust-check
-    runs-on: ubuntu-22.04
+  dagger-linux-build:
+    name: dagger linux-build (AppImage + deb bundles)
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare scoped artifact directory
+        run: mkdir -p ci-artifacts/linux-build
+      - name: dagger call linux-build (tauri build + in-container bundle gate)
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
         with:
-          workspaces: src-tauri
-      - name: Install system deps
+          version: "0.21.11" # pinned Dagger CLI — .config/ci-versions.json dagger.cliVersion
+          module: .dagger
+          call: linux-build --source . export --path ci-artifacts/linux-build
+      - name: Verify exported bundles (runner-side twin of the tier gate)
+        if: always()
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-            patchelf libdbus-1-dev libssl-dev pkg-config
-      - name: cargo check
-        working-directory: src-tauri
-        run: cargo check
-
-  rust-test:
-    name: rust-test
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          set -euo pipefail
+          appimages="$(find ci-artifacts/linux-build -name '*.AppImage' -type f | wc -l)"
+          debs="$(find ci-artifacts/linux-build -name '*.deb' -type f | wc -l)"
+          if [ "$appimages" -lt 1 ] || [ "$debs" -lt 1 ] || [ -z "$(find ci-artifacts/linux-build -name linux-build.log -type f -print -quit)" ]; then
+            echo "missing bundle artifacts (AppImage/deb/linux-build.log) — a green build without its artifacts is a fake pass (Req 7.2, 7.3)"
+            exit 1
+          fi
+          find ci-artifacts/linux-build -type f
+      - name: Publish bundles, build log and failure evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          workspaces: src-tauri
-      - name: Install system deps
+          name: dagger-linux-build-artifacts
+          path: ci-artifacts/linux-build/
+          if-no-files-found: warn
+
+  dagger-linux-e2e:
+    name: dagger linux-e2e (built-app cold-launch gate)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare scoped artifact directory
+        run: mkdir -p ci-artifacts/linux-e2e
+      - name: dagger call linux-e-2-e (cold launch under Xvfb, evidence export)
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77 # v8.4.1
+        with:
+          version: "0.21.11" # pinned Dagger CLI — .config/ci-versions.json dagger.cliVersion
+          module: .dagger
+          call: linux-e-2-e --source . export --path ci-artifacts/linux-e2e
+      - name: Cold-launch verdict (fail unless ok=true)
+        if: always()
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-            patchelf libdbus-1-dev libssl-dev pkg-config
-      - name: cargo test
-        working-directory: src-tauri
-        run: cargo test
+          set -euo pipefail
+          status="$(find ci-artifacts/linux-e2e -name cold-launch-status.json -type f -print -quit)"
+          if [ -z "$status" ]; then
+            echo "no cold-launch-status.json exported — an exit-0 call without its status is a fake pass (Req 12.5)"
+            exit 1
+          fi
+          if ! jq -e '.ok == true' "$status" >/dev/null; then
+            echo "cold launch FAILED — see the exported failure screenshot and logs (fail loudly, Req 12.5)"
+            exit 1
+          fi
+          echo "cold launch ok: $status"
+      - name: Publish cold-launch evidence (status, screenshots, logs)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dagger-linux-e2e-artifacts
+          path: ci-artifacts/linux-e2e/
+          if-no-files-found: warn
 
-  rust-fmt:
-    name: rust-fmt
-    runs-on: ubuntu-latest
+  # ─── Native Windows exception: MSVC/WebView2 via pwsh tiers (Req 7.4, 7.5, 8.4) ───
+  # Native shells only: every step below declares shell: pwsh and stays on
+  # native Windows tooling (Req 7.5). The tiers write their scoped reports
+  # under D:\BuildArtifacts\drift-rdp\ (Req 12.7).
+  windows-native:
+    name: windows-native (MSVC + WebView2, pwsh tiers)
+    runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          components: rustfmt
-      - name: cargo fmt
-        working-directory: src-tauri
-        run: cargo fmt --check
-
-  rust-clippy:
-    name: rust-clippy
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-      - name: Install system deps
+          node-version: "22.23.4" # pinned — .config/ci-versions.json node.version
+      - name: Install pinned Rust toolchain (native MSVC host)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-            patchelf libdbus-1-dev libssl-dev pkg-config
-      - name: cargo clippy
-        working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          rustup default 1.98.1
+        shell: pwsh
+      - name: Install pinned cargo-nextest
+        run: cargo install cargo-nextest --locked --version 0.9.150
+        shell: pwsh
+      - name: Preflight tier (native tool + wrapper inspection)
+        run: pwsh -NoProfile -File scripts/Invoke-CI.ps1
+        shell: pwsh
+      - name: Frontend tier (npm ci, lint, tsc, vitest, build)
+        run: pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier frontend
+        shell: pwsh
+      - name: Rust tier (pinned nextest + doctests)
+        run: pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier rust
+        shell: pwsh
+      - name: Build Windows installer (NSIS)
+        run: npx tauri build
+        shell: pwsh
+      - name: Publish tier failure reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-native-tier-reports
+          path: D:\BuildArtifacts\drift-rdp
+          if-no-files-found: warn
+      - name: Publish Windows installer
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-installer-nsis
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
 
-  # ─── Build (matrix) ────────────────────────────────
-  build:
-    name: build (${{ matrix.target }})
-    needs: [typecheck, rust-check]
+  # ─── Native macOS exception: bundle jobs, both architectures (Req 7.2, 7.4) ───
+  # Bundle jobs only — see the task 2.4 BLOCKED note in the header: no
+  # driver-dependent macOS UI/E2E step is wired until the driver proof exists.
+  macos-bundle:
+    name: macos-bundle (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install Linux deps
-        if: runner.os == 'Linux'
+          node-version: "22.23.4" # pinned — .config/ci-versions.json node.version
+      - name: Install pinned Rust toolchain + bundle target
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-            patchelf libdbus-1-dev libssl-dev pkg-config
-      - run: npm ci
-      - name: Build Tauri app
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          rustup default 1.98.1
+          rustup target add ${{ matrix.target }}
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build Tauri bundle
         run: npx tauri build --target ${{ matrix.target }}
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Publish macOS bundle
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: drift-${{ matrix.target }}
-          path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
-          if-no-files-found: ignore
+          name: macos-bundle-${{ matrix.target }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+          if-no-files-found: error

@@ -887,6 +887,151 @@ try {
         $ctReadmeE2e -match [regex]::Escape('cold-launch') -and
         $ctReadmeE2e -match [regex]::Escape('cold-launch-failure-screenshot')
     } 'CT13u .dagger/README.md documents the linux-e2e cold-launch gate with the failure-screenshot export'
+
+    # --- task 2.6: thin Actions jobs — the workflow is a thin trigger/
+    # artifact layer: portable/Linux checks run through the pinned Dagger
+    # bridge on the runner's own Docker engine (dev-host twin:
+    # scripts/Invoke-CI.ps1 -Tier dagger -DaggerEntry <entry>), Windows
+    # stays a native pwsh/MSVC/WebView2 exception with NO foreign shell,
+    # macOS keeps native bundle jobs for BOTH architectures (the
+    # driver-dependent macOS UI/E2E job is task-2.4-blocked and intentionally
+    # not wired), actions are pinned by commit SHA, no Dagger Cloud token or
+    # secret is required, every gate is required, and failure evidence is
+    # published (Req 7.1-7.5, 8.4, 12.5, 13.3, 13.4). Static contract
+    # assertions only: the first live Actions run happens on push — the
+    # structural proof is this section.
+    Write-Output '-- contract: CT14 task 2.6 thin Actions jobs: Dagger Linux entries, native Windows/macOS exceptions, SHA-pinned actions --'
+
+    $ctWfPath = Join-Path $RepoRoot '.github\workflows\ci.yml'
+    $ctWf = ''
+    if (Test-Path -LiteralPath $ctWfPath -PathType Leaf) { $ctWf = Get-Content -LiteralPath $ctWfPath -Raw }
+    Assert-That { $ctWf -ne '' } 'CT14a the thin workflow exists at .github/workflows/ci.yml'
+
+    # b) triggers retained: push + pull_request still start the workflow.
+    Assert-That {
+        $ctWf -match '(?m)^on:' -and
+        $ctWf -match '(?m)^  push:' -and
+        $ctWf -match '(?m)^  pull_request:'
+    } 'CT14b push and pull_request triggers are retained (Req 7.1)'
+
+    # c) every action use pinned by full commit SHA (no floating tags).
+    #    (Both step forms: the "- uses:" shorthand and "uses:" under a named step.)
+    $ctUses = @([regex]::Matches($ctWf, '(?m)^\s*(?:-\s+)?uses:\s*(\S+)') | ForEach-Object { $_.Groups[1].Value })
+    Assert-That {
+        $ctUses.Count -ge 15 -and
+        @($ctUses | Where-Object { $_ -notmatch '@[0-9a-f]{40}$' }).Count -eq 0
+    } 'CT14c every action use is pinned by full commit SHA (checkout/setup-node/upload-artifact/Dagger bridge; no floating tags)'
+
+    # d) portable/Linux jobs are thin Dagger bridge calls, one per entry.
+    $ctDaggerUses = @($ctUses | Where-Object { $_ -like 'dagger/dagger-for-github@*' })
+    Assert-That { $ctDaggerUses.Count -eq 4 } 'CT14d all four portable/Linux jobs (frontend, rust-checks, linux-build, linux-e2e) run through dagger/dagger-for-github (thin Dagger bridge, Req 7.4)'
+    Assert-That {
+        $ctWf -match ('version:\s*"v?' + [regex]::Escape($ctPins.dagger.cliVersion) + '"') -and
+        $ctWf -notmatch 'version:\s*"latest"'
+    } 'CT14e the Dagger bridge version input equals the ci-versions.json CLI pin (never latest)'
+    Assert-That {
+        $ctWf -match [regex]::Escape('call: frontend --source . export --path ci-artifacts/frontend') -and
+        $ctWf -match [regex]::Escape('call: rust-checks --source . export --path ci-artifacts/rust-checks') -and
+        $ctWf -match [regex]::Escape('call: linux-build --source . export --path ci-artifacts/linux-build')
+    } 'CT14f frontend, rust-checks and linux-build entries are called with --source . and export into scoped ci-artifacts dirs (Req 7.1, 7.2)'
+    Assert-That { $ctWf -match [regex]::Escape('call: linux-e-2-e --source . export --path ci-artifacts/linux-e2e') } 'CT14g the linux-e2e job calls the SDK-registered linux-e-2-e entry (kebab mapping) with evidence export (Req 12.5)'
+    Assert-That {
+        $ctWf -notmatch '_EXPERIMENTAL_DAGGER_RUNNER_HOST' -and
+        $ctWf -match [regex]::Escape('-Tier dagger -DaggerEntry')
+    } 'CT14h Actions Linux runners use their own Docker engine (no image+podman runner host here); the dev-host twin tier command stays documented'
+
+    # i) native Windows exception: pwsh-only tier commands plus installer.
+    $ctWinBlock = [regex]::Match($ctWf, '(?ms)^  windows-native:.*?(?=^  [a-z][a-z0-9-]*:|\z)').Value
+    Assert-That { $ctWinBlock -ne '' -and $ctWinBlock -match 'runs-on:\s*windows-[0-9]+' } 'CT14i the native Windows job exists on an explicit Windows image (Req 8.4)'
+    $ctWinRunCount = @([regex]::Matches($ctWinBlock, '(?m)^\s*run:')).Count
+    $ctWinShells = @([regex]::Matches($ctWinBlock, 'shell:\s*(\S+)') | ForEach-Object { $_.Groups[1].Value })
+    Assert-That {
+        $ctWinRunCount -ge 6 -and
+        $ctWinShells.Count -eq $ctWinRunCount -and
+        @($ctWinShells | Where-Object { $_ -ne 'pwsh' }).Count -eq 0
+    } 'CT14j every Windows run step declares shell: pwsh (native shells only, Req 7.5)'
+    Assert-That {
+        $ctWinBlock.Length -gt 100 -and
+        $ctWinBlock -notmatch 'wsl' -and
+        $ctWinBlock -notmatch 'bash'
+    } 'CT14k the Windows job contains no wsl and no bash reference anywhere in its definition'
+    Assert-That {
+        $ctWinBlock -match '(?m)^\s*run:\s*pwsh -NoProfile -File scripts/Invoke-CI\.ps1\s*$' -and
+        $ctWinBlock -match [regex]::Escape('-Tier frontend') -and
+        $ctWinBlock -match [regex]::Escape('-Tier rust')
+    } 'CT14l the Windows job invokes the canonical native tier commands (preflight, frontend, rust) — one command per tier (Req 13.4)'
+    Assert-That {
+        $ctWinBlock -match ('rustup toolchain install ' + [regex]::Escape($ctPins.rust.toolchain)) -and
+        $ctWinBlock -match ('cargo install cargo-nextest --locked --version ' + [regex]::Escape($ctPins.nextest.version))
+    } 'CT14m the Windows toolchain and cargo-nextest installs match the ci-versions.json pins'
+    Assert-That {
+        $ctWinBlock -match 'npx tauri build' -and
+        $ctWinBlock -match [regex]::Escape('bundle/nsis/*.exe') -and
+        $ctWinBlock -match 'if-no-files-found:\s*error'
+    } 'CT14n the Windows job builds and publishes the NSIS installer; a missing installer fails the job (Req 8.4, no fake pass)'
+    Assert-That { $ctWinBlock -match [regex]::Escape('D:\BuildArtifacts\drift-rdp') } 'CT14o the Windows job publishes the tiers scoped failure reports under D:\BuildArtifacts\drift-rdp (Req 12.7)'
+
+    # j) native macOS exception: bundle jobs for BOTH architectures.
+    $ctMacBlock = [regex]::Match($ctWf, '(?ms)^  macos-bundle:.*?(?=^  [a-z][a-z0-9-]*:|\z)').Value
+    Assert-That {
+        $ctMacBlock -match [regex]::Escape('os: macos-15') -and
+        $ctMacBlock -match [regex]::Escape('target: aarch64-apple-darwin') -and
+        $ctMacBlock -match [regex]::Escape('os: macos-15-intel') -and
+        $ctMacBlock -match [regex]::Escape('target: x86_64-apple-darwin')
+    } 'CT14p the macOS bundle matrix preserves BOTH architectures (aarch64 + x86_64, Req 7.2)'
+    Assert-That {
+        $ctMacBlock -match 'fail-fast:\s*false' -and
+        $ctMacBlock -match 'npx tauri build --target \$\{\{ matrix\.target \}\}'
+    } 'CT14q the macOS matrix never cancels the sibling architecture and builds each target natively'
+    Assert-That {
+        $ctMacBlock -match [regex]::Escape('*.dmg') -and
+        $ctMacBlock -match 'if-no-files-found:\s*error'
+    } 'CT14r missing macOS bundle artifacts fail the job (Req 7.2, 7.3)'
+    Assert-That {
+        $ctMacBlock -match ('rustup toolchain install ' + [regex]::Escape($ctPins.rust.toolchain)) -and
+        $ctMacBlock -notmatch 'dagger/dagger-for-github'
+    } 'CT14s the macOS job is native (no Dagger) and pins the rust toolchain from ci-versions.json'
+
+    # k) runner-side twins of the tier gates: bundle re-check + verdict.
+    $ctLbBlock = [regex]::Match($ctWf, '(?ms)^  dagger-linux-build:.*?(?=^  [a-z][a-z0-9-]*:|\z)').Value
+    Assert-That {
+        $ctLbBlock -match [regex]::Escape('*.AppImage') -and
+        $ctLbBlock -match [regex]::Escape('*.deb') -and
+        $ctLbBlock -match [regex]::Escape('linux-build.log') -and
+        $ctLbBlock -match 'if:\s*always\(\)'
+    } 'CT14t linux-build re-verifies the exported AppImage+deb+log on the runner (tier double gate, Req 7.2, 7.3)'
+    $ctE2eBlock = [regex]::Match($ctWf, '(?ms)^  dagger-linux-e2e:.*?(?=^  [a-z][a-z0-9-]*:|\z)').Value
+    Assert-That {
+        $ctE2eBlock -match [regex]::Escape('cold-launch-status.json') -and
+        $ctE2eBlock -match [regex]::Escape('.ok == true') -and
+        $ctE2eBlock -match 'if:\s*always\(\)'
+    } 'CT14u the linux-e2e verdict step fails the job unless the exported cold-launch status is ok=true (fail loudly, Req 12.5)'
+
+    # v) gates required, evidence published, no secrets, honest limitations.
+    Assert-That { $ctWf -notmatch 'continue-on-error' } 'CT14v no step continues past a failed gate — every gate is required (Req 7.3, 13.3)'
+    $ctAlwaysCount = @([regex]::Matches($ctWf, 'if:\s*always\(\)')).Count
+    $ctUploadUses = @($ctUses | Where-Object { $_ -like 'actions/upload-artifact@*' })
+    Assert-That {
+        $ctAlwaysCount -ge 8 -and
+        $ctUploadUses.Count -eq 7
+    } 'CT14w every job publishes its reports/artifacts via if: always() uploads (failure evidence included)'
+    Assert-That {
+        $ctWf -notmatch 'DAGGER_CLOUD_TOKEN' -and
+        $ctWf -notmatch 'cloud-token' -and
+        $ctWf -notmatch 'secrets\.'
+    } 'CT14x no Dagger Cloud token or repository secret is referenced (PR checks need none)'
+    Assert-That {
+        $ctWf -notmatch 'runs-on:\s*(ubuntu|windows|macos)-latest' -and
+        @([regex]::Matches($ctWf, 'runs-on:\s*ubuntu-24\.04')).Count -ge 4
+    } 'CT14y runner images are explicit (never -latest labels)'
+    Assert-That {
+        @([regex]::Matches($ctWf, ('node-version:\s*"?' + [regex]::Escape($ctPins.node.version)))).Count -ge 2
+    } 'CT14z Actions node version matches the ci-versions.json node pin'
+    Assert-That {
+        $ctWf -match [regex]::Escape('task 2.4') -and
+        $ctWf -match 'BLOCKED' -and
+        $ctWf -match [regex]::Escape('never substitute')
+    } 'CT14aa the workflow records the blocked macOS driver scope (task 2.4) and never presents Linux-container results as native validation'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.
