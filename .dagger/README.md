@@ -42,7 +42,7 @@ itself; GitHub-hosted Linux runners use their Docker engine instead.
 |-----------------|------------------------------------|-------------------------------------------|
 | `frontend`      | `node:22.23.4-bookworm` (+digest)  | `npm ci` → `npm run lint` → `npx tsc --noEmit` → `npx vitest run --reporter=default --reporter=junit --outputFile.junit=/test-results/vitest-junit.xml` → `npm run build` |
 | `rust-checks`   | `rust:1.98.1-bookworm` (+digest)   | apt Tauri libs (once, cached layer) → `rustup component add rustfmt clippy` → install `cargo-nextest 0.9.150` (pinned tarball) → `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo check` → `cargo-nextest nextest run --config-file .config/nextest.toml --profile ci --no-tests fail` → `cp src-tauri/target/nextest/ci/junit.xml /test-results/rust-junit.xml` → `cargo test --doc` |
-| `linux-build`   | `rust:1.98.1-bookworm` + `node:22.23.4-bookworm` | `npm ci` → `npx tauri build --target x86_64-unknown-linux-gnu` (AppImage/deb export) |
+| `linux-build`   | `rust:1.98.1-bookworm` + `node:22.23.4-bookworm` | apt Tauri libs + bundle extras (once, cached layer) → merge `/usr/local` from the pinned node image (node+npm, no unpinned installs) → `npm ci` → `npx tauri build --target x86_64-unknown-linux-gnu` (log → `/test-results/linux-build.log`) → verify `bundle/appimage/*.AppImage` + `bundle/deb/*.deb` (missing artifacts throw) |
 | `linux-e2e`     | `rust:1.98.1-bookworm`             | `npm ci` → `npm run test:e2e` (WebKitGTK driver per design.md E2E stack) |
 | `contract`      | —                                  | prints this contract as JSON |
 
@@ -67,10 +67,10 @@ itself; GitHub-hosted Linux runners use their Docker engine instead.
 
 | Cache volume id | Mounted at | Used by |
 |-----------------|------------|---------|
-| `drift-npm-registry-linux-x86_64-node-22.23.4` | `/root/.npm` | frontend |
-| `drift-cargo-registry-linux-x86_64-rust-1.98.1` | `/usr/local/cargo/registry` | rust-checks |
-| `drift-cargo-git-linux-x86_64-rust-1.98.1` | `/usr/local/cargo/git` | rust-checks |
-| `drift-cargo-target-linux-x86_64-rust-1.98.1-features-default` | `/src/src-tauri/target` | rust-checks |
+| `drift-npm-registry-linux-x86_64-node-22.23.4` | `/root/.npm` | frontend, linux-build |
+| `drift-cargo-registry-linux-x86_64-rust-1.98.1` | `/usr/local/cargo/registry` | rust-checks, linux-build |
+| `drift-cargo-git-linux-x86_64-rust-1.98.1` | `/usr/local/cargo/git` | rust-checks, linux-build |
+| `drift-cargo-target-linux-x86_64-rust-1.98.1-features-default` | `/src/src-tauri/target` | rust-checks, linux-build |
 
 - The Linux Tauri apt libraries are provisioned **once** as a cached
   container layer, chained *before* the source mount so the layer survives
@@ -89,13 +89,46 @@ mapping (see `src/pins.ts`, `daggerCallNames`).
   (exported under `dagger/artifacts/<entry>/`), and fails loudly on any step
   including an intentionally failing fixture (Req 7.1, 7.3, 13.3). Doctests
   remain included in rust-checks.
-- `linux-build` **validates its contract** (inputs present, images pinned)
-  and returns an explicit `contract-validated` / deferred status — task 2.2
-  owns executing the Tauri bundle and exporting AppImage/deb artifacts. It
-  must not gate CI until 2.2 lands.
+- `linux-build` is an **executable CI gate** (task 2.2) — see the next
+  section: it runs the repo's current Tauri packaging, exports AppImage/deb
+  plus the build log under `dagger/artifacts/linux-build/`, and missing
+  artifacts fail the job.
 - `linux-e2e` **fails loudly while the `e2e/` suite does not exist** (spec
   tasks 2.5+/12.x own the WebdriverIO suite and driver wiring) — it refuses
   to fake a pass.
+
+### Task 2.2: Linux bundles — AppImage/deb export and the missing-artifact gate
+
+- `linux-build` **reuses the repository's current Tauri packaging** —
+  `npm ci` + `npx tauri build --target x86_64-unknown-linux-gnu` (the same
+  command `.github/workflows/ci.yml` runs), driven by
+  `src-tauri/tauri.conf.json` (`beforeBuildCommand: npm run build`; bundle
+  targets `all` → AppImage/deb on Linux). No packaging configuration is
+  forked.
+- node+npm come from the **pinned node image** (its `/usr/local` tree merged
+  into the pinned rust image — no unpinned package-manager installs), and
+  the AppImage bundling extras (`file`, `libfuse2`) are provisioned once as
+  the same kind of cached layer as the Tauri libs
+  (`tauriLinuxBundleAptPackages` in `.config/ci-versions.json` + `src/pins.ts`).
+- The entry returns its `/test-results` Directory; the tier chains
+  `export --path D:\BuildArtifacts\drift-rdp\dagger\artifacts\linux-build\`
+  so the scoped host CI artifacts are:
+  - `bundle/appimage/*.AppImage`, `bundle/deb/*.deb` — the Linux bundles,
+  - `linux-build.log` — the full build log,
+  - `bundle-paths.txt` + `bundle-manifest.txt` — what the gate verified.
+- **Missing artifacts fail the job** (Req 7.2, 7.3) with a double gate: the
+  module verifies in-container that `bundle/appimage/*.AppImage` AND
+  `bundle/deb/*.deb` exist after an exit-0 build and throws with the found
+  paths when either is missing, and the tier re-checks the exported host
+  directory (AppImage + deb + `linux-build.log`) and fails the tier with
+  exit 1 when anything is absent — a green run with missing artifacts is a
+  fake pass and cannot happen. The per-entry report records
+  `bundleArtifactsExported` and `bundleLogExported`.
+- Cache/output ownership is unchanged from task 2.1: the same four
+  engine-managed cache volumes (the bundle build adds no `--features`
+  flags, so the `features-default` key scheme still applies), host exports
+  are scoped exports only. These are Linux-container bundle artifacts —
+  they never substitute for native Windows/macOS build validation.
 
 ## Native Windows validation (pwsh, scripts/Invoke-CI.ps1)
 

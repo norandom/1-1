@@ -48,7 +48,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Dagger frontend and Rust checks emit tests/JUnit and fail on an intentionally failing fixture; doctests remain included.
   - _Boundary: Dagger checks_
   - _Requirements: 7.1,7.3,13.3_
-- [ ] 2.2 Move Linux bundles into Dagger
+- [x] 2.2 Move Linux bundles into Dagger
   - Reuse current Tauri packaging; export AppImage/deb plus logs. Keep cache/output in engine storage and scoped host exports.
   - Done: Linux bundle artifacts exist and missing artifacts fail the job.
   - _Boundary: Linux build_
@@ -355,3 +355,4 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
 - Invoke-DaggerTier writes one `dagger-tier-report.json` per run regardless of entry (last-writer-wins); use per-entry report names when 2.1 turns these into CI artifacts. Per-entry evidence survives in `entry-<name>-output.txt`.
 - Cosmetic: Invoke-CI.Tests.ps1 header comment says "CT01-CT11"; actual sections are CT01-CT10.
 - 2.1: lint baseline repaired (9 src/** problems; .dagger/sdk globally ignored) — `npm run lint` now gates CI. Dagger CLI sync itself already excludes node_modules/untracked (task-1.4 README claim corrected); explicit staging + module guard remain the never-import contract. cargo-nextest tarball ships without a leading directory — installer now self-verifies with `cargo-nextest --version`.
+- 2.2: linux-build gates missing bundles both module-side (throw) and tier-side (exit 1, ok=false report). Review hardening ideas (non-blocking): clear `src-tauri/target/<triple>/release/bundle` before build (stale-bundle blind spot only on warm dev engines; CI runners ephemeral); persist red-phase transcripts next to `linux-build-run-*.txt` before the 11.12 evidence audit; container apt extras `file`+`libfuse2` are insurance GH runners already ship (lists differ, disclosed).

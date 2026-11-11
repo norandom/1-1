@@ -44,19 +44,22 @@
   list: npm ci, lint, tsc --noEmit, vitest, build; failures propagate to the
   tier exit code and evidence lands under D:\BuildArtifacts\<project>\frontend.
 
-  The dagger tier (tasks 1.4 + 2.1; Requirements 7.1, 7.2, 8.4, 12.5): invokes
-  the Linux-container entries of the .dagger module (frontend, rust-checks,
-  linux-build, linux-e2e) or the `contract` introspection. Engine wiring is
-  the tier's own job, not a personal launcher's: it loads the pinned versions
-  from .config/ci-versions.json, resolves the REAL dagger.exe (never a .cmd
-  launcher), makes the native podman client reachable, sets
-  _EXPERIMENTAL_DAGGER_RUNNER_HOST=image+podman://<pinned engine image>
-  itself (task 1.3 finding), and propagates the dagger exit code. Task 2.1:
-  source-consuming entries receive a staged clean source (host
-  node_modules/target are never imported), frontend and rust-checks chain
-  `export --path` so their JUnit evidence lands under
+  The dagger tier (tasks 1.4 + 2.1 + 2.2; Requirements 7.1, 7.2, 8.4, 12.5):
+  invokes the Linux-container entries of the .dagger module (frontend,
+  rust-checks, linux-build, linux-e2e) or the `contract` introspection.
+  Engine wiring is the tier's own job, not a personal launcher's: it loads
+  the pinned versions from .config/ci-versions.json, resolves the REAL
+  dagger.exe (never a .cmd launcher), makes the native podman client
+  reachable, sets _EXPERIMENTAL_DAGGER_RUNNER_HOST=image+podman://<pinned
+  engine image> itself (task 1.3 finding), and propagates the dagger exit
+  code. Task 2.1: source-consuming entries receive a staged clean source
+  (host node_modules/target are never imported), frontend and rust-checks
+  chain `export --path` so their JUnit evidence lands under
   D:\BuildArtifacts\<project>\dagger\artifacts\<entry>\, and the tier report
-  is per-entry (dagger-tier-report-<entry>.json). Linux containers are not
+  is per-entry (dagger-tier-report-<entry>.json). Task 2.2: the linux-build
+  entry chains `export --path` for its AppImage/deb bundles + build log, and
+  the tier FAILS a green call whose bundle artifacts/log were not exported
+  (missing artifacts fail the job, Req 7.2, 7.3). Linux containers are not
   Windows/macOS validation: native tiers stay native.
 
   Single command per tier (Req 13.4):
@@ -871,8 +874,8 @@ function Invoke-FrontendTest {
 }
 
 function Invoke-DaggerTier {
-    <# Dagger tier (tasks 1.4 + 2.1; Req 7.1, 7.2, 8.4, 12.5): invokes a
-       Linux-container entry point of the .dagger module. Engine wiring is
+    <# Dagger tier (tasks 1.4 + 2.1 + 2.2; Req 7.1, 7.2, 8.4, 12.5): invokes
+       a Linux-container entry point of the .dagger module. Engine wiring is
        done HERE, from the pinned .config/ci-versions.json — never by a
        personal launcher: _EXPERIMENTAL_DAGGER_RUNNER_HOST is set to
        image+podman://<pinned engine image> (task 1.3 finding), the REAL
@@ -883,10 +886,13 @@ function Invoke-DaggerTier {
        the frontend and rust-checks entries chain `export --path` so their
        /test-results JUnit lands under D:\BuildArtifacts\<project>\dagger\
        artifacts\<entry>\; the report is PER-ENTRY (dagger-tier-report-
-       <entry>.json, no last-writer-wins clobbering). Linux containers are
-       not native Windows/macOS validation (design.md "CI ownership and reuse
-       decisions"). Returns the dagger exit code, or 1 when rejected before
-       invocation. #>
+       <entry>.json, no last-writer-wins clobbering). Task 2.2: the
+       linux-build entry also chains `export --path` (AppImage/deb + build
+       log), and the tier FAILS when a green call did not actually export
+       the bundle artifacts/log — missing artifacts fail the job (Req 7.2,
+       7.3; no fake pass). Linux containers are not native Windows/macOS
+       validation (design.md "CI ownership and reuse decisions"). Returns
+       the dagger exit code, or 1 when rejected before invocation. #>
     [CmdletBinding()]
     param(
         [string]$Tier = 'dagger',
@@ -975,6 +981,8 @@ function Invoke-DaggerTier {
     $stagedSource = ''
     $artifactDir = $null
     $junitExported = @()
+    $bundleArtifacts = @()
+    $bundleLog = $null
     $callName = ''
     if ($pins) { $runnerHost = "$($pins.dagger.runnerHostScheme)://$($pins.dagger.engineImage)" }
     if ($failures.Count -eq 0) {
@@ -994,9 +1002,10 @@ function Invoke-DaggerTier {
                 [Console]::Error.WriteLine("staged source: REJECTED — $($_.Exception.Message)")
             }
             if ($stagedSource -ne '') { $daggerArgs += @('--source', $stagedSource) }
-            # JUnit-emitting entries return their /test-results Directory:
-            # chain the CLI's export so the JUnit lands under scoped outputs.
-            if ($DaggerEntry -in @('frontend', 'rust-checks')) {
+            # Artifact-emitting entries return their /test-results Directory:
+            # chain the CLI's export so the evidence lands under scoped
+            # outputs. Task 2.2 adds linux-build (AppImage/deb + build log).
+            if ($DaggerEntry -in @('frontend', 'rust-checks', 'linux-build')) {
                 $artifactDir = Get-ScopedOutputPath -BuildArtifactsRoot $BuildArtifactsRoot -ProjectName $ProjectName -Subdir "$ReportSubdir\artifacts\$DaggerEntry"
                 $daggerArgs += @('export', '--path', $artifactDir)
             }
@@ -1032,6 +1041,30 @@ function Invoke-DaggerTier {
             if ($junitExported.Count -gt 0) {
                 [Console]::WriteLine("junit evidence: $($junitExported -join ', ')")
             }
+            # Task 2.2 bundle gate (Req 7.2, 7.3): a green linux-build call
+            # must have EXPORTED the real bundle artifacts and the build log —
+            # a green run with absent artifacts is a fake pass and fails the
+            # tier. This is the host-side twin of the module's in-container
+            # verification (missing artifacts fail the job).
+            if ($DaggerEntry -eq 'linux-build') {
+                if ($null -ne $artifactDir -and (Test-Path -LiteralPath $artifactDir)) {
+                    $bundleArtifacts = @(Get-ChildItem -LiteralPath $artifactDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.AppImage' -or $_.Name -like '*.deb' })
+                    $logMatches = @(Get-ChildItem -LiteralPath $artifactDir -Recurse -File -Filter 'linux-build.log' -ErrorAction SilentlyContinue)
+                    if ($logMatches.Count -gt 0) { $bundleLog = $logMatches[0] }
+                }
+                $missingBundles = @()
+                if (@($bundleArtifacts | Where-Object { $_.Name -like '*.AppImage' }).Count -eq 0) { $missingBundles += 'AppImage bundle (*.AppImage)' }
+                if (@($bundleArtifacts | Where-Object { $_.Name -like '*.deb' }).Count -eq 0) { $missingBundles += 'deb bundle (*.deb)' }
+                if ($null -eq $bundleLog) { $missingBundles += 'build log (linux-build.log)' }
+                if ($missingBundles.Count -gt 0) {
+                    $bundleFailureMessage = "linux-build bundle export incomplete after a successful dagger call: missing $($missingBundles -join ', ') under '$artifactDir' (Req 7.2, 7.3: artifacts must exist and missing artifacts fail the job — no fake pass)"
+                    $failures.Add($bundleFailureMessage)
+                    [Console]::Error.WriteLine("[FAIL] $bundleFailureMessage")
+                } else {
+                    [Console]::WriteLine("bundle artifacts: $(@($bundleArtifacts | ForEach-Object { $_.FullName }) -join ', ')")
+                    [Console]::WriteLine("bundle log: $($bundleLog.FullName)")
+                }
+            }
         } else {
             [Console]::Error.WriteLine("dagger: exit $daggerExit (entry '$DaggerEntry' failed; exit code propagated, Req 7.3, 13.3)")
             [Console]::Error.WriteLine(($outputLines | Select-Object -Last 20) -join [Environment]::NewLine)
@@ -1062,6 +1095,8 @@ function Invoke-DaggerTier {
                 stagedSource         = $stagedSource
                 artifactDir          = $artifactDir
                 junitExported        = @($junitExported)
+                bundleArtifactsExported = @($bundleArtifacts | ForEach-Object { $_.FullName })
+                bundleLogExported    = $(if ($null -ne $bundleLog) { $bundleLog.FullName } else { $null })
                 failures             = $failures
                 totalDurationSeconds = [Math]::Round($totalStopwatch.Elapsed.TotalSeconds, 2)
             }

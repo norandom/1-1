@@ -18,6 +18,14 @@
   container is required by this test tier (live engine proof is recorded
   separately in the task evidence).
 
+  The task 2.2 section (CT12) proves the Linux bundle gate: the linux-build
+  Dagger entry executes the repo's current Tauri packaging, exports
+  AppImage/deb plus the build log into the scoped artifact directory, and
+  MISSING ARTIFACTS FAIL THE TIER (Req 7.2, 7.3) — verified deterministically
+  through exit-0 shims that do (or do not) place the expected artifacts; the
+  live container bundle run and the corrupted-expectation gate demonstration
+  are captured in the task evidence, not here.
+
   Lightweight, self-contained runner: plain pwsh assertions over exit codes,
   messages and produced files. No Pester or other new dependency frameworks
   (tasks.md effort controls). Disposables are created under
@@ -622,6 +630,126 @@ try {
     if (Test-Path -LiteralPath $ctRecorderOut4 -PathType Leaf) { $ctRec4 = Get-Content -LiteralPath $ctRecorderOut4 -Raw }
     Assert-That { $ctRec4 -match 'rust-checks' -and $ctRec4 -match 'export' -and $ctRec4 -match [regex]::Escape('artifacts\rust-checks') } 'CT11v rust-checks entry call chains export --path into its own scoped artifacts directory'
     Assert-That { $null -ne (Read-RustTierReport -Path (Join-Path $ctDaggerReportDir 'dagger-tier-report-rust-checks.json')) } 'CT11w dagger tier writes dagger-tier-report-rust-checks.json (per-entry, no clobbering)'
+
+    # --- task 2.2: Linux bundles in Dagger — reuse the current Tauri
+    # packaging, export AppImage/deb plus logs into the scoped artifact
+    # directory, and FAIL the tier when bundle artifacts are missing.
+    # Requirements 7.2, 7.3 + tasks.md task 2.2. Static + child-process
+    # assertions only: no engine or container is required here (the live
+    # bundle run and the corrupted-expectation demonstration are recorded in
+    # the task evidence).
+
+    Write-Output '-- contract: CT12 task 2.2 Linux bundle: AppImage/deb + logs export, missing-artifact gate --'
+
+    # a) the module entry executes the bundle and returns the artifact directory
+    $ctLbBody = [regex]::Match($ctIndexTs, 'async linuxBuild\([\s\S]*?\r?\n  \}').Value
+    Assert-That { $ctLbBody -match 'Promise<Directory>' } 'CT12a linuxBuild returns the bundle artifact directory (exportable via dagger export --path)'
+    Assert-That { $ctIndexTs -match [regex]::Escape('npx tauri build --target') -and $ctIndexTs -match [regex]::Escape('x86_64-unknown-linux-gnu') } 'CT12b linuxBuild reuses the current Tauri packaging (npx tauri build --target x86_64-unknown-linux-gnu, the same command .github/workflows/ci.yml runs)'
+    Assert-That {
+        $ctIndexTs -match [regex]::Escape('"/appimage/*.AppImage"') -and
+        $ctIndexTs -match [regex]::Escape('"/deb/*.deb"') -and
+        $ctLbBody -match [regex]::Escape('ReturnType.Any') -and
+        $ctLbBody -match [regex]::Escape('missing artifacts fail the job')
+    } 'CT12c linuxBuild verifies AppImage AND deb after the build and throws when artifacts are missing (Done criterion, Req 7.3)'
+    Assert-That { $ctLbBody -match [regex]::Escape('linux-build.log') } 'CT12d linuxBuild captures the build log for export alongside the bundles'
+
+    # b) engine-managed caches + once-provisioned layers in the build container
+    $ctLbcBody = [regex]::Match($ctIndexTs, 'linuxBuildContainer\([\s\S]*?\r?\n  \}').Value
+    Assert-That {
+        $ctLbcBody -match [regex]::Escape('"/root/.npm"') -and
+        $ctLbcBody -match [regex]::Escape('"/usr/local/cargo/registry"') -and
+        $ctLbcBody -match [regex]::Escape('"/usr/local/cargo/git"') -and
+        $ctLbcBody -match [regex]::Escape('"/src/src-tauri/target"')
+    } 'CT12e linuxBuildContainer mounts npm registry + cargo registry/git/target as the same engine-managed cache volumes (key scheme unchanged)'
+    Assert-That {
+        $ctLbcBody -match [regex]::Escape('pins.tauriLinuxAptPackages') -and
+        $ctLbcBody -match [regex]::Escape('pins.tauriLinuxBundleAptPackages')
+    } 'CT12f linuxBuildContainer provisions the Tauri libs plus bundle extras once as cached layers (before the source mount)'
+    Assert-That { $ctLbcBody -match [regex]::Escape('pins.node.image') -and $ctLbcBody -match [regex]::Escape('pins.rust.image') } 'CT12g the build container stays on the pinned rust+node images (node merged in, no unpinned installs)'
+
+    # c) pins/contract honesty: executable gate, expected artifacts, extras parity
+    Assert-That {
+        $ctPinsTs -match [regex]::Escape('executable CI gate (task 2.2)') -and
+        $ctPinsTs -match [regex]::Escape('appimage/*.AppImage') -and
+        $ctPinsTs -match [regex]::Escape('deb/*.deb')
+    } 'CT12h contract marks linux-build as an executable CI gate with AppImage/deb expected artifacts'
+    $ctBundleExtras = @()
+    if ($ctPins -and $ctPins.PSObject.Properties['tauriLinuxBundleAptPackages']) { $ctBundleExtras = @($ctPins.tauriLinuxBundleAptPackages) }
+    Assert-That {
+        $ctBundleExtras.Count -gt 0 -and
+        @($ctBundleExtras | Where-Object { $ctPinsTs -notmatch [regex]::Escape(('"' + $_ + '"')) }).Count -eq 0
+    } 'CT12i bundle apt extras stay mirrored between ci-versions.json and pins.ts'
+
+    # d) tier behavior through shims (hermetic temp BuildArtifactsRoot so the
+    #    real evidence directory is never touched): export chaining, the
+    #    missing-artifact failure gate, and its per-entry scope.
+    $ctLbRoot = Join-Path $TempRoot 'lb-artifacts-root'
+    $ctOkShim = Join-Path $ctDaggerShimDir 'dagger-ok.ps1'
+    Set-Content -LiteralPath $ctOkShim -Value @(
+        'param()'
+        'if ($env:DRIFT_DAGGER_RECORDER_OUT) { "ARGS=$($args -join '' '')" | Set-Content -LiteralPath $env:DRIFT_DAGGER_RECORDER_OUT -Encoding ascii }'
+        'if ($env:DRIFT_DAGGER_FAKE_BUNDLES -eq "1") {'
+        '  $pathIndex = [array]::IndexOf($args, "--path")'
+        '  if ($pathIndex -ge 0 -and ($pathIndex + 1) -lt $args.Count) {'
+        '    $exportDir = $args[$pathIndex + 1]'
+        '    New-Item -ItemType Directory -Path $exportDir -Force | Out-Null'
+        '    Set-Content -LiteralPath (Join-Path $exportDir "Drift_0.1.0_amd64.AppImage") -Value "fake-appimage"'
+        '    Set-Content -LiteralPath (Join-Path $exportDir "Drift_0.1.0_amd64.deb") -Value "fake-deb"'
+        '    Set-Content -LiteralPath (Join-Path $exportDir "linux-build.log") -Value "fake build log"'
+        '  }'
+        '}'
+        'exit 0'
+    ) -Encoding utf8
+    $ctLbRecOut = Join-Path $ctDaggerShimDir 'lb-recorder-out.txt'
+    $ctLb1 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'linux-build', '-DaggerCliPath', $ctRecorder, '-BuildArtifactsRoot', $ctLbRoot) -Environment @{ 'DRIFT_DAGGER_RECORDER_OUT' = $ctLbRecOut }
+    Assert-That { $ctLb1.ExitCode -eq 7 } 'CT12j linux-build dagger tier propagates the shim exit code through the staging/export flow'
+    $ctLbRec = ''
+    if (Test-Path -LiteralPath $ctLbRecOut -PathType Leaf) { $ctLbRec = Get-Content -LiteralPath $ctLbRecOut -Raw }
+    Assert-That { $ctLbRec -match 'linux-build' -and $ctLbRec -match 'export' -and $ctLbRec -match '--path' -and $ctLbRec -match [regex]::Escape('artifacts\linux-build') } 'CT12k linux-build entry call chains export --path into the scoped artifacts directory'
+    $ctLb1Report = Read-RustTierReport -Path (Join-Path $ctLbRoot "$ProjectName\dagger\dagger-tier-report-linux-build.json")
+    Assert-That { $null -ne $ctLb1Report -and $ctLb1Report.entry -eq 'linux-build' -and $ctLb1Report.daggerExitCode -eq 7 } 'CT12l dagger tier writes the per-entry report dagger-tier-report-linux-build.json'
+
+    # e) the missing-artifact gate: exit-0 call WITHOUT exported bundles must
+    #    FAIL the tier (Req 7.3: a green run with absent artifacts is a fake
+    #    pass and must not happen).
+    $ctLb2 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'linux-build', '-DaggerCliPath', $ctOkShim, '-BuildArtifactsRoot', $ctLbRoot) -Environment @{ 'DRIFT_DAGGER_FAKE_BUNDLES' = '0' }
+    $ctLb2Combined = "{0}`n{1}" -f $ctLb2.StdOut, $ctLb2.StdErr
+    Assert-That { $ctLb2.ExitCode -eq 1 } 'CT12m exit-0 dagger call with missing bundle artifacts fails the tier (exit 1)'
+    Assert-That { $ctLb2Combined -match [regex]::Escape('missing') -and $ctLb2Combined -match 'AppImage' -and $ctLb2Combined -match 'deb' } 'CT12n the missing-artifact failure names the missing AppImage and deb bundles'
+    $ctLb2Report = Read-RustTierReport -Path (Join-Path $ctLbRoot "$ProjectName\dagger\dagger-tier-report-linux-build.json")
+    Assert-That {
+        $null -ne $ctLb2Report -and
+        $ctLb2Report.ok -eq $false -and
+        @($ctLb2Report.failures).Count -gt 0 -and
+        @($ctLb2Report.bundleArtifactsExported).Count -eq 0
+    } 'CT12o the failing run reports ok=false with the missing-artifact failure recorded'
+
+    # f) the positive control: exit-0 call WITH exported AppImage/deb + log
+    #    passes the tier and the report records the bundles.
+    $ctLb3 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'linux-build', '-DaggerCliPath', $ctOkShim, '-BuildArtifactsRoot', $ctLbRoot) -Environment @{ 'DRIFT_DAGGER_FAKE_BUNDLES' = '1' }
+    Assert-That { $ctLb3.ExitCode -eq 0 } 'CT12p exit-0 dagger call with exported AppImage/deb + log passes the tier'
+    $ctLb3Report = Read-RustTierReport -Path (Join-Path $ctLbRoot "$ProjectName\dagger\dagger-tier-report-linux-build.json")
+    Assert-That {
+        $null -ne $ctLb3Report -and
+        $ctLb3Report.ok -eq $true -and
+        @($ctLb3Report.bundleArtifactsExported).Count -eq 2 -and
+        "$ctLb3Report.bundleLogExported" -match [regex]::Escape('linux-build.log')
+    } 'CT12q the passing run records bundleArtifactsExported (AppImage+deb) and bundleLogExported in the report'
+
+    # g) the gate is scoped to linux-build: a frontend exit-0 call without
+    #    junit artifacts keeps the 2.1 behavior (pass; junit is logged only).
+    $ctLb4 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'frontend', '-DaggerCliPath', $ctOkShim, '-BuildArtifactsRoot', $ctLbRoot) -Environment @{ 'DRIFT_DAGGER_FAKE_BUNDLES' = '0' }
+    Assert-That { $ctLb4.ExitCode -eq 0 } 'CT12r the bundle gate does not change the frontend entry behavior (per-entry gate)'
+
+    # h) README documents the executable bundle gate
+    $ctReadmeLb = ''
+    if (Test-Path -LiteralPath (Join-Path $RepoRoot '.dagger\README.md') -PathType Leaf) { $ctReadmeLb = Get-Content -LiteralPath (Join-Path $RepoRoot '.dagger\README.md') -Raw }
+    Assert-That {
+        $ctReadmeLb -match [regex]::Escape('artifacts') -and
+        $ctReadmeLb -match [regex]::Escape('linux-build') -and
+        $ctReadmeLb -match [regex]::Escape('missing artifacts fail the job') -and
+        $ctReadmeLb -match [regex]::Escape('linux-build.log')
+    } 'CT12s .dagger/README.md documents the linux-build export convention and the missing-artifact gate'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.

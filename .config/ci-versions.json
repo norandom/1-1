@@ -39,5 +39,9 @@
     "libdbus-1-dev",
     "libssl-dev",
     "pkg-config"
+  ],
+  "tauriLinuxBundleAptPackages": [
+    "file",
+    "libfuse2"
   ]
 }

@@ -12,11 +12,14 @@
  *                  check, pinned cargo-nextest (ci profile, JUnit) and
  *                  doctests (cargo test --doc) in the pinned rust container
  *                  with the Tauri system libraries. Returns /test-results.
- *   linux-build  — validates the bundle contract (inputs present, images
- *                  pinned) and reports the exact command list; executing the
- *                  bundle is owned by task 2.2, so the returned status is an
- *                  explicit `contract-validated`/deferred — never a faked
- *                  bundle pass.
+ *   linux-build  — real pipeline (task 2.2): reuses the repository's current
+ *                  Tauri packaging (npm ci + npx tauri build --target
+ *                  x86_64-unknown-linux-gnu, the same command the GitHub
+ *                  workflow runs, driven by src-tauri/tauri.conf.json) in
+ *                  the pinned rust+node containers. Captures the build log,
+ *                  VERIFIES the AppImage and deb exist (missing artifacts
+ *                  throw — Req 7.2, 7.3), and returns /test-results with
+ *                  the bundles + logs for the tier's scoped host export.
  *   linux-e2e    — validates E2E prerequisites and fails loudly while the
  *                  e2e/ suite does not exist (spec tasks 2.5+/12.x own the
  *                  suite and driver wiring); it never fakes a pass.
@@ -53,6 +56,17 @@ import { pins, contract, cacheVolumeIds } from "./pins"
  * entries and exported to the scoped host artifact directory by the tier. */
 const VITEST_JUNIT_PATH = "/test-results/vitest-junit.xml"
 const RUST_JUNIT_PATH = "/test-results/rust-junit.xml"
+
+/** In-container bundle layout for the linux-build entry (task 2.2; mirrored
+ * in pins.ts): the build log, the bundle-paths evidence and the staged
+ * AppImage/deb artifacts live under /test-results, which the entry returns
+ * for the tier's scoped host export. */
+const LINUX_BUILD_LOG = "/test-results/linux-build.log"
+const LINUX_BUNDLE_PATHS = "/test-results/bundle-paths.txt"
+const LINUX_BUNDLE_TARGET = "x86_64-unknown-linux-gnu"
+const LINUX_BUNDLE_DIR = "src-tauri/target/" + LINUX_BUNDLE_TARGET + "/release/bundle"
+const LINUX_APPIMAGE_GLOB = LINUX_BUNDLE_DIR + "/appimage/*.AppImage"
+const LINUX_DEB_GLOB = LINUX_BUNDLE_DIR + "/deb/*.deb"
 
 /**
  * Enforce the task 2.1 source contract: a source directory must never include
@@ -101,6 +115,20 @@ function junitFailure(entry: string, step: string, exit: number, junit: string):
       " failed with exit code " +
       exit +
       " — the check fails loudly, no fake pass (Req 7.3, 13.3). JUnit evidence:\n" +
+      excerpt
+  )
+}
+
+/** Build the loud failure for a failed bundle step, embedding its build-log evidence. */
+function bundleFailure(entry: string, step: string, exit: number, log: string): Error {
+  const excerpt = log.length > 4000 ? log.slice(0, 4000) + "\n... (truncated)" : log
+  return new Error(
+    entry +
+      ": " +
+      step +
+      " failed with exit code " +
+      exit +
+      " — the bundle gate fails loudly, no fake pass (Req 7.2, 7.3). Build log evidence:\n" +
       excerpt
   )
 }
@@ -192,6 +220,49 @@ export class Drift {
   }
 
   /**
+   * The linux-build base container (task 2.2): the pinned rust image with
+   * the pinned node image's /usr/local tree merged on top (the canonical
+   * way to run npm inside the rust container while staying on exactly the
+   * two pinned images — no unpinned package-manager installs), the Tauri
+   * system libraries plus the bundle extras provisioned ONCE as cached
+   * layers (before the source mount, so the layers survive source changes),
+   * and the SAME engine-managed cache volumes as rust-checks: the bundle
+   * build's cargo feature set is unchanged (no --features flags), so the
+   * pins.ts cacheVolumeIds key scheme (OS/arch/toolchain/features) applies
+   * unchanged. The merged toolchain is self-verified loudly before any
+   * build step runs.
+   */
+  linuxBuildContainer(source: Directory): Container {
+    const nodeTools = dag.container().from(pins.node.image).directory("/usr/local")
+    return dag
+      .container()
+      .from(pins.rust.image)
+      .withDirectory("/usr/local", nodeTools)
+      .withExec(["apt-get", "update"])
+      .withExec([
+        "apt-get",
+        "install",
+        "-y",
+        "--no-install-recommends",
+        ...pins.tauriLinuxAptPackages,
+        ...pins.tauriLinuxBundleAptPackages,
+      ])
+      .withExec(["node", "--version"])
+      .withExec(["npm", "--version"])
+      .withMountedCache("/root/.npm", dag.cacheVolume(cacheVolumeIds.npmRegistry))
+      .withMountedCache(
+        "/usr/local/cargo/registry",
+        dag.cacheVolume(cacheVolumeIds.cargoRegistry)
+      )
+      .withMountedCache("/usr/local/cargo/git", dag.cacheVolume(cacheVolumeIds.cargoGit))
+      .withMountedDirectory("/src", source)
+      .withMountedCache("/src/src-tauri/target", dag.cacheVolume(cacheVolumeIds.cargoTarget))
+      .withWorkdir("/src")
+      .withExec(["mkdir", "-p", "/test-results"])
+      .withExec(["npm", "ci"])
+  }
+
+  /**
    * Rust portable checks in the pinned Linux rust container with the Tauri
    * system libraries (Req 7.1): fmt, clippy, check, pinned cargo-nextest
    * (ci profile from .config/nextest.toml, JUnit copied to /test-results) and
@@ -257,14 +328,23 @@ export class Drift {
   }
 
   /**
-   * Linux bundle contract (Req 7.2). Task 1.4 validates the contract —
-   * inputs present in the mounted source, images pinned — and reports the
-   * exact command list; task 2.2 (design.md file plan) owns executing the
-   * Tauri bundle and exporting AppImage/deb artifacts. The status is an
-   * explicit deferred marker, never a bundle pass.
+   * Linux bundle build (Req 7.2; task 2.2). Reuses the repository's current
+   * Tauri packaging — npm ci plus `npx tauri build --target
+   * x86_64-unknown-linux-gnu` (the same command .github/workflows/ci.yml
+   * runs), driven by src-tauri/tauri.conf.json (beforeBuildCommand
+   * `npm run build`; bundle targets "all" → AppImage/deb on Linux) — inside
+   * the pinned containers. The build log is captured to
+   * /test-results/linux-build.log; after a successful build the produced
+   * AppImage and deb are VERIFIED (missing artifacts throw — a green build
+   * without bundles is a fake pass and missing artifacts fail the job, Req
+   * 7.3), and the bundles + logs are returned as the /test-results Directory
+   * for the tier's scoped host export (`dagger ... export --path`).
+   * Linux-container bundle results never substitute for native Windows or
+   * macOS artifacts.
    */
   @func()
-  async linuxBuild(source: Directory): Promise<string> {
+  async linuxBuild(source: Directory): Promise<Directory> {
+    await assertNeverImportHostArtifacts(source)
     const required = ["package.json", "package-lock.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml"]
     const missing: string[] = []
     const topEntries = await source.entries()
@@ -288,8 +368,94 @@ export class Drift {
           "; the Linux bundle contract requires them (task 2.2 executes the bundle)"
       )
     }
-    const entry = contract.containerEntries.find((e) => e.entry === "linux-build")
-    return JSON.stringify(entry)
+
+    // 1) Build with the current Tauri packaging. The step runs with
+    //    expect-any and logs to /test-results/linux-build.log so the full
+    //    build evidence survives both success and failure; the exit code is
+    //    checked right after and FAILS the call loudly (no fake pass).
+    const buildCtr = this.linuxBuildContainer(source).withExec(
+      [
+        "sh",
+        "-c",
+        "npx tauri build --target " +
+          LINUX_BUNDLE_TARGET +
+          " > " +
+          LINUX_BUILD_LOG +
+          " 2>&1; ec=$?; cat " +
+          LINUX_BUILD_LOG +
+          "; exit $ec",
+      ],
+      { expect: ReturnType.Any }
+    )
+    const buildExit = await buildCtr.exitCode()
+    const buildLog = await readText(buildCtr.file(LINUX_BUILD_LOG))
+    if (buildExit !== 0) {
+      throw bundleFailure(
+        "linux-build",
+        "npx tauri build --target " + LINUX_BUNDLE_TARGET,
+        buildExit,
+        buildLog
+      )
+    }
+    if (buildLog === "") {
+      throw new Error(
+        "linux-build: build exited 0 but produced no log at " +
+          LINUX_BUILD_LOG +
+          " — exporting the build log is part of the task 2.2 contract"
+      )
+    }
+
+    // 2) Verify the bundle contract: AppImage AND deb must exist after a
+    //    green build. Missing artifacts fail the job (task 2.2 Done
+    //    criterion, Req 7.2, 7.3) — never a fake pass. bundle-paths.txt
+    //    records what was actually found as the failure evidence.
+    const verifyCtr = buildCtr.withExec(
+      [
+        "sh",
+        "-c",
+        'appimage=$(ls ' +
+          LINUX_APPIMAGE_GLOB +
+          " 2>/dev/null || true); " +
+          "deb=$(ls " +
+          LINUX_DEB_GLOB +
+          " 2>/dev/null || true); " +
+          'printf "APPIMAGE=%s\\nDEB=%s\\n" "$appimage" "$deb" > ' +
+          LINUX_BUNDLE_PATHS +
+          "; cat " +
+          LINUX_BUNDLE_PATHS +
+          '; test -n "$appimage" -a -n "$deb"',
+      ],
+      { expect: ReturnType.Any }
+    )
+    await verifyCtr.sync()
+    const verifyExit = await verifyCtr.exitCode()
+    const bundlePaths = await readText(verifyCtr.file(LINUX_BUNDLE_PATHS))
+    if (verifyExit !== 0) {
+      throw new Error(
+        "linux-build: bundle artifacts missing after an exit-0 build — missing artifacts fail the job (Req 7.2, 7.3). Expected AppImage at " +
+          LINUX_APPIMAGE_GLOB +
+          " and deb at " +
+          LINUX_DEB_GLOB +
+          "; found: " +
+          (bundlePaths === "" ? "<nothing>" : bundlePaths.replace(/\n/g, "; "))
+      )
+    }
+
+    // 3) Stage the verified bundles + logs for the tier's scoped host export.
+    const done = verifyCtr.withExec([
+      "sh",
+      "-c",
+      "set -e; mkdir -p /test-results/bundle/appimage /test-results/bundle/deb; " +
+        "cp " +
+        LINUX_APPIMAGE_GLOB +
+        " /test-results/bundle/appimage/; " +
+        "cp " +
+        LINUX_DEB_GLOB +
+        " /test-results/bundle/deb/; " +
+        "ls -lR /test-results/bundle > /test-results/bundle-manifest.txt; cat /test-results/bundle-manifest.txt",
+    ])
+    await done.sync()
+    return done.directory("/test-results")
   }
 
   /**

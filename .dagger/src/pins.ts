@@ -42,6 +42,11 @@ export const pins = {
     "libssl-dev",
     "pkg-config",
   ],
+  // Task 2.2 bundle extras (AppImage/deb bundling on top of the check list
+  // above; provisioned once as the same kind of cached layer): `file` is
+  // used by the bundler's binary inspection, libfuse2 covers linuxdeploy's
+  // AppImage runtime when it does not extract-and-run.
+  tauriLinuxBundleAptPackages: ["file", "libfuse2"],
 } as const
 
 /**
@@ -131,9 +136,31 @@ export const contract = {
       entry: "linux-build",
       image: pins.rust.image + " + " + pins.node.image,
       runsOn: "Linux container (Dagger)",
-      commands: ["npm ci", "npx tauri build --target x86_64-unknown-linux-gnu"],
-      expectedArtifacts: ["src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/*.AppImage", "src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/*.deb"],
-      status: "contract-validated; bundle execution owned by task 2.2 (design.md file plan) — this entry point must not gate CI until 2.2 lands",
+      commands: [
+        "apt-get install " + [...pins.tauriLinuxAptPackages, ...pins.tauriLinuxBundleAptPackages].join(" "),
+        "merge /usr/local from " + pins.node.image + " (node+npm inside the pinned rust image; no unpinned installs)",
+        "npm ci",
+        "npx tauri build --target x86_64-unknown-linux-gnu (build log > /test-results/linux-build.log)",
+        "verify bundle appimage/*.AppImage and bundle deb/*.deb exist (missing artifacts throw)",
+        "stage the bundles + logs under /test-results",
+      ],
+      expectedArtifacts: [
+        "src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage",
+        "src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb",
+      ],
+      emits: {
+        log: "/test-results/linux-build.log",
+        bundles: "/test-results/bundle/**",
+        returned: "Directory (export with: dagger call linux-build --source <staged> export --path <dir>)",
+      },
+      caches: [
+        cacheVolumeIds.npmRegistry + " @ /root/.npm",
+        cacheVolumeIds.cargoRegistry + " @ /usr/local/cargo/registry",
+        cacheVolumeIds.cargoGit + " @ /usr/local/cargo/git",
+        cacheVolumeIds.cargoTarget + " @ /src/src-tauri/target",
+      ],
+      status:
+        "executable CI gate (task 2.2): reuses the repo's current Tauri packaging, exports AppImage/deb + build log, and missing artifacts fail the job (Req 7.2, 7.3)",
     },
     {
       entry: "linux-e2e",
