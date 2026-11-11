@@ -1109,6 +1109,35 @@ try {
         $ctWf -match [regex]::Escape('native macOS') -and
         $ctSpikeBlock -match 'timeout-minutes:'
     } 'CT15i the workflow labels the spike native macOS validation and bounds the job with a timeout (3h cap spirit; runner wait excluded)'
+
+    # ─── CT15 run-1 hardening (live run 43077191197, cancelled at the 60-min
+    # job timeout): the CR-stripped harness ran from /tmp so dirname-based
+    # REPO_ROOT resolved to / (os-window-probe.txt: "error opening input file
+    # '/scripts/macos/window-probe.swift'"), the window probe failed all 60
+    # iterations, and the stage-1 failure branch's UNBOUNDED wait on the
+    # healthy GUI app hung until GitHub cancelled the job. These assertions
+    # pin the fixes: workflow-provided repo root, once-compiled probe,
+    # per-stage wall-time caps that write explicit failure statuses, and
+    # bounded reaps only.
+    Assert-That {
+        $ctSpikeBlock -match [regex]::Escape('DRIFT_REPO_ROOT') -and
+        $ctSpikeBlock -match [regex]::Escape('github.workspace')
+    } 'CT15j the spike step passes DRIFT_REPO_ROOT (github.workspace) so the /tmp-invoked harness cannot mis-resolve the repo root (run-43077191197 root cause)'
+    Assert-That {
+        $ctSpikeSh -match 'swiftc' -and
+        $ctSpikeSh -match [regex]::Escape('window-probe.bin') -and
+        $ctSpikeSh -notmatch [regex]::Escape('swift "$REPO_ROOT')
+    } 'CT15k the window probe is compiled ONCE with swiftc into window-probe.bin and the poll loop never re-invokes the swift interpreter per iteration'
+    Assert-That {
+        $ctSpikeSh -match 'STAGE1_CAP_SECS' -and
+        $ctSpikeSh -match 'STAGE2_CAP_SECS' -and
+        $ctSpikeSh -match 'stage1-timeout' -and
+        $ctSpikeSh -match 'stage2-timeout'
+    } 'CT15l each stage carries a hard wall-time cap that writes an explicit failure status and exits the harness cleanly — the GitHub job timeout is never the terminator'
+    Assert-That {
+        $ctSpikeSh -match 'kill_bounded' -and
+        @([regex]::Matches($ctSpikeSh, 'wait "')).Count -le 2
+    } 'CT15m app teardown goes through a bounded TERM/KILL+reap helper — no unbounded wait on a live GUI process can hang the job again (run-43077191197 hang)'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.

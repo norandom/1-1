@@ -287,6 +287,7 @@ jobs:
           tr -d '\r' < scripts/macos/cold-launch-spike.sh > /tmp/cold-launch-spike.sh
           bash /tmp/cold-launch-spike.sh
         env:
+          DRIFT_REPO_ROOT: ${{ github.workspace }}
           DRIFT_EVIDENCE_DIR: ${{ github.workspace }}/ci-artifacts/macos-e2e-spike
           DRIFT_APP_BINARY: ${{ github.workspace }}/src-tauri/target/aarch64-apple-darwin/release/rdp-client
       - name: Spike verdict — fail loudly unless the built-app driver proof passed (no fake pass)
