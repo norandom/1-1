@@ -53,12 +53,12 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Linux bundle artifacts exist and missing artifacts fail the job.
   - _Boundary: Linux build_
   - _Requirements: 7.2,7.3_
-- [ ] 2.3 Prove native Windows cold launch on the old stack
+- [x] 2.3 Prove native Windows cold launch on the old stack
   - 3-hour setup spike: minimum native compile fixes, MSVC/WebView2, pinned Edge driver and isolated data; no protocol upgrade.
   - Done: Built-app Windows cold launch passes or a specific prerequisite blocks upgrade.
   - _Boundary: Windows E2E bootstrap_
   - _Requirements: 8.1,12.1,12.5,12.7,12.8_
-- [ ] 2.4 Prove native macOS cold launch on the old stack
+- [ ] 2.4 Prove native macOS cold launch on the old stack _Blocked: no macOS host available in this environment — spike requires native macOS built-app launch; retry with macOS hardware or defer to an Actions macOS runner in 2.6_
   - 3-hour setup spike: prove the WebdriverIO Tauri service embedded server on the built app, not safaridriver; isolate data.
   - Done: Built-app macOS cold launch passes or unsupported driver evidence blocks upgrade.
   - _Boundary: macOS E2E bootstrap_
@@ -356,3 +356,4 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
 - Cosmetic: Invoke-CI.Tests.ps1 header comment says "CT01-CT11"; actual sections are CT01-CT10.
 - 2.1: lint baseline repaired (9 src/** problems; .dagger/sdk globally ignored) — `npm run lint` now gates CI. Dagger CLI sync itself already excludes node_modules/untracked (task-1.4 README claim corrected); explicit staging + module guard remain the never-import contract. cargo-nextest tarball ships without a leading directory — installer now self-verifies with `cargo-nextest --version`.
 - 2.2: linux-build gates missing bundles both module-side (throw) and tier-side (exit 1, ok=false report). Review hardening ideas (non-blocking): clear `src-tauri/target/<triple>/release/bundle` before build (stale-bundle blind spot only on warm dev engines; CI runners ephemeral); persist red-phase transcripts next to `linux-build-run-*.txt` before the 11.12 evidence audit; container apt extras `file`+`libfuse2` are insurance GH runners already ship (lists differ, disclosed).
+- 2.3 spike PROVEN (zero code changes; research.md section + D:\BuildArtifacts\drift-rdp\windows-cold-launch\). Key handoffs for 2.5: WEBVIEW2_USER_DATA_FOLDER isolates WebView2 state but Tauri app-data uses Known Folder APIs (env overrides ignored — need identifier-overlay or own-resource-cleanup); msedgedriver must be resolved at run time from the installed runtime's registry pv (static pins rot — Edge Stable moved mid-spike); real window discovery must enumerate by pid+size (tao 16×16 helper-window trap); graceful shutdown = WM_CLOSE to the real window. wgpu picked Vulkan (not DX12) on the host.
