@@ -38,10 +38,29 @@
   The preflight honors existing tool caches (npm, cargo); it neither creates
   nor relocates them.
 
+  The frontend test tier (task 1.4; Requirements 7.1, 13.3, 13.4): npm runs
+  natively on Windows, so this is the native twin of the Dagger `frontend`
+  Linux-container entry point (.dagger/src/index.ts) — same portable command
+  list: npm ci, lint, tsc --noEmit, vitest, build; failures propagate to the
+  tier exit code and evidence lands under D:\BuildArtifacts\<project>\frontend.
+
+  The dagger tier (task 1.4; Requirements 7.1, 7.2, 8.4, 12.5): invokes the
+  Linux-container entries of the .dagger module (frontend, rust-checks,
+  linux-build, linux-e2e) or the `contract` introspection. Engine wiring is
+  the tier's own job, not a personal launcher's: it loads the pinned versions
+  from .config/ci-versions.json, resolves the REAL dagger.exe (never a .cmd
+  launcher), makes the native podman client reachable, sets
+  _EXPERIMENTAL_DAGGER_RUNNER_HOST=image+podman://<pinned engine image>
+  itself (task 1.3 finding), and propagates the dagger exit code. Linux
+  containers are not Windows/macOS validation: native tiers stay native.
+
   Single command per tier (Req 13.4):
     preflight:    pwsh -NoProfile -File scripts/Invoke-CI.ps1
     rust tests:   pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier rust
+    frontend:     pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier frontend
+    dagger:       pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier dagger -DaggerEntry <frontend|rust-checks|linux-build|linux-e2e|contract>
     their tests:  pwsh -NoProfile -File scripts/Invoke-CI.Tests.ps1
+    Full CI command contract (container vs native): .dagger/README.md
 
   Exit codes: 0 = tier passed; 1 = rejected/failed (reasons on stderr).
 
@@ -54,7 +73,7 @@
 [CmdletBinding()]
 param(
     # Tier to run; later tasks add further tiers.
-    [ValidateSet('preflight', 'rust')]
+    [ValidateSet('preflight', 'rust', 'frontend', 'dagger')]
     [string]$Tier = 'preflight',
 
     # Override the effective working directory (used by tests; defaults to the
@@ -64,6 +83,17 @@ param(
     # Rust tier: cargo manifest under test (defaults to src-tauri\Cargo.toml;
     # tests point it at throwaway fixture crates).
     [string]$ManifestPath = '',
+
+    # Dagger tier (task 1.4): which .dagger module entry point to call. The
+    # contract names map 1:1 to the module functions; 'linux-e2e' translates
+    # to the SDK-registered callable 'linux-e-2-e' (see Get-DriftDaggerCallName).
+    [ValidateSet('frontend', 'rust-checks', 'linux-build', 'linux-e2e', 'contract')]
+    [string]$DaggerEntry = 'contract',
+
+    # Dagger tier: explicit path to the real dagger CLI executable (tests
+    # point it at recording shims); default resolution never accepts a
+    # launcher/wrapper (Resolve-DriftDaggerCli).
+    [string]$DaggerCliPath = '',
 
     [string]$BuildArtifactsRoot = 'D:\BuildArtifacts',
     [string]$ProjectName = 'drift-rdp',
@@ -318,6 +348,106 @@ function New-DriftNextestRunArguments {
     return @('nextest', 'run', '--config-file', $ConfigPath, '--profile', $Profile, '--manifest-path', $ManifestPath, '--no-tests', 'fail')
 }
 
+function Get-DriftCiPins {
+    <# Load and validate .config/ci-versions.json (task 1.4): the canonical
+       version/config file distinguishing the pinned container images and
+       engine from the native toolchain. Throws an actionable error when the
+       file is missing or a required pin is absent (never silently floats). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$PinsPath)
+    if (-not (Test-Path -LiteralPath $PinsPath -PathType Leaf)) {
+        throw [System.InvalidOperationException]::new("CI version pins not found at '$PinsPath' (task 1.4 contract: .config/ci-versions.json must pin dagger CLI+engine, node and rust images, nextest)")
+    }
+    try {
+        $pins = Get-Content -LiteralPath $PinsPath -Raw | ConvertFrom-Json
+    } catch {
+        throw [System.InvalidOperationException]::new("CI version pins at '$PinsPath' are not valid JSON: $($_.Exception.Message)")
+    }
+    $required = @()
+    try {
+        $required = @(
+            @{ Node = 'dagger.cliVersion';      Value = $pins.dagger.cliVersion },
+            @{ Node = 'dagger.engineImage';     Value = $pins.dagger.engineImage },
+            @{ Node = 'dagger.runnerHostScheme'; Value = $pins.dagger.runnerHostScheme },
+            @{ Node = 'node.image';             Value = $pins.node.image },
+            @{ Node = 'rust.image';             Value = $pins.rust.image },
+            @{ Node = 'rust.toolchain';         Value = $pins.rust.toolchain },
+            @{ Node = 'nextest.version';        Value = $pins.nextest.version }
+        )
+    } catch {
+        throw [System.InvalidOperationException]::new("CI version pins at '$PinsPath' are missing a required section (expected dagger, node, rust, nextest): $($_.Exception.Message)")
+    }
+    foreach ($pin in $required) {
+        if ([string]::IsNullOrEmpty([string]$pin.Value)) {
+            throw [System.InvalidOperationException]::new("CI version pins at '$PinsPath' are missing the pinned value for '$($pin.Node)'")
+        }
+    }
+    foreach ($imagePin in @($pins.dagger.engineImage, $pins.node.image, $pins.rust.image)) {
+        if ($imagePin -match 'latest') {
+            throw [System.InvalidOperationException]::new("CI version pins at '$PinsPath' contain a floating ':latest' reference ('$imagePin'); container images must be pinned to exact tags")
+        }
+    }
+    return $pins
+}
+
+function Get-DriftFrontendTierCommands {
+    <# Ordered frontend tier command list (task 1.4; Req 7.1): install, lint,
+       typecheck, unit tests, build. This is the single source mirrored by
+       the Dagger `frontend` container entry (.dagger/src/index.ts) — the
+       same portable tier commands for container and native jobs. #>
+    return @(
+        'npm ci'
+        'npm run lint'
+        'npx tsc --noEmit'
+        'npx vitest run'
+        'npm run build'
+    )
+}
+
+function Get-DriftDaggerCallName {
+    <# Map a contract entry name to its actual `dagger call` function name.
+       The dagger v0.21.11 TypeScript SDK kebab-cases method names AND splits
+       digit/letter boundaries, so the linuxE2e method registers as the
+       callable 'linux-e-2-e'. The contract name stays 'linux-e2e' (tasks.md,
+       .dagger/README.md); this is the only translation point. Mirrors
+       daggerCallNames in .dagger/src/pins.ts. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateSet('frontend', 'rust-checks', 'linux-build', 'linux-e2e', 'contract')][string]$Entry)
+    $map = @{
+        'frontend'    = 'frontend'
+        'rust-checks' = 'rust-checks'
+        'linux-build' = 'linux-build'
+        'linux-e2e'   = 'linux-e-2-e'
+        'contract'    = 'contract'
+    }
+    return $map[$Entry]
+}
+
+function Resolve-DriftDaggerCli {
+    <# Resolve the REAL dagger CLI executable (task 1.4): never a personal
+       launcher/wrapper such as a .cmd that re-invokes pwsh. Order: explicit
+       path, native dagger.exe on PATH, then the version-pinned install
+       convention %LOCALAPPDATA%\Programs\Dagger\<cliVersion>\dagger.exe
+       derived from .config/ci-versions.json. Returns $null when not found. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PinsPath,
+        [string]$ExplicitPath = ''
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
+        if (Test-Path -LiteralPath $ExplicitPath -PathType Leaf) { return $ExplicitPath }
+        return $null
+    }
+    $onPath = Get-Command -Name 'dagger.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    try { $pins = Get-DriftCiPins -PinsPath $PinsPath } catch { return $null }
+    $version = [string]$pins.dagger.cliVersion
+    if ([string]::IsNullOrWhiteSpace($version)) { return $null }
+    $conventional = Join-Path $env:LOCALAPPDATA (Join-Path 'Programs\Dagger' (Join-Path $version 'dagger.exe'))
+    if (Test-Path -LiteralPath $conventional -PathType Leaf) { return $conventional }
+    return $null
+}
+
 function Invoke-RustTest {
     <# Rust test tier (task 1.2): pinned cargo-nextest run plus cargo test
        --doc (nextest does not run doctests), with failures propagated to the
@@ -546,6 +676,333 @@ function Invoke-RustTest {
     return 1
 }
 
+function Invoke-FrontendTest {
+    <# Frontend test tier (task 1.4; Req 7.1, 13.3, 13.4): the native twin
+       of the Dagger `frontend` Linux-container entry — same portable command
+       list (Get-DriftFrontendTierCommands), executed with native node/npm on
+       Windows. Wrapper targets are inspected BEFORE execution (Req 7.5);
+       failures propagate to the tier exit code; evidence lands under
+       D:\BuildArtifacts\<project>\frontend. Returns 0 pass / 1 rejected. #>
+    [CmdletBinding()]
+    param(
+        [string]$Tier = 'frontend',
+        [string]$WorkingDirectory = '',
+        [string]$BuildArtifactsRoot = 'D:\BuildArtifacts',
+        [string]$ProjectName = 'drift-rdp',
+        [string]$ReportSubdir = 'frontend',
+        [string]$ReportName = 'frontend-tier-report.json',
+        [switch]$NoReport
+    )
+    $ErrorActionPreference = 'Stop'
+    $totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) { $WorkingDirectory = (Get-Location).ProviderPath }
+    $canonicalRoot = Get-CanonicalRepoRoot
+    $failures = [System.Collections.Generic.List[string]]::new()
+
+    # The step list mirrors Get-DriftFrontendTierCommands one-for-one: tool,
+    # arguments and the display string that is asserted by the contract tests.
+    $steps = @(
+        @{ Tool = 'npm';  Args = @('ci');                             Display = 'npm ci' },
+        @{ Tool = 'npm';  Args = @('run', 'lint');                    Display = 'npm run lint' },
+        @{ Tool = 'npx';  Args = @('tsc', '--noEmit');                Display = 'npx tsc --noEmit' },
+        @{ Tool = 'npx';  Args = @('vitest', 'run');                  Display = 'npx vitest run' },
+        @{ Tool = 'npm';  Args = @('run', 'build');                   Display = 'npm run build' }
+    )
+
+    [Console]::WriteLine("== $ProjectName frontend test tier ($Tier) ==")
+    [Console]::WriteLine("canonical repository root: $canonicalRoot")
+    [Console]::WriteLine("effective working directory: $WorkingDirectory")
+    [Console]::WriteLine("command list: $((Get-DriftFrontendTierCommands) -join ' -> ')")
+
+    # 1) canonical working directory: reject the C: junction view (Req 7.5)
+    $cwdCheck = Test-CanonicalWorkingDirectory -CurrentDirectory $WorkingDirectory -CanonicalRoot $canonicalRoot
+    if ($cwdCheck.Ok) {
+        [Console]::WriteLine('working directory: OK')
+    } else {
+        $failures.Add($cwdCheck.Reason)
+        [Console]::Error.WriteLine("working directory: REJECTED — $($cwdCheck.Reason)")
+    }
+
+    # 2) native tools, inspected BEFORE execution (Req 7.5): node, npm, npx
+    $toolRows = [System.Collections.Generic.List[object]]::new()
+    $resolvedTools = @{}
+    foreach ($tool in @('node', 'npm', 'npx')) {
+        $command = Get-Command -Name $tool -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $command) {
+            $failures.Add("required native tool '$tool' was not found on PATH; the frontend tier needs the native Node.js toolchain (npm runs natively on Windows)")
+            $toolRows.Add([pscustomobject]@{ tool = $tool; path = ''; version = ''; status = 'missing' })
+            continue
+        }
+        $wrapper = Test-ProhibitedWrapperTarget -CommandPath $command.Source
+        if ($wrapper.Prohibited) {
+            $failures.Add("required tool '$tool' resolves to '$($command.Source)' — prohibited wrapper rejected: $($wrapper.Reason)")
+            $toolRows.Add([pscustomobject]@{ tool = $tool; path = $command.Source; version = ''; status = 'prohibited' })
+            continue
+        }
+        $resolvedTools[$tool] = $command.Source
+        $version = ''
+        if ($tool -eq 'node') {
+            try { $version = ([string](& $command.Source --version 2>&1 | Select-Object -First 1)).Trim() } catch { $version = '' }
+        }
+        $toolRows.Add([pscustomobject]@{ tool = $tool; path = $command.Source; version = $version; status = 'ok' })
+    }
+    [Console]::WriteLine(($($toolRows | Format-Table -AutoSize | Out-String -Width 4096).TrimEnd()))
+
+    # 3) pinned version/config files (task 1.4 contract files must exist)
+    $pinsPath = Join-Path $canonicalRoot '.config\ci-versions.json'
+    if (Test-Path -LiteralPath $pinsPath -PathType Leaf) {
+        [Console]::WriteLine("ci pins: $pinsPath")
+    } else {
+        $failures.Add("CI version pins not found at '$pinsPath' (task 1.4 contract)")
+        [Console]::Error.WriteLine("ci pins: MISSING — $pinsPath")
+    }
+
+    # 4) run the steps (only when every gate above passed)
+    $stepResults = [System.Collections.Generic.List[object]]::new()
+    $reportDir = Get-ScopedOutputPath -BuildArtifactsRoot $BuildArtifactsRoot -ProjectName $ProjectName -Subdir $ReportSubdir
+    if ($failures.Count -eq 0) {
+        Assert-ScopedOutputPath -Path $reportDir -BuildArtifactsRoot $BuildArtifactsRoot -ProjectName $ProjectName
+        New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+        $stepIndex = 0
+        foreach ($step in $steps) {
+            $stepIndex++
+            [Console]::WriteLine("step $stepIndex/$($steps.Count): $($step.Display)")
+            $stepStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+            Push-Location -LiteralPath $canonicalRoot
+            try {
+                $outputLines = @(& $resolvedTools[$step.Tool] @($step.Args) 2>&1 | ForEach-Object { "$_" })
+                $stepExit = $LASTEXITCODE
+            } finally {
+                Pop-Location
+            }
+            $stepStopwatch.Stop()
+            $safeName = ($step.Display -replace '[^a-zA-Z0-9]+', '-')
+            $outputLines | Set-Content -LiteralPath (Join-Path $reportDir "step$stepIndex-$safeName.txt") -Encoding utf8
+            $stepResults.Add([pscustomobject]@{
+                step             = $step.Display
+                exitCode         = $stepExit
+                durationSeconds  = [Math]::Round($stepStopwatch.Elapsed.TotalSeconds, 2)
+            })
+            if ($stepExit -eq 0) {
+                [Console]::WriteLine("step ${stepIndex}: exit 0 ($($stepResults[$stepResults.Count - 1].durationSeconds)s)")
+            } else {
+                $failures.Add("frontend step '$($step.Display)' failed with exit code $stepExit (failures propagate; Req 7.3, 13.3)")
+                [Console]::Error.WriteLine("step ${stepIndex}: exit $stepExit — $($step.Display)")
+                [Console]::Error.WriteLine(($outputLines | Select-Object -Last 15) -join [Environment]::NewLine)
+                break
+            }
+        }
+    }
+
+    # 5) scoped machine-readable report (Req 12.7)
+    $totalStopwatch.Stop()
+    $ok = $failures.Count -eq 0
+    if (-not $NoReport) {
+        try {
+            Assert-ScopedOutputPath -Path $reportDir -BuildArtifactsRoot $BuildArtifactsRoot -ProjectName $ProjectName
+            New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+            $report = [pscustomobject]@{
+                generatedUtc         = (Get-Date).ToUniversalTime().ToString('o')
+                tier                 = $Tier
+                ok                   = $ok
+                canonicalRoot        = $canonicalRoot
+                workingDirectory     = $WorkingDirectory
+                buildArtifactsRoot   = $BuildArtifactsRoot
+                commandList          = @(Get-DriftFrontendTierCommands)
+                tools                = $toolRows
+                steps                = $stepResults
+                failures             = $failures
+                totalDurationSeconds = [Math]::Round($totalStopwatch.Elapsed.TotalSeconds, 2)
+            }
+            $reportPath = Join-Path -Path $reportDir -ChildPath $ReportName
+            $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $reportPath -Encoding utf8
+            [Console]::WriteLine("report: $reportPath")
+        } catch {
+            $ok = $false
+            $failures.Add("scoped report output rejected: $($_.Exception.Message)")
+            [Console]::Error.WriteLine("scoped report output rejected: $($_.Exception.Message)")
+        }
+    }
+
+    if ($ok) {
+        [Console]::WriteLine('[PASS] frontend test tier passed (install, lint, typecheck, unit tests, build)')
+        return 0
+    }
+    [Console]::Error.WriteLine('[FAIL] frontend test tier rejected:')
+    foreach ($failure in $failures) { [Console]::Error.WriteLine(" - $failure") }
+    return 1
+}
+
+function Invoke-DaggerTier {
+    <# Dagger tier (task 1.4; Req 7.1, 7.2, 8.4, 12.5): invokes a
+       Linux-container entry point of the .dagger module. Engine wiring is
+       done HERE, from the pinned .config/ci-versions.json — never by a
+       personal launcher: _EXPERIMENTAL_DAGGER_RUNNER_HOST is set to
+       image+podman://<pinned engine image> (task 1.3 finding), the REAL
+       dagger.exe is resolved (Resolve-DriftDaggerCli), the native podman
+       client is made reachable, and the dagger exit code propagates.
+       Linux containers are not native Windows/macOS validation (design.md
+       "CI ownership and reuse decisions"). Returns the dagger exit code, or
+       1 when rejected before invocation. #>
+    [CmdletBinding()]
+    param(
+        [string]$Tier = 'dagger',
+        [Parameter(Mandatory)][ValidateSet('frontend', 'rust-checks', 'linux-build', 'linux-e2e', 'contract')][string]$DaggerEntry,
+        [string]$DaggerCliPath = '',
+        [string]$WorkingDirectory = '',
+        [string]$BuildArtifactsRoot = 'D:\BuildArtifacts',
+        [string]$ProjectName = 'drift-rdp',
+        [string]$ReportSubdir = 'dagger',
+        [string]$ReportName = 'dagger-tier-report.json',
+        [switch]$NoReport
+    )
+    $ErrorActionPreference = 'Stop'
+    $totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) { $WorkingDirectory = (Get-Location).ProviderPath }
+    $canonicalRoot = Get-CanonicalRepoRoot
+    $moduleDir = Join-Path $canonicalRoot '.dagger'
+    $pinsPath = Join-Path $canonicalRoot '.config\ci-versions.json'
+    $failures = [System.Collections.Generic.List[string]]::new()
+
+    [Console]::WriteLine("== $ProjectName dagger tier ($Tier, entry '$DaggerEntry') ==")
+    [Console]::WriteLine("canonical repository root: $canonicalRoot")
+    [Console]::WriteLine("effective working directory: $WorkingDirectory")
+
+    # 1) canonical working directory + contract files (Req 7.5, task 1.4)
+    $cwdCheck = Test-CanonicalWorkingDirectory -CurrentDirectory $WorkingDirectory -CanonicalRoot $canonicalRoot
+    if ($cwdCheck.Ok) { [Console]::WriteLine('working directory: OK') } else {
+        $failures.Add($cwdCheck.Reason)
+        [Console]::Error.WriteLine("working directory: REJECTED — $($cwdCheck.Reason)")
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $moduleDir 'dagger.json') -PathType Leaf)) {
+        $failures.Add("Dagger module manifest not found at '$moduleDir\dagger.json' (design.md file plan reserves .dagger/)")
+    }
+
+    # 2) pinned versions (throws its own actionable error; treated as a failure)
+    $pins = $null
+    try {
+        $pins = Get-DriftCiPins -PinsPath $pinsPath
+        [Console]::WriteLine("pins: dagger CLI $($pins.dagger.cliVersion), engine $($pins.dagger.engineImage)")
+    } catch {
+        $failures.Add($_.Exception.Message)
+        [Console]::Error.WriteLine("pins: REJECTED — $($_.Exception.Message)")
+    }
+
+    # 3) resolve the REAL dagger CLI (never a launcher) and inspect it first
+    $daggerCli = Resolve-DriftDaggerCli -PinsPath $pinsPath -ExplicitPath $DaggerCliPath
+    if (-not $daggerCli) {
+        $cliVersionHint = if ($pins) { [string]$pins.dagger.cliVersion } else { '<pinned version from .config/ci-versions.json>' }
+        $failures.Add("the real dagger CLI executable could not be resolved (explicit path, PATH, or %LOCALAPPDATA%\Programs\Dagger\$cliVersionHint\dagger.exe); a launcher wrapper is not accepted (task 1.4)")
+    } else {
+        $wrapper = Test-ProhibitedWrapperTarget -CommandPath $daggerCli
+        if ($wrapper.Prohibited) {
+            $failures.Add("dagger CLI at '$daggerCli' — prohibited wrapper rejected: $($wrapper.Reason)")
+        } else {
+            [Console]::WriteLine("dagger CLI: $daggerCli")
+        }
+    }
+
+    # 4) native podman client reachable through its native executable only
+    $podmanDir = Join-Path $env:ProgramFiles 'RedHat\Podman'
+    $podmanPath = $null
+    $podmanOnPath = Get-Command -Name 'podman.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($podmanOnPath) {
+        $podmanPath = $podmanOnPath.Source
+    } elseif (Test-Path -LiteralPath (Join-Path $podmanDir 'podman.exe') -PathType Leaf) {
+        $podmanPath = Join-Path $podmanDir 'podman.exe'
+    }
+    if (-not $podmanPath) {
+        $failures.Add("native podman client executable not found (the pinned image+podman engine requires the native client; WSL-backed engines are reached only through native clients, Req 7.5)")
+    } else {
+        [Console]::WriteLine("podman client: $podmanPath")
+    }
+
+    # 5) invoke: engine env set HERE from the pin (task 1.3 finding), then
+    #    propagate the dagger exit code (including success).
+    $daggerExit = $null
+    $outputLines = @()
+    $runnerHost = ''
+    if ($pins) { $runnerHost = "$($pins.dagger.runnerHostScheme)://$($pins.dagger.engineImage)" }
+    if ($failures.Count -eq 0) {
+        $callName = Get-DriftDaggerCallName -Entry $DaggerEntry
+        $daggerArgs = @('-m', $moduleDir, 'call', $callName)
+        # Entries that consume repository source receive it as a --source
+        # Directory argument resolved by the dagger CLI from the canonical
+        # repository root (this SDK version has no host-directory access
+        # inside module code).
+        if ($callName -ne 'contract') { $daggerArgs += @('--source', $canonicalRoot) }
+        [Console]::WriteLine("runner host: $runnerHost (set by this tier from the pin, not by a launcher)")
+        [Console]::WriteLine("invoking: dagger $($daggerArgs -join ' ')")
+        $oldPath = $env:PATH
+        $oldRunner = $env:_EXPERIMENTAL_DAGGER_RUNNER_HOST
+        $oldDark = $env:FORCE_DARK_MODE
+        Push-Location -LiteralPath $canonicalRoot
+        try {
+            $env:PATH = "$(Split-Path -Parent $podmanPath);$oldPath"
+            $env:_EXPERIMENTAL_DAGGER_RUNNER_HOST = $runnerHost
+            # Noninteractive agents: avoid blocking terminal-theme detection.
+            $env:FORCE_DARK_MODE = '1'
+            $outputLines = @(& $daggerCli @daggerArgs 2>&1 | ForEach-Object { "$_" })
+            $daggerExit = $LASTEXITCODE
+        } finally {
+            $env:PATH = $oldPath
+            $env:_EXPERIMENTAL_DAGGER_RUNNER_HOST = $oldRunner
+            $env:FORCE_DARK_MODE = $oldDark
+            Pop-Location
+        }
+        if ($daggerExit -eq 0) {
+            [Console]::WriteLine("dagger: exit 0")
+            [Console]::WriteLine(($outputLines | Select-Object -Last 5) -join [Environment]::NewLine)
+        } else {
+            [Console]::Error.WriteLine("dagger: exit $daggerExit (entry '$DaggerEntry' failed; exit code propagated, Req 7.3, 13.3)")
+            [Console]::Error.WriteLine(($outputLines | Select-Object -Last 20) -join [Environment]::NewLine)
+        }
+    }
+
+    # 6) scoped machine-readable report (Req 12.7)
+    $totalStopwatch.Stop()
+    $ok = ($failures.Count -eq 0) -and ($daggerExit -eq 0)
+    if (-not $NoReport) {
+        try {
+            $reportDir = Get-ScopedOutputPath -BuildArtifactsRoot $BuildArtifactsRoot -ProjectName $ProjectName -Subdir $ReportSubdir
+            Assert-ScopedOutputPath -Path $reportDir -BuildArtifactsRoot $BuildArtifactsRoot -ProjectName $ProjectName
+            New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+            $report = [pscustomobject]@{
+                generatedUtc         = (Get-Date).ToUniversalTime().ToString('o')
+                tier                 = $Tier
+                entry                = $DaggerEntry
+                callName             = (Get-DriftDaggerCallName -Entry $DaggerEntry)
+                ok                   = $ok
+                canonicalRoot        = $canonicalRoot
+                moduleDir            = $moduleDir
+                daggerCli            = $daggerCli
+                podmanClient         = $podmanPath
+                runnerHost           = $runnerHost
+                enginePin            = $(if ($pins) { $pins.dagger.engineImage } else { $null })
+                daggerExitCode       = $daggerExit
+                failures             = $failures
+                totalDurationSeconds = [Math]::Round($totalStopwatch.Elapsed.TotalSeconds, 2)
+            }
+            $reportPath = Join-Path -Path $reportDir -ChildPath $ReportName
+            $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $reportPath -Encoding utf8
+            $outputLines | Set-Content -LiteralPath (Join-Path $reportDir "entry-$((Get-DriftDaggerCallName -Entry $DaggerEntry))-output.txt") -Encoding utf8
+            [Console]::WriteLine("report: $reportPath")
+        } catch {
+            $ok = $false
+            $failures.Add("scoped report output rejected: $($_.Exception.Message)")
+            [Console]::Error.WriteLine("scoped report output rejected: $($_.Exception.Message)")
+        }
+    }
+
+    if ($failures.Count -gt 0) {
+        [Console]::Error.WriteLine('[FAIL] dagger tier rejected:')
+        foreach ($failure in $failures) { [Console]::Error.WriteLine(" - $failure") }
+        return 1
+    }
+    if ($daggerExit -eq 0) { [Console]::WriteLine('[PASS] dagger tier passed') }
+    return $daggerExit
+}
+
 function Invoke-Preflight {
     <# Preflight tier (task 1.1): canonical cwd, native tool versions/paths with
        wrapper inspection before execution, scoped report output. Returns an
@@ -665,5 +1122,23 @@ if ($MyInvocation.InvocationName -ne '.' -and $env:DRIFT_CI_IMPORT_ONLY -ne '1')
             -ProjectName $ProjectName `
             -NoReport:$NoReport
         exit $rustExitCode
+    }
+    if ($Tier -eq 'frontend') {
+        $frontendExitCode = Invoke-FrontendTest -Tier $Tier `
+            -WorkingDirectory $WorkingDirectory `
+            -BuildArtifactsRoot $BuildArtifactsRoot `
+            -ProjectName $ProjectName `
+            -NoReport:$NoReport
+        exit $frontendExitCode
+    }
+    if ($Tier -eq 'dagger') {
+        $daggerExitCode = Invoke-DaggerTier -Tier $Tier `
+            -DaggerEntry $DaggerEntry `
+            -DaggerCliPath $DaggerCliPath `
+            -WorkingDirectory $WorkingDirectory `
+            -BuildArtifactsRoot $BuildArtifactsRoot `
+            -ProjectName $ProjectName `
+            -NoReport:$NoReport
+        exit $daggerExitCode
     }
 }

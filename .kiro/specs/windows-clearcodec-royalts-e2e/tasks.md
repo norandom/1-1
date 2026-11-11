@@ -20,7 +20,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
 
 
 
-- [ ] 1. Execution tooling and CI contracts
+- [x] 1. Execution tooling and CI contracts
 - [x] 1.1 Pin native tool entry points and isolated outputs
   - Inspect wrapper targets before execution; reject WSL/Git Bash delegation. Run from the canonical repository path `D:\Source\drift-rdp` — the `C:\Users\mariu\Source\drift-rdp` junction view must not be used as cwd (detect and reject it so cache keys and BuildArtifacts scoping stay stable). Use configured caches and scoped D:/BuildArtifacts outputs.
   - Done: Native PowerShell preflight reports tool versions/paths and rejects prohibited wrappers.
@@ -36,7 +36,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Pinned engine runs a trivial container and exports an artifact under the scoped output directory, or records a blocking compatibility result.
   - _Boundary: Dagger bootstrap_
   - _Requirements: 7.1,12.7,13.4_
-- [ ] 1.4 Define one command contract for container and native jobs
+- [x] 1.4 Define one command contract for container and native jobs
   - Use a small TypeScript Dagger module with frontend, rust-checks, linux-build and linux-e2e entry points; a native PowerShell entry point invokes the same tier commands for OS-specific checks. Keep toolchain/image versions pinned.
   - Done: Version/config files and command list distinguish Linux container checks from native Windows/macOS validation.
   - _Boundary: CI contract_
@@ -349,3 +349,8 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
 - Pre-existing baseline: `npm run lint` fails at HEAD (7 errors / 2 warnings in `src/**` — ConnectionCard.tsx, SessionCanvas.tsx, ui/{badge,button,tabs,toggle}.tsx, useClipboard.ts); must be fixed before the lint tier can gate CI (found during 1.1 review; not caused by 1.1).
 - design.md File Structure Plan lists `scripts/Invoke-CI.ps1` but not `scripts/Invoke-CI.Tests.ps1`; add the test file to the plan in the next docs-touching task.
 - nextest os-keyring serialization override exists only in `[profile.ci]`; mirror it into `[profile.dev]` (or use extends) next time `.config/nextest.toml` is touched. Host sets CARGO_TARGET_DIR=D:\BuildArtifacts\cargo-target but nextest junit resolves under workspace target — tier passes explicit `--config-file` since src-tauri workspace root doesn't auto-discover repo-root .config.
+- Lint baseline detail (for 2.1): clean checkout has 9 problems in `src/**`; any dagger CLI run generates `.dagger/sdk/**` (gitignored) which `eslint .` then picks up, adding 34 problems. 2.1 must repair the 9 src problems AND add `.dagger` (or `.dagger/sdk`) to eslint.config.js global ignores so clean vs post-dagger runs agree.
+- `.dagger/src/index.ts` linuxE2E: once `e2e/` exists, the e2e-present path must throw until 2.5+ wires the actual run (today it correctly fails loudly while `e2e/` is absent).
+- CT04d cross-checks image tags between pins.ts and ci-versions.json but not the `@sha256:` digests — digest drift would go unnoticed; tighten when touched.
+- Invoke-DaggerTier writes one `dagger-tier-report.json` per run regardless of entry (last-writer-wins); use per-entry report names when 2.1 turns these into CI artifacts. Per-entry evidence survives in `entry-<name>-output.txt`.
+- Cosmetic: Invoke-CI.Tests.ps1 header comment says "CT01-CT11"; actual sections are CT01-CT10.

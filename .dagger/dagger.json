@@ -1,0 +1,8 @@
+{
+  "name": "drift",
+  "engineVersion": "v0.21.11",
+  "source": ".",
+  "sdk": {
+    "source": "typescript"
+  }
+}

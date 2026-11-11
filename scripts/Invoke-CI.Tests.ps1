@@ -2,10 +2,21 @@
 <#
 .SYNOPSIS
   Test tier for scripts/Invoke-CI.ps1 — native CI entry points (task 1.1
-  preflight tier, task 1.2 rust test tier).
+  preflight tier, task 1.2 rust test tier, task 1.4 container/native command
+  contract).
 
 .DESCRIPTION
   Single command (Req 13.4):  pwsh -NoProfile -File scripts/Invoke-CI.Tests.ps1
+
+  The task 1.4 section (CT01-CT11) proves the one-command contract for
+  container and native jobs: the .dagger TypeScript module manifest and
+  entry points (frontend, rust-checks, linux-build, linux-e2e), the pinned
+  versions/config file .config/ci-versions.json (no floating tags), the
+  native frontend tier, and the dagger tier that wires the engine runner
+  host itself instead of depending on a personal launcher shim. The dagger
+  tier is exercised through recording/echo-only shims; no engine or
+  container is required by this test tier (live engine proof is recorded
+  separately in the task evidence).
 
   Lightweight, self-contained runner: plain pwsh assertions over exit codes,
   messages and produced files. No Pester or other new dependency frameworks
@@ -399,6 +410,134 @@ try {
     Assert-That { $ir7.ExitCode -eq 1 } 'IR07a rust tier rejects a wsl-delegating cargo-nextest shim'
     Assert-That { $ir7Combined -match [regex]::Escape($NextestWslShim) } 'IR07b rejection names the offending shim path'
     Assert-That { $ir7Combined -notmatch 'SHIM-EXECUTED' } 'IR07c the prohibited shim was inspected and rejected, never executed'
+
+    # --- task 1.4: one command contract for container and native jobs ---
+    # Requirements 7.1, 7.2, 8.4, 12.5, 13.3, 13.4. Static + child-process
+    # assertions only: this tier must not need the Dagger engine or any
+    # container image (live engine evidence is recorded in task evidence).
+
+    Write-Output '-- contract: CT01 Dagger module manifest (.dagger/, design.md file plan) --'
+    $ctDaggerJsonPath = Join-Path $RepoRoot '.dagger\dagger.json'
+    Assert-That { Test-Path -LiteralPath $ctDaggerJsonPath -PathType Leaf } 'CT01a .dagger/dagger.json exists'
+    $ctDaggerJson = $null
+    try { $ctDaggerJson = Get-Content -LiteralPath $ctDaggerJsonPath -Raw | ConvertFrom-Json } catch { $ctDaggerJson = $null }
+    Assert-That { $null -ne $ctDaggerJson } 'CT01b dagger.json parses as JSON'
+    Assert-That { $ctDaggerJson -and $ctDaggerJson.name -eq 'drift' } 'CT01c module name is drift'
+    Assert-That { $ctDaggerJson -and $ctDaggerJson.engineVersion -eq 'v0.21.11' } 'CT01d engineVersion pinned to v0.21.11 (task 1.3 proven pin)'
+    Assert-That { $ctDaggerJson -and (($ctDaggerJson.sdk -eq 'typescript') -or ($ctDaggerJson.sdk.PSObject -and $ctDaggerJson.sdk.source -eq 'typescript')) } 'CT01e sdk is typescript (Dagger TypeScript SDK, tasks.md tool choices)'
+    Assert-That { $ctDaggerJson -and $ctDaggerJson.source -eq '.' } 'CT01f sourceSubpath pinned explicitly so the module lives in .dagger/ (research.md 1.3 finding)'
+
+    Write-Output '-- contract: CT02 pinned versions/config file (.config/ci-versions.json) --'
+    $ctPinsPath = Join-Path $RepoRoot '.config\ci-versions.json'
+    Assert-That { Test-Path -LiteralPath $ctPinsPath -PathType Leaf } 'CT02a .config/ci-versions.json exists'
+    $ctPins = $null
+    try { $ctPins = Get-Content -LiteralPath $ctPinsPath -Raw | ConvertFrom-Json } catch { $ctPins = $null }
+    Assert-That { $null -ne $ctPins } 'CT02b ci-versions.json parses as JSON'
+    Assert-That { $ctPins -and $ctPins.dagger.cliVersion -eq '0.21.11' } 'CT02c dagger CLI pinned to 0.21.11'
+    Assert-That { $ctPins -and $ctPins.dagger.engineImage -eq 'registry.dagger.io/engine:v0.21.11' } 'CT02d engine image pinned (task 1.3 spike pin)'
+    Assert-That { $ctPins -and $ctPins.node.image -match '^node:22\.[0-9]+\.[0-9]+-bookworm@sha256:[0-9a-f]{64}$' } 'CT02e node image pinned with exact tag and digest (repo CI uses Node 22)'
+    Assert-That { $ctPins -and $ctPins.rust.image -match '^rust:1\.[0-9]+\.[0-9]+-bookworm@sha256:[0-9a-f]{64}$' } 'CT02f rust image pinned with exact tag and digest'
+    Assert-That { $ctPins -and $ctPins.rust.toolchain -match '^1\.[0-9]+\.[0-9]+$' } 'CT02g rust toolchain version pinned'
+    $ctPinsRaw = ''
+    if (Test-Path -LiteralPath $ctPinsPath -PathType Leaf) { $ctPinsRaw = Get-Content -LiteralPath $ctPinsPath -Raw }
+    Assert-That { $ctPinsRaw -notmatch 'latest' } 'CT02h no floating :latest pins anywhere in ci-versions.json'
+
+    Write-Output '-- contract: CT03 nextest pin consistent across the three pin locations --'
+    $ctNextestTomlPath = Join-Path $RepoRoot '.config\nextest.toml'
+    $ctNextestToml = ''
+    if (Test-Path -LiteralPath $ctNextestTomlPath -PathType Leaf) { $ctNextestToml = Get-Content -LiteralPath $ctNextestTomlPath -Raw }
+    Assert-That { $ctPins -and $ctPins.nextest.version -eq '0.9.150' } 'CT03a ci-versions.json pins cargo-nextest 0.9.150'
+    Assert-That { $ctNextestToml -match [regex]::Escape('nextest-version = { required = "0.9.150" }') } 'CT03b .config/nextest.toml requires the same pin'
+    Assert-That { $null -ne $DriftNextestMinVersion -and $ctPins -and $ctPins.nextest.version -eq $DriftNextestMinVersion } 'CT03c Invoke-CI.ps1 $DriftNextestMinVersion matches ci-versions.json'
+
+    Write-Output '-- contract: CT04 Dagger module entry points (frontend, rust-checks, linux-build, linux-e2e) --'
+    $ctModuleSrcPath = Join-Path $RepoRoot '.dagger\src\index.ts'
+    $ctModuleSrc = ''
+    if (Test-Path -LiteralPath $ctModuleSrcPath -PathType Leaf) { $ctModuleSrc = Get-Content -LiteralPath $ctModuleSrcPath -Raw }
+    Assert-That { $ctModuleSrc -ne '' } 'CT04a .dagger/src/index.ts exists (TypeScript module source)'
+    Assert-That { $ctModuleSrc -match '@func\(' } 'CT04b module uses Dagger decorators (@func)'
+    $ctEntryPatterns = @{
+        'frontend'    = 'async frontend\('
+        'rust-checks' = 'async rustChecks\('
+        'linux-build' = 'async linuxBuild\('
+        'linux-e2e'   = 'async linuxE2E\('     # TS method linuxE2E: SDK registers callable linux-e-2-e (digit/letter split); contract name kept in pins.ts
+        'contract'    = 'contract\(\):\s*string'
+    }
+    foreach ($ctEntry in @('frontend', 'rust-checks', 'linux-build', 'linux-e2e', 'contract')) {
+        Assert-That { $ctModuleSrc -match $ctEntryPatterns[$ctEntry] } "CT04c module declares entry point '$ctEntry'"
+    }
+    $ctPinsTsPath = Join-Path $RepoRoot '.dagger\src\pins.ts'
+    $ctPinsTs = ''
+    if (Test-Path -LiteralPath $ctPinsTsPath -PathType Leaf) { $ctPinsTs = Get-Content -LiteralPath $ctPinsTsPath -Raw }
+    Assert-That {
+        $ctPins -and $ctPinsTs -ne '' -and
+        $ctPinsTs -match [regex]::Escape(($ctPins.node.image -split '@')[0]) -and
+        $ctPinsTs -match [regex]::Escape(($ctPins.rust.image -split '@')[0]) -and
+        $ctPinsTs -match [regex]::Escape($ctPins.dagger.engineImage)
+    } 'CT04d module pins.ts mirrors the node/rust image tags and engine image from ci-versions.json'
+    Assert-That { $ctPinsTs -match [regex]::Escape('entry: "linux-e2e"') } 'CT04c1 the contract name linux-e2e is declared in pins.ts (SDK callable is linux-e-2-e)'
+
+    Write-Output '-- contract: CT05 command-list document distinguishes container from native --'
+    $ctReadmePath = Join-Path $RepoRoot '.dagger\README.md'
+    $ctReadme = ''
+    if (Test-Path -LiteralPath $ctReadmePath -PathType Leaf) { $ctReadme = Get-Content -LiteralPath $ctReadmePath -Raw }
+    Assert-That { $ctReadme -ne '' } 'CT05a .dagger/README.md exists (CI contract command list)'
+    Assert-That { $ctReadme -match 'Linux container' -and $ctReadme -match 'native Windows' -and $ctReadme -match 'native macOS' } 'CT05b contract doc distinguishes Linux container checks from native Windows/macOS validation'
+    Assert-That { $ctReadme -match [regex]::Escape('never substitute for native Windows or macOS validation') } 'CT05c contract doc states container results never substitute for native validation'
+    Assert-That { $ctPins -and $ctReadme -match [regex]::Escape($ctPins.dagger.engineImage) } 'CT05d contract doc names the pinned engine image'
+    Assert-That { $ctReadme -match [regex]::Escape('node:22') -and $ctReadme -match [regex]::Escape('rust:1.') } 'CT05e contract doc names the pinned node and rust images'
+
+    Write-Output '-- contract: CT06 native frontend tier (npm runs natively on Windows) --'
+    $ctFrontendCommands = $null
+    try { $ctFrontendCommands = Get-DriftFrontendTierCommands } catch { $ctFrontendCommands = $null }
+    Assert-That { $null -ne $ctFrontendCommands -and ($ctFrontendCommands -join ' | ') -eq 'npm ci | npm run lint | npx tsc --noEmit | npx vitest run | npm run build' } 'CT06a frontend tier command list: install, lint, typecheck, unit tests, build (Req 7.1)'
+    $ctF1 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'frontend') -Environment @{ 'PATH' = "$env:SystemRoot\System32" }
+    Assert-That { $ctF1.ExitCode -eq 1 } 'CT06b frontend tier fails cleanly when node/npm are missing from PATH'
+    Assert-That { ("{0}`n{1}" -f $ctF1.StdOut, $ctF1.StdErr) -match 'npm' } 'CT06c missing-tool failure names npm'
+
+    Write-Output '-- contract: CT07 dagger tier resolves the real CLI, never the personal launcher --'
+    $ctDaggerCli = $null
+    try { $ctDaggerCli = Resolve-DriftDaggerCli -PinsPath $ctPinsPath } catch { $ctDaggerCli = $null }
+    Assert-That { $null -ne $ctDaggerCli -and $ctDaggerCli -match '\.exe$' } 'CT07a Resolve-DriftDaggerCli finds the real dagger executable (.exe, not a .cmd launcher)'
+
+    Write-Output '-- contract: CT08 dagger tier wires the engine runner host itself (task 1.3 finding) --'
+    $ctDaggerShimDir = Join-Path $TempRoot 'dagger-shims'
+    New-Item -ItemType Directory -Path $ctDaggerShimDir -Force | Out-Null
+    $ctRecorderOut = Join-Path $ctDaggerShimDir 'recorder-out.txt'
+    $ctRecorder = Join-Path $ctDaggerShimDir 'dagger.cmd'
+    Set-Content -LiteralPath $ctRecorder -Value @(
+        '@echo off',
+        '> "%DRIFT_DAGGER_RECORDER_OUT%" echo ARGS=%*',
+        '>> "%DRIFT_DAGGER_RECORDER_OUT%" echo RUNNER=%_EXPERIMENTAL_DAGGER_RUNNER_HOST%',
+        'exit /b 7'
+    ) -Encoding ascii
+    $ctD1 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'contract', '-DaggerCliPath', $ctRecorder) -Environment @{ 'DRIFT_DAGGER_RECORDER_OUT' = $ctRecorderOut }
+    Assert-That { $ctD1.ExitCode -eq 7 } 'CT08a dagger tier propagates the dagger CLI exit code (7 from the recording shim)'
+    $ctRec = ''
+    if (Test-Path -LiteralPath $ctRecorderOut -PathType Leaf) { $ctRec = Get-Content -LiteralPath $ctRecorderOut -Raw }
+    Assert-That { $ctRec -match [regex]::Escape('RUNNER=image+podman://registry.dagger.io/engine:v0.21.11') } 'CT08b tier sets _EXPERIMENTAL_DAGGER_RUNNER_HOST from the pinned engine image (no launcher dependency)'
+    Assert-That { $ctRec -match '\bcall\b' -and $ctRec -match '\bcontract\b' -and $ctRec -match '-m' -and $ctRec -notmatch '--source' } 'CT08c tier invokes dagger with: -m <module> call contract (no --source for the contract entry)'
+    Assert-That { $ctRec -match [regex]::Escape((Join-Path $RepoRoot '.dagger')) } 'CT08d tier points -m at the repository .dagger module'
+    $ctRecorderOut2 = Join-Path $ctDaggerShimDir 'recorder-out-2.txt'
+    $ctD3 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'linux-e2e', '-DaggerCliPath', $ctRecorder) -Environment @{ 'DRIFT_DAGGER_RECORDER_OUT' = $ctRecorderOut2 }
+    $ctRec2 = ''
+    if (Test-Path -LiteralPath $ctRecorderOut2 -PathType Leaf) { $ctRec2 = Get-Content -LiteralPath $ctRecorderOut2 -Raw }
+    Assert-That { $ctRec2 -match [regex]::Escape('linux-e-2-e') -and $ctRec2 -match '--source' } 'CT08e tier maps the contract entry linux-e2e to the SDK-registered callable linux-e-2-e and passes --source <repo root>'
+
+    Write-Output '-- contract: CT09 wsl-delegating dagger shim rejected before execution --'
+    $ctDaggerWsl = Join-Path $ctDaggerShimDir 'dagger-wsl.cmd'
+    Set-Content -LiteralPath $ctDaggerWsl -Value '@echo SHIM-EXECUTED wsl.exe -e dagger %*' -Encoding ascii
+    $ctD2 = Invoke-ChildPreflight -Arguments @('-NoProfile', '-NonInteractive', '-File', $ScriptPath, '-Tier', 'dagger', '-DaggerEntry', 'contract', '-DaggerCliPath', $ctDaggerWsl) -Environment @{}
+    $ctD2Combined = "{0}`n{1}" -f $ctD2.StdOut, $ctD2.StdErr
+    Assert-That { $ctD2.ExitCode -eq 1 } 'CT09a dagger tier rejects a wsl-delegating dagger shim'
+    Assert-That { $ctD2Combined -match [regex]::Escape($ctDaggerWsl) } 'CT09b rejection names the offending shim path'
+    Assert-That { $ctD2Combined -notmatch 'SHIM-EXECUTED' } 'CT09c the prohibited shim was inspected and rejected, never executed'
+
+    Write-Output '-- contract: CT10 single command per tier documented (Req 13.4) --'
+    $ctCiSrc = Get-Content -LiteralPath $ScriptPath -Raw
+    Assert-That { $ctCiSrc -match [regex]::Escape('-Tier frontend') } 'CT10a Invoke-CI.ps1 documents the frontend tier command'
+    Assert-That { $ctCiSrc -match [regex]::Escape('-Tier dagger') } 'CT10b Invoke-CI.ps1 documents the dagger tier command'
+    Assert-That { $ctCiSrc -match [regex]::Escape("'frontend', 'rust-checks', 'linux-build', 'linux-e2e', 'contract'") } 'CT10c -DaggerEntry ValidateSet exposes exactly the module entry points plus contract introspection'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.
