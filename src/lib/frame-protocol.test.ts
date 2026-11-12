@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  parseFramePacket,
-  tryParseH264Packet,
-} from './frame-protocol';
-import { isH264Keyframe } from './h264-decoder';
+import { parseFramePacket } from './frame-protocol';
 
 /** Build a wire-format packet the same way the Rust encoder does. */
 function buildPacket(
@@ -143,61 +139,11 @@ describe('frame protocol', () => {
     expect(() => parseFramePacket(buildPacket(0, 1, 1, []))).toThrow(
       'Unknown frame packet kind: 0'
     );
-    // Kind 3 is the H.264 packet and must go through tryParseH264Packet.
+    // Kind 3 was the H.264 packet, removed with its encoder/decoder
+    // (task 4.4, Req 9.4/9.5). A legacy kind-3 packet must stay a clean
+    // unknown-kind parse error — never decoded, never silently accepted.
     expect(() => parseFramePacket(buildPacket(3, 1, 1, []))).toThrow(
       'Unknown frame packet kind: 3'
     );
-  });
-});
-
-describe('tryParseH264Packet', () => {
-  it('parses a kind-3 packet with its documented layout', () => {
-    const packet = new Uint8Array([
-      3,
-      2, 0, // width = 2 (LE)
-      1, 0, // height = 1 (LE)
-      4, 0, 0, 0, // dataLen = 4 (LE)
-      0x11, 0x22, 0x33, 0x44,
-    ]);
-
-    const parsed = tryParseH264Packet(packet);
-
-    expect(parsed).not.toBeNull();
-    expect(parsed?.kind).toBe('h264');
-    expect(parsed?.surfaceWidth).toBe(2);
-    expect(parsed?.surfaceHeight).toBe(1);
-    expect(Array.from(parsed?.h264Data ?? [])).toEqual([0x11, 0x22, 0x33, 0x44]);
-  });
-
-  it('returns null for non-H.264 and too-short payloads', () => {
-    const fullFrame = buildPacket(1, 2, 1, [
-      { x: 0, y: 0, w: 2, h: 1, pixels: [1, 2, 3, 4, 5, 6, 7, 8] },
-    ]);
-    expect(tryParseH264Packet(fullFrame)).toBeNull();
-    expect(tryParseH264Packet(new Uint8Array([3, 2, 0, 1, 0, 4, 0, 0]))).toBeNull();
-  });
-
-  it('clamps the declared data length to the available bytes (no validation)', () => {
-    // dataLen claims 16 but only 4 bytes follow; the parser silently clamps.
-    const packet = new Uint8Array([
-      3, 2, 0, 1, 0, 16, 0, 0, 0, 1, 2, 3, 4,
-    ]);
-
-    const parsed = tryParseH264Packet(packet);
-
-    expect(Array.from(parsed?.h264Data ?? [])).toEqual([1, 2, 3, 4]);
-  });
-});
-
-describe('isH264Keyframe', () => {
-  it('detects SPS and IDR NAL units after Annex B start codes', () => {
-    expect(isH264Keyframe(new Uint8Array([0x00, 0x00, 0x01, 0x67, 0x00]))).toBe(true);
-    expect(isH264Keyframe(new Uint8Array([0x00, 0x00, 0x01, 0x65, 0x00]))).toBe(true);
-    expect(isH264Keyframe(new Uint8Array([0x00, 0x00, 0x00, 0x01, 0x65]))).toBe(true);
-  });
-
-  it('returns false for non-keyframe slices and start-code-free data', () => {
-    expect(isH264Keyframe(new Uint8Array([0x00, 0x00, 0x01, 0x41, 0x00]))).toBe(false);
-    expect(isH264Keyframe(new Uint8Array([0x67, 0x00, 0x00, 0x01, 0x65]))).toBe(false);
   });
 });

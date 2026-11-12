@@ -1153,6 +1153,25 @@ try {
         $ctProbeSwift -match '(?m)^import Foundation' -and
         $ctProbeSwift -match '(?m)^import CoreGraphics'
     } 'CT15n the window probe imports Foundation (FileHandle/NSNumber/data(using:) are Foundation types) alongside CoreGraphics — run-43089420631 swiftc-compile-failed root cause'
+
+    # ─── CT16 H.264 removal contract (task 4.4, Req 9.5): the app crate
+    # carries no H.264 encoder dependency and no encoder/decoder module.
+    # The kind-1/2 frame transport stays; only the AVC transcode hop is
+    # gone. Pins the manifest and source tree so the crate cannot quietly
+    # reintroduce openh264 (the runtime proof is `cargo tree -i openh264`
+    # in the task evidence; this guards the source of truth).
+    $ctAppManifestPath = Join-Path $RepoRoot 'src-tauri\Cargo.toml'
+    $ctAppManifest = Get-Content -LiteralPath $ctAppManifestPath -Raw
+    Assert-That {
+        $ctAppManifest -notmatch '(?m)^\s*openh264\s*='
+    } 'CT16a the app manifest declares no openh264 dependency — the H.264 encoder crate is removed from the build (Req 9.5, task 4.4)'
+    Assert-That {
+        -not (Test-Path -LiteralPath (Join-Path $RepoRoot 'src-tauri\src\renderer\h264_encoder.rs') -PathType Leaf) -and
+        -not (Test-Path -LiteralPath (Join-Path $RepoRoot 'src\lib\h264-decoder.ts') -PathType Leaf)
+    } 'CT16b the H.264 encoder (Rust) and decoder (TS WebCodecs) modules are gone — removal is atomic across backend and UI (Req 9.4, task 4.4)'
+    Assert-That {
+        $ctAppManifest -match '(?m)^ironrdp-egfx\s*=\s*\{[^\r\n]*default-features\s*=\s*false'
+    } 'CT16c ironrdp-egfx stays default-features=false so the optional openh264 decoder features stay off (Req 9.1/9.5)'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.

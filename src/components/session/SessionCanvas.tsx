@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Loader2, WifiOff } from 'lucide-react';
 
-import { parseFramePacket, tryParseH264Packet } from '../../lib/frame-protocol';
-import { H264HardwareDecoder, isH264Keyframe } from '../../lib/h264-decoder';
+import { parseFramePacket } from '../../lib/frame-protocol';
 import {
   compositeFrameRects,
   fitSurfaceToContainer,
@@ -63,8 +62,6 @@ export function SessionCanvas({
   const containerRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<SurfaceBuffer | null>(null);
   const renderScheduledRef = useRef(false);
-  const h264DecoderRef = useRef<H264HardwareDecoder | null>(null);
-  const h264TimestampRef = useRef(0);
   const [displaySize, setDisplaySize] = useState(() => ({
     width: surfaceWidth,
     height: surfaceHeight,
@@ -195,54 +192,10 @@ export function SessionCanvas({
     setDisplaySize(nextSize);
   }, [surfaceHeight, surfaceWidth]);
 
-  // Initialize H.264 decoder when canvas is available
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const decoder = new H264HardwareDecoder();
-    decoder.init(canvas).then((ok) => {
-      if (ok) {
-        h264DecoderRef.current = decoder;
-        console.log('[SessionCanvas] H.264 hardware decoder initialized');
-      } else {
-        console.log('[SessionCanvas] WebCodecs unavailable, using raw RGBA path');
-      }
-    });
-
-    return () => {
-      decoder.destroy();
-      h264DecoderRef.current = null;
-    };
-  }, []);
-
   useEffect(() => {
     const unsubscribe = subscribeToFrames((frame) => {
-      // Try H.264 path first
-      const h264Packet = tryParseH264Packet(frame);
-      if (h264Packet && h264DecoderRef.current) {
-        const container = containerRef.current;
-        if (container) {
-          setDisplaySize(
-            fitSurfaceToContainer(
-              container.clientWidth,
-              container.clientHeight,
-              h264Packet.surfaceWidth,
-              h264Packet.surfaceHeight
-            )
-          );
-        }
-
-        const isKeyframe = isH264Keyframe(h264Packet.h264Data);
-        const timestamp = h264TimestampRef.current;
-        h264TimestampRef.current += 16667; // ~60fps in microseconds
-
-        h264DecoderRef.current.decode(h264Packet.h264Data, timestamp, isKeyframe);
-        onFramePresented?.();
-        return;
-      }
-
-      // Fall back to raw RGBA frame parsing
+      // Decoded RGBA bitmap packets only (kinds 1/2, Req 4.4/9.4): the
+      // H.264 kind-3 path was removed with its encoder/decoder (task 4.4).
       let packet;
 
       try {

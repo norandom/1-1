@@ -10,10 +10,7 @@ use uuid::Uuid;
 use crate::rdp::client::{ConnectionOutcome, SessionCommand, attempt_rdp_connection};
 use crate::rdp::clipboard::SessionClipboardBackend;
 use crate::rdp::display::FrameBuffer;
-use crate::rdp::frame_transport::{
-    encode_full_frame_packet, encode_h264_packet, encode_image_update_packet,
-};
-use crate::renderer::h264_encoder::H264FrameEncoder;
+use crate::rdp::frame_transport::{encode_full_frame_packet, encode_image_update_packet};
 use crate::renderer::shared_frame::SharedFrame;
 use crate::store::connections::ConnectionConfig;
 
@@ -215,7 +212,6 @@ struct SessionActor {
     last_error: Option<String>,
     auto_reconnect: bool,
     connect: ConnectFn,
-    h264_encoder: Option<H264FrameEncoder>,
     shared_frame: Option<Arc<SharedFrame>>,
 }
 
@@ -239,21 +235,6 @@ impl SessionActor {
             config.display_height.unwrap_or(1080),
         );
 
-        // Try to create the H.264 encoder; fall back to None if it fails
-        let h264_encoder = match H264FrameEncoder::new(width, height) {
-            Ok(enc) => {
-                log::info!("H.264 encoder initialized for {}x{}", width, height);
-                Some(enc)
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to initialize H.264 encoder, will use raw RGBA: {}",
-                    e
-                );
-                None
-            }
-        };
-
         Self {
             id,
             config,
@@ -275,7 +256,6 @@ impl SessionActor {
             last_error: None,
             auto_reconnect,
             connect,
-            h264_encoder,
             shared_frame,
         }
     }
@@ -342,47 +322,9 @@ impl SessionActor {
         }
     }
 
-    /// Try to send a frame as H.264. Returns Ok(true) if sent, Ok(false) if encoder unavailable.
-    fn try_send_h264_frame(
-        &mut self,
-        rgba_data: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<bool, DisconnectReason> {
-        let encoder = match self.h264_encoder.as_mut() {
-            Some(enc) => enc,
-            None => return Ok(false),
-        };
-
-        match encoder.encode_rgba(rgba_data, width, height) {
-            Ok(h264_data) => {
-                if h264_data.is_empty() {
-                    return Ok(false);
-                }
-                let packet = encode_h264_packet(width as u16, height as u16, &h264_data);
-                self.send_frame_packet(packet)?;
-                Ok(true)
-            }
-            Err(e) => {
-                log::warn!("H.264 encode failed, falling back to raw RGBA: {}", e);
-                // Disable H.264 encoder on failure
-                self.h264_encoder = None;
-                Ok(false)
-            }
-        }
-    }
-
+    /// Send the mock frame as a decoded RGBA bitmap packet (kinds 1/2 only;
+    /// the H.264 transcode hop was removed by task 4.4, Req 9.4).
     fn send_mock_frame(&mut self) -> Result<(), DisconnectReason> {
-        // Try H.264 encoding first for the mock frame
-        let w = self.frame_buffer.width;
-        let h = self.frame_buffer.height;
-        // We need to clone data to avoid borrow conflict with self
-        let rgba_data = self.frame_buffer.data.clone();
-        if self.try_send_h264_frame(&rgba_data, w, h)? {
-            return Ok(());
-        }
-
-        // Fall back to raw RGBA
         let packet = encode_full_frame_packet(&self.frame_buffer);
         self.send_frame_packet(packet)
     }
@@ -2314,12 +2256,28 @@ mod tests {
         let shared_frame = SharedFrame::new(64, 64);
         let (events, events_rx) = RecordedEvents::new();
         let frame_sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let frame_kinds = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
         let connect_calls = Arc::new(AtomicUsize::new(0));
+        let kinds_sink = Arc::clone(&frame_kinds);
+        let sizes_sink = Arc::clone(&frame_sizes);
+        // Inline channel (instead of scripted_frame_channel) so this test can
+        // also pin the emitted packet KIND byte at the actor seam: mock frames
+        // must be kind-1 full frames — kind 3 (H.264) is retired (task 4.4)
+        // and must never be re-emitted here.
+        let frame_channel = tauri::ipc::Channel::new(move |response| {
+            if let tauri::ipc::InvokeResponseBody::Raw(bytes) = &response {
+                if !bytes.is_empty() {
+                    kinds_sink.lock().unwrap().push(bytes[0]);
+                }
+                sizes_sink.lock().unwrap().push(bytes.len());
+            }
+            Ok(())
+        });
         let id = manager
             .create_session_with_transport(
                 test_config("gpu-independent"),
                 None,
-                scripted_frame_channel(FrameScript::Ok, Arc::clone(&frame_sizes)),
+                frame_channel,
                 SessionEventSink::recorded(Arc::clone(&events)),
                 true,
                 Some(Arc::clone(&shared_frame)),
@@ -2335,7 +2293,14 @@ mod tests {
         })
         .await;
 
-        // IPC full frames reached the webview channel…
+        // IPC full frames reached the webview channel — and every emitted
+        // packet is a kind-1 full frame (kind byte pinned at the actor seam).
+        let kinds = frame_kinds.lock().unwrap().clone();
+        assert!(!kinds.is_empty());
+        assert!(
+            kinds.iter().all(|k| *k == crate::rdp::frame_transport::PACKET_KIND_FULL_FRAME),
+            "mock frames must emit only kind-1 full frames, got {kinds:?}"
+        );
         assert!(!frame_sizes.lock().unwrap().is_empty());
         // …while the GPU surface stayed untouched: no dirty flag, no
         // published snapshot, no version bump.

@@ -122,7 +122,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Nextest characterization and native smoke pass on all supported OSes; actor behavior stays stable.
   - _Boundary: Session adapter_
   - _Requirements: 2.2,2.3,2.4,2.5,3.1,3.2,3.3,3.4,3.5,3.6_
-- [ ] 4.4 Remove H.264 transport atomically across Rust and UI
+- [x] 4.4 Remove H.264 transport atomically across Rust and UI
   - Explicit integration task: remove encoder, decoder and kind 3 together; reuse current kind-1/2 packet layout.
   - Done: Frontend/backend packet tests pass and cargo tree feature audit contains no openh264 encoder dependency.
   - _Boundary: Frame transport integration_

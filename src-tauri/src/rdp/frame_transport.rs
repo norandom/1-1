@@ -5,7 +5,6 @@ use crate::rdp::display::FrameBuffer;
 
 pub const PACKET_KIND_FULL_FRAME: u8 = 1;
 pub const PACKET_KIND_DIRTY_RECTS: u8 = 2;
-pub const PACKET_KIND_H264: u8 = 3;
 
 const PACKET_HEADER_LEN: usize = 1 + 2 + 2 + 2;
 const RECT_HEADER_LEN: usize = 2 + 2 + 2 + 2;
@@ -74,18 +73,6 @@ fn append_rect_pixels(
             scratch.extend_from_slice(&image_data[start..end]);
         }
     }
-}
-
-/// Encode an H.264 bitstream into a frame transport packet.
-/// Layout: [kind=3 (1 byte)] [width (2 bytes LE)] [height (2 bytes LE)] [h264_data_len (4 bytes LE)] [h264_data...]
-pub fn encode_h264_packet(width: u16, height: u16, h264_data: &[u8]) -> Vec<u8> {
-    let mut packet = Vec::with_capacity(1 + 2 + 2 + 4 + h264_data.len());
-    packet.push(PACKET_KIND_H264);
-    packet.extend_from_slice(&width.to_le_bytes());
-    packet.extend_from_slice(&height.to_le_bytes());
-    packet.extend_from_slice(&(h264_data.len() as u32).to_le_bytes());
-    packet.extend_from_slice(h264_data);
-    packet
 }
 
 fn encode_packet(
@@ -224,16 +211,14 @@ mod tests {
     }
 
     #[test]
-    fn h264_packet_layout_is_kind3_with_explicit_length() {
-        let packet = encode_h264_packet(2, 1, &[0x11, 0x22, 0x33, 0x44]);
-
-        assert_eq!(packet[0], PACKET_KIND_H264);
-        assert_eq!(u16::from_le_bytes([packet[1], packet[2]]), 2);
-        assert_eq!(u16::from_le_bytes([packet[3], packet[4]]), 1);
-        assert_eq!(
-            u32::from_le_bytes([packet[5], packet[6], packet[7], packet[8]]),
-            4
-        );
-        assert_eq!(&packet[9..], &[0x11, 0x22, 0x33, 0x44]);
+    fn packet_kind_values_are_stable_wire_constants() {
+        // Cross-language wire contract with src/lib/frame-protocol.ts
+        // (kind 1 = full frame, kind 2 = dirty rects). Kind 3 was the
+        // H.264 packet, removed with its encoder/decoder (Req 9.4/9.5);
+        // the surviving kinds must never be renumbered and kind 3 must
+        // not be repurposed, so old packets are always rejected as
+        // unknown kinds by both sides.
+        assert_eq!(PACKET_KIND_FULL_FRAME, 1);
+        assert_eq!(PACKET_KIND_DIRTY_RECTS, 2);
     }
 }

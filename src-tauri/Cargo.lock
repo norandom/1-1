@@ -3314,15 +3314,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nasm-rs"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "706bf8a5e8c8ddb99128c3291d31bd21f4bcde17f0f4c20ec678d85c74faa149"
-dependencies = [
- "log",
-]
-
-[[package]]
 name = "ndk"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3605,27 +3596,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "openh264"
-version = "0.6.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c1af3a4d35290ba7a46d1ce69cb13ae740a2d72cc2ee00abee3c84bed3dbe5d"
-dependencies = [
- "openh264-sys2",
- "wide",
-]
-
-[[package]]
-name = "openh264-sys2"
-version = "0.6.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77a77c1e18503537113d77b1b1d05274e81fa9f44843c06be2d735adb19f7c9d"
-dependencies = [
- "cc",
- "nasm-rs",
- "walkdir",
-]
 
 [[package]]
 name = "openssl-probe"
@@ -4562,7 +4532,6 @@ dependencies = [
  "ironrdp-tokio",
  "keyring",
  "log",
- "openh264",
  "pollster",
  "raw-window-handle",
  "rustls",
@@ -4577,7 +4546,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "uuid",
- "webpki-roots",
  "wgpu",
  "x509-cert",
 ]
@@ -6938,15 +6906,6 @@ dependencies = [
  "pkg-config",
  "soup3-sys",
  "system-deps",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]

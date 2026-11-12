@@ -67,11 +67,9 @@ x509-cert = "0.3"
 # provider explicitly and disable the aws-lc-rs defaults.
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-webpki-roots = "1"
 wgpu = "24"
 pollster = "0.4"
 raw-window-handle = "0.6"
-openh264 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

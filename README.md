@@ -49,7 +49,6 @@ Most RDP clients on macOS are either slow, ugly, or abandoned. Drift is none of 
 - wgpu-powered frame rendering (Metal on macOS, Vulkan on Linux)
 - Zero-copy double-buffer SharedFrame architecture
 - Condvar-based frame signaling (0% CPU when idle)
-- H.264 hardware encoder ready for session recording
 - Fallback to software Canvas rendering when GPU unavailable
 
 **Interface**
@@ -181,7 +180,6 @@ GpuRenderer (dedicated OS thread)
 | TLS | rustls + webpki |
 | Auth | CredSSP / NLA via IronRDP |
 | Credentials | [keyring](https://crates.io/crates/keyring) (OS keychain) |
-| Video | [openh264](https://crates.io/crates/openh264) (H.264 encoder) |
 
 ## Roadmap
 
@@ -190,7 +188,6 @@ GpuRenderer (dedicated OS thread)
 - [x] Keyboard + mouse + trackpad scroll input
 - [x] Multi-session tabs
 - [x] Auto-reconnect with backoff
-- [x] H.264 encoder (for future session recording)
 - [x] Dark/light theme + shadcn/ui
 - [x] Quick Connect (`Cmd+K`)
 - [x] SSH config import
@@ -198,7 +195,7 @@ GpuRenderer (dedicated OS thread)
 - [ ] Audio redirection
 - [ ] File transfer via drag-and-drop
 - [ ] Multi-monitor support
-- [ ] Session recording (H.264 → MP4)
+- [ ] Session recording (frames to MP4)
 - [ ] SSH tunneling for RDP-over-SSH
 - [ ] Auto-discovery of Windows machines on LAN
 
@@ -215,12 +212,12 @@ drift-rdp/
 │   │   └── ui/               # shadcn primitives
 │   ├── hooks/                # useRdpSession, useTheme, etc.
 │   ├── stores/               # Zustand stores
-│   ├── lib/                  # Input mapper, frame protocol, H.264 decoder
+│   ├── lib/                  # Input mapper, frame protocol
 │   └── styles/               # Tailwind + theme
 ├── src-tauri/                # Rust backend
 │   └── src/
 │       ├── rdp/              # IronRDP session actor, client, input
-│       ├── renderer/         # wgpu GPU renderer, SharedFrame, H.264 encoder
+│       ├── renderer/         # wgpu GPU renderer, SharedFrame
 │       ├── commands/         # Tauri IPC commands
 │       ├── store/            # Persistence (connections, settings, keychain)
 │       └── utils/            # TCP probe, latency measurement
