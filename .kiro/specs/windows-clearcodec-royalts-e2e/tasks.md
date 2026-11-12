@@ -107,7 +107,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 2.1,4.1,4.3,7.1,7.2,7.3,12.6,12.9_
 
 - [ ] 4. Bounded Rust dependency upgrade
-- [ ] 4.1 Resolve an upstream-only IronRDP set
+- [x] 4.1 Resolve an upstream-only IronRDP set
   - 3-hour spike: verify the proposed EGFX version against actual registry/source; pin a compatible component set and MSRV in lockfile. Check decode/error callbacks, AVC-disabled flags and compositor output. Prove the decode-error and unsupported-codec hook surface needed by Req 9.6/9.7, and define per-codec decode fixtures for ClearCodec plus every codec CodecPolicy will advertise (Planar, Uncompressed, RFX-Progressive). Do not assume latest documentation matches 0.5.0.
   - Done: Small compile probe demonstrates required upstream APIs and feature graph; decode/error hooks for 9.6/9.7 proven or the advertised caps shrink to proven codecs; per-codec fixtures defined; the resolved set is recorded and group-9 tasks stay blocked until it is. Stop on missing capability, not a custom codec/fork.
   - _Boundary: Protocol dependencies_
