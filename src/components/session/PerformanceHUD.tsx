@@ -4,6 +4,7 @@ import { useSessionStore } from '../../stores/sessionStore';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
+import { formatBandwidth, fpsLevel, latencyLevel } from '../../lib/hud-format';
 
 interface Props {
   fps: number;
@@ -15,17 +16,9 @@ interface Props {
 export function PerformanceHUD({ fps, latency, bandwidth, resolution }: Props) {
   const show = useSessionStore((s) => s.showPerformanceHud);
 
-  const formatBandwidth = (bps: number) => {
-    if (bps < 1024) return `${bps} B/s`;
-    if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
-    return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
-  };
+  const fpsTrend = fpsLevel(fps);
 
-  const fpsLevel: 'good' | 'medium' | 'bad' =
-    fps >= 24 ? 'good' : fps >= 15 ? 'medium' : 'bad';
-
-  const latencyLevel: 'good' | 'medium' | 'bad' =
-    latency < 50 ? 'good' : latency < 150 ? 'medium' : 'bad';
+  const latencyTrend = latencyLevel(latency);
 
   return (
     <AnimatePresence>
@@ -55,13 +48,13 @@ export function PerformanceHUD({ fps, latency, bandwidth, resolution }: Props) {
                 icon={Activity}
                 label="FPS"
                 value={String(fps)}
-                level={fpsLevel}
+                level={fpsTrend}
               />
               <HUDRow
                 icon={Wifi}
                 label="Latency"
                 value={`${latency}ms`}
-                level={latencyLevel}
+                level={latencyTrend}
               />
               <HUDRow
                 icon={Gauge}

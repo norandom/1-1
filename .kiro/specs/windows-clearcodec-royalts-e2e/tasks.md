@@ -95,7 +95,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Automated tests and required real-server checks cover each control; no assumption that mock frames prove clipboard/NLA.
   - _Boundary: Input baseline_
   - _Requirements: 3.1,3.2,3.3,3.4,3.5,3.6,12.6,12.9_
-- [ ] 3.4 Pin shell and renderer behavior
+- [x] 3.4 Pin shell and renderer behavior
   - Reuse Vitest and existing image crate; cover full/dirty frames, GPU-failure canvas path, HUD, themes/settings/toasts/status and shortcuts.
   - Done: Characterization records existing behavior and known defects without freezing incorrect defaults or tab identity.
   - _Boundary: Shell/render baseline_

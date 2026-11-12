@@ -216,4 +216,28 @@ mod tests {
             "load alone does not rewrite the file"
         );
     }
+
+    // ---- Task 3.4 characterization tests (shell/settings baseline, Req 5.2). ----
+
+    #[test]
+    fn test_partial_settings_json_resets_absent_fields_to_defaults_defect_b3_11() {
+        // B3-11: the frontend sends Partial<AppSettings> to the
+        // `update_settings` command (tauri.ts updateSettings), but the
+        // command deserializes a FULL AppSettings whose every field carries
+        // #[serde(default = …)] — every absent field silently resets to the
+        // backend default instead of keeping the stored value. Pinned as a
+        // defect; a fix must merge onto the stored settings and will flip
+        // these assertions.
+        let parsed: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        let defaults = AppSettings::default();
+
+        assert_eq!(parsed.theme, "dark", "the submitted field applies");
+        assert_eq!(parsed.connection_timeout, defaults.connection_timeout);
+        assert_eq!(parsed.quality, defaults.quality);
+        assert_eq!(parsed.default_resolution, defaults.default_resolution);
+        assert!(
+            parsed.connection_timeout == 30000,
+            "a stored 10000/12345 ms timeout resets to the backend default"
+        );
+    }
 }

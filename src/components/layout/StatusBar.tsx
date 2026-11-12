@@ -4,6 +4,7 @@ import { useTheme } from '../../hooks/useTheme';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
+import { buildStatusBarText, sessionCountLabel } from '../../lib/status-bar';
 
 export function StatusBar() {
   const sessions = useSessionStore((s) => s.sessions);
@@ -13,9 +14,7 @@ export function StatusBar() {
   const activeSession = activeSessionId ? sessions.get(activeSessionId) : null;
   const sessionCount = sessions.size;
 
-  const statusText = activeSession
-    ? `Connected to ${activeSession.connectionId} - ${activeSession.width}x${activeSession.height}`
-    : 'No active connection';
+  const statusText = buildStatusBarText(activeSession ?? null);
 
   return (
     <div
@@ -46,7 +45,7 @@ export function StatusBar() {
       <div className="flex items-center gap-1.5 text-[var(--color-text-muted)]">
         <MonitorCog size={11} />
         <span>
-          {sessionCount} active session{sessionCount !== 1 ? 's' : ''}
+          {sessionCountLabel(sessionCount)}
         </span>
       </div>
 

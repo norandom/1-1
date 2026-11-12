@@ -4,6 +4,12 @@ import { Loader2, WifiOff } from 'lucide-react';
 
 import { parseFramePacket, tryParseH264Packet } from '../../lib/frame-protocol';
 import { H264HardwareDecoder, isH264Keyframe } from '../../lib/h264-decoder';
+import {
+  compositeFrameRects,
+  fitSurfaceToContainer,
+  unionDirtyRect,
+  type DirtyRect,
+} from '../../lib/canvas-compositor';
 import type { SessionStatus } from '../../types';
 
 interface MouseSurfaceBounds {
@@ -12,43 +18,12 @@ interface MouseSurfaceBounds {
   surfaceHeight: number;
 }
 
-interface DirtyRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
 interface SurfaceBuffer {
   width: number;
   height: number;
   pixels: Uint8ClampedArray;
   imageData: ImageData | null;
   dirty: DirtyRect | null;
-}
-
-function fitSurfaceToContainer(
-  containerWidth: number,
-  containerHeight: number,
-  surfaceWidth: number,
-  surfaceHeight: number
-) {
-  if (containerWidth <= 0 || containerHeight <= 0 || surfaceWidth <= 0 || surfaceHeight <= 0) {
-    return {
-      width: Math.max(surfaceWidth, 1),
-      height: Math.max(surfaceHeight, 1),
-    };
-  }
-
-  const scale = Math.min(
-    containerWidth / surfaceWidth,
-    containerHeight / surfaceHeight
-  );
-
-  return {
-    width: Math.max(1, Math.floor(surfaceWidth * scale)),
-    height: Math.max(1, Math.floor(surfaceHeight * scale)),
-  };
 }
 
 interface Props {
@@ -66,24 +41,6 @@ interface Props {
   onMouseUp: (e: globalThis.MouseEvent, bounds: MouseSurfaceBounds) => void;
   onWheel: (e: globalThis.WheelEvent, bounds: MouseSurfaceBounds) => void;
   onResize?: (width: number, height: number) => void;
-}
-
-function unionDirtyRect(current: DirtyRect | null, next: DirtyRect): DirtyRect {
-  if (!current) {
-    return next;
-  }
-
-  const left = Math.min(current.x, next.x);
-  const top = Math.min(current.y, next.y);
-  const right = Math.max(current.x + current.width, next.x + next.width);
-  const bottom = Math.max(current.y + current.height, next.y + next.height);
-
-  return {
-    x: left,
-    y: top,
-    width: right - left,
-    height: bottom - top,
-  };
 }
 
 export function SessionCanvas({
@@ -308,47 +265,7 @@ export function SessionCanvas({
         );
       }
 
-      for (const rect of packet.rects) {
-        if (rect.width === 0 || rect.height === 0) {
-          continue;
-        }
-
-        const rowBytes = rect.width * 4;
-        const rectBottom = Math.min(rect.y + rect.height, surface.height);
-        const rectRight = Math.min(rect.x + rect.width, surface.width);
-        const copyWidth = rectRight - rect.x;
-        const copyHeight = rectBottom - rect.y;
-
-        if (copyWidth <= 0 || copyHeight <= 0) {
-          continue;
-        }
-
-        if (
-          rect.x === 0 &&
-          rect.y === 0 &&
-          rect.width === surface.width &&
-          rect.height === surface.height &&
-          rect.pixels.length === surface.pixels.length
-        ) {
-          surface.pixels.set(rect.pixels);
-        } else {
-          for (let row = 0; row < copyHeight; row += 1) {
-            const srcStart = row * rowBytes;
-            const srcEnd = srcStart + copyWidth * 4;
-            const dstStart =
-              ((rect.y + row) * surface.width + rect.x) * 4;
-
-            surface.pixels.set(rect.pixels.subarray(srcStart, srcEnd), dstStart);
-          }
-        }
-
-        surface.dirty = unionDirtyRect(surface.dirty, {
-          x: rect.x,
-          y: rect.y,
-          width: copyWidth,
-          height: copyHeight,
-        });
-      }
+      compositeFrameRects(surface, packet.rects);
 
       scheduleDraw();
     });

@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
+import { nextThemeInCycle, resolveTheme } from '../lib/theme';
 
 export function useTheme() {
   const settings = useSettingsStore((s) => s.settings);
@@ -7,13 +8,10 @@ export function useTheme() {
 
   const applyTheme = useCallback((theme: 'system' | 'light' | 'dark') => {
     const root = document.documentElement;
-    let resolved: 'light' | 'dark';
-
-    if (theme === 'system') {
-      resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    } else {
-      resolved = theme;
-    }
+    const resolved = resolveTheme(
+      theme,
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+    );
 
     // Set both data-theme (our custom) and class (shadcn uses .dark/.light)
     root.setAttribute('data-theme', resolved);
@@ -35,10 +33,7 @@ export function useTheme() {
   }, [settings.theme, applyTheme]);
 
   const toggle = useCallback(() => {
-    const current = settings.theme;
-    const next: 'system' | 'light' | 'dark' =
-      current === 'dark' ? 'light' : current === 'light' ? 'system' : 'dark';
-    updateSettings({ theme: next });
+    updateSettings({ theme: nextThemeInCycle(settings.theme) });
   }, [settings.theme, updateSettings]);
 
   const setTheme = useCallback(

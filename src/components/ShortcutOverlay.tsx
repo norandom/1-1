@@ -9,45 +9,11 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { SHORTCUT_SECTIONS } from '../lib/shortcuts';
 
 interface Props {
   onClose: () => void;
 }
-
-interface Shortcut {
-  keys: string[];
-  description: string;
-}
-
-interface Section {
-  title: string;
-  shortcuts: Shortcut[];
-}
-
-const sections: Section[] = [
-  {
-    title: 'Navigation',
-    shortcuts: [
-      { keys: ['\u2318', 'K'], description: 'Quick Connect' },
-      { keys: ['\u2318', 'N'], description: 'New Connection' },
-      { keys: ['\u2318', ','], description: 'Settings' },
-    ],
-  },
-  {
-    title: 'Session',
-    shortcuts: [
-      { keys: ['Esc'], description: 'Disconnect menu' },
-      { keys: ['Ctrl', 'Shift', 'P'], description: 'Performance HUD' },
-      { keys: ['F11'], description: 'Fullscreen' },
-    ],
-  },
-  {
-    title: 'General',
-    shortcuts: [
-      { keys: ['\u2318', '?'], description: 'This help' },
-    ],
-  },
-];
 
 function KeyCap({ children }: { children: string }) {
   const isSymbol = children === '\u2318';
@@ -75,7 +41,7 @@ export function ShortcutOverlay({ onClose }: Props) {
         {/* Sections */}
         <ScrollArea className="max-h-[60vh]">
           <div className="space-y-5">
-            {sections.map((section, sectionIndex) => (
+            {SHORTCUT_SECTIONS.map((section, sectionIndex) => (
               <div key={section.title}>
                 {sectionIndex > 0 && <Separator className="mb-5" />}
                 <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2.5">

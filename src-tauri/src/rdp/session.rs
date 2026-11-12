@@ -2277,4 +2277,56 @@ mod tests {
             "unknown sessions have no snapshot"
         );
     }
+
+    /// Req 4.2 — the webview-canvas IPC path is independent of the GPU
+    /// surface: frames keep flowing to the frontend channel even when a
+    /// SharedFrame is attached, and the mock/canvas path never writes it
+    /// (the GPU renderer consumes it separately; `GpuRenderer` itself needs
+    /// a real window/adapter — audit, not unit-testable here).
+    #[tokio::test(start_paused = true)]
+    async fn test_mock_frames_flow_without_touching_the_gpu_shared_surface() {
+        use crate::renderer::shared_frame::SharedFrame;
+
+        let manager = SessionManager::new();
+        let shared_frame = SharedFrame::new(64, 64);
+        let (events, events_rx) = RecordedEvents::new();
+        let frame_sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connect_calls = Arc::new(AtomicUsize::new(0));
+        let id = manager
+            .create_session_with_transport(
+                test_config("gpu-independent"),
+                None,
+                scripted_frame_channel(FrameScript::Ok, Arc::clone(&frame_sizes)),
+                SessionEventSink::recorded(Arc::clone(&events)),
+                true,
+                Some(Arc::clone(&shared_frame)),
+                scripted_connect(Arc::clone(&connect_calls)),
+            )
+            .await
+            .expect("session with an attached GPU surface should be created");
+
+        let mut rx = events_rx.clone();
+        wait_for(&id, &events, &mut rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                && !frame_sizes.lock().unwrap().is_empty()
+        })
+        .await;
+
+        // IPC full frames reached the webview channel…
+        assert!(!frame_sizes.lock().unwrap().is_empty());
+        // …while the GPU surface stayed untouched: no dirty flag, no
+        // published snapshot, no version bump.
+        assert_eq!(shared_frame.version(), 0);
+        assert!(shared_frame.publish().is_none());
+
+        let cmd_tx = manager
+            .get_cmd_sender(&id)
+            .await
+            .expect("session handle exists");
+        cmd_tx.send(SessionCommand::Disconnect).await.unwrap();
+        wait_for(&id, &events, &mut rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+        })
+        .await;
+    }
 }

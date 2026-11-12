@@ -9,7 +9,7 @@ interface SettingsState {
   updateSettings: (settings: Partial<AppSettings>) => Promise<void>;
 }
 
-const defaultSettings: AppSettings = {
+export const defaultSettings: AppSettings = {
   theme: 'system',
   defaultPort: 3389,
   autoReconnect: true,
