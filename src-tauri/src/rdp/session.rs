@@ -87,6 +87,109 @@ pub struct SessionHandle {
     pub task_handle: tokio::task::JoinHandle<()>,
 }
 
+/// Narrow transport seam at the actor's RDP connection boundary.
+///
+/// Production always resolves to [`attempt_rdp_connection`]; characterization
+/// tests inject scripted outcomes so admission, retry, cancellation and
+/// teardown behavior can be pinned deterministically without network I/O.
+/// Behavior is unchanged: the production connector is the real sequence.
+pub(crate) type ConnectFn = Arc<
+    dyn Fn(
+            ConnectionConfig,
+            Option<String>,
+            u32,
+            u32,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = ConnectionOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Production connector: always [`attempt_rdp_connection`].
+pub(crate) fn real_connect() -> ConnectFn {
+    Arc::new(|config, password, width, height| {
+        Box::pin(async move {
+            attempt_rdp_connection(&config, password.as_deref(), width, height).await
+        })
+    })
+}
+
+/// Recorded frontend-event emissions for deterministic lifecycle tests.
+/// Entries carry the (paused-clock) instant so backoff timing is assertable.
+#[cfg(test)]
+pub(crate) struct RecordedEvents {
+    entries: std::sync::Mutex<Vec<(tokio::time::Instant, String, serde_json::Value)>>,
+    count_tx: watch::Sender<usize>,
+}
+
+#[cfg(test)]
+impl RecordedEvents {
+    pub(crate) fn new() -> (Arc<Self>, watch::Receiver<usize>) {
+        let (count_tx, count_rx) = watch::channel(0usize);
+        (
+            Arc::new(Self {
+                entries: std::sync::Mutex::new(Vec::new()),
+                count_tx,
+            }),
+            count_rx,
+        )
+    }
+
+    fn push(&self, event: &str, payload: serde_json::Value) -> Result<(), tauri::Error> {
+        let mut entries = self.entries.lock().unwrap();
+        entries.push((tokio::time::Instant::now(), event.to_string(), payload));
+        let count = entries.len();
+        drop(entries);
+        self.count_tx.send_replace(count);
+        Ok(())
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<(tokio::time::Instant, String, serde_json::Value)> {
+        self.entries.lock().unwrap().clone()
+    }
+}
+
+type EmitFn = Arc<dyn Fn(&str, serde_json::Value) -> Result<(), tauri::Error> + Send + Sync>;
+
+/// Narrow seam at the actor's outbound frontend-event boundary.
+///
+/// Production delegates to the Tauri event emitter; characterization tests
+/// inject a recording sink so lifecycle behavior can be observed
+/// deterministically without an app harness. Payloads serialize to JSON
+/// once here, so both paths deliver identical event data. The production
+/// emitter is reached only through this closure, which keeps the Tauri
+/// windowing/tray objects out of the deterministic test binaries.
+#[derive(Clone)]
+pub(crate) struct SessionEventSink {
+    emit_fn: EmitFn,
+}
+
+impl SessionEventSink {
+    /// Production sink backed by the real Tauri event emitter.
+    pub(crate) fn app(handle: tauri::AppHandle) -> Self {
+        Self {
+            emit_fn: Arc::new(move |event, payload| handle.emit(event, payload)),
+        }
+    }
+
+    /// Test sink recording every emission in-process.
+    #[cfg(test)]
+    pub(crate) fn recorded(events: Arc<RecordedEvents>) -> Self {
+        Self {
+            emit_fn: Arc::new(move |event, payload| events.push(event, payload)),
+        }
+    }
+
+    fn emit<S: serde::Serialize + Clone>(
+        &self,
+        event: &str,
+        payload: S,
+    ) -> Result<(), tauri::Error> {
+        let value = serde_json::to_value(&payload).map_err(tauri::Error::Json)?;
+        (self.emit_fn)(event, value)
+    }
+}
+
 /// The session actor: a long-lived tokio task that owns all per-session state.
 /// It receives commands via an mpsc channel and publishes session info via a watch channel.
 /// Frames are streamed to the frontend via a Tauri channel.
@@ -105,11 +208,12 @@ struct SessionActor {
     info_tx: watch::Sender<SessionInfo>,
     clipboard_tx: watch::Sender<Option<String>>,
     frame_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
-    app_handle: tauri::AppHandle,
+    events: SessionEventSink,
     local_clipboard_text: Option<String>,
     reconnect_attempts: u32,
     last_error: Option<String>,
     auto_reconnect: bool,
+    connect: ConnectFn,
     h264_encoder: Option<H264FrameEncoder>,
     shared_frame: Option<Arc<SharedFrame>>,
 }
@@ -124,9 +228,10 @@ impl SessionActor {
         info_tx: watch::Sender<SessionInfo>,
         clipboard_tx: watch::Sender<Option<String>>,
         frame_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
-        app_handle: tauri::AppHandle,
+        events: SessionEventSink,
         auto_reconnect: bool,
         shared_frame: Option<Arc<SharedFrame>>,
+        connect: ConnectFn,
     ) -> Self {
         let (width, height) = normalize_remote_resolution(
             config.display_width.unwrap_or(1920),
@@ -163,11 +268,12 @@ impl SessionActor {
             info_tx,
             clipboard_tx,
             frame_channel,
-            app_handle,
+            events,
             local_clipboard_text: None,
             reconnect_attempts: 0,
             last_error: None,
             auto_reconnect,
+            connect,
             h264_encoder,
             shared_frame,
         }
@@ -197,10 +303,7 @@ impl SessionActor {
     fn publish_info(&self) {
         let info = self.build_info();
         let _ = self.info_tx.send(info.clone());
-        if let Err(error) = self
-            .app_handle
-            .emit(&format!("session-info-{}", self.id), info)
-        {
+        if let Err(error) = self.events.emit(&format!("session-info-{}", self.id), info) {
             log::debug!(
                 "Failed to emit session info for session {}: {}",
                 self.id,
@@ -211,10 +314,7 @@ impl SessionActor {
 
     fn publish_remote_clipboard(&mut self, text: String) {
         let _ = self.clipboard_tx.send(Some(text.clone()));
-        if let Err(error) = self
-            .app_handle
-            .emit(&format!("clipboard-{}", self.id), text)
-        {
+        if let Err(error) = self.events.emit(&format!("clipboard-{}", self.id), text) {
             log::warn!(
                 "Failed to emit clipboard event for session {}: {}",
                 self.id,
@@ -426,9 +526,9 @@ impl SessionActor {
             self.config.port
         );
 
-        let outcome = attempt_rdp_connection(
-            &self.config,
-            self.password.as_deref(),
+        let outcome = (self.connect)(
+            self.config.clone(),
+            self.password.clone(),
             self.width,
             self.height,
         )
@@ -840,9 +940,9 @@ impl SessionActor {
             }
 
             // Attempt real reconnection
-            let outcome = attempt_rdp_connection(
-                &self.config,
-                self.password.as_deref(),
+            let outcome = (self.connect)(
+                self.config.clone(),
+                self.password.clone(),
                 self.width,
                 self.height,
             )
@@ -1031,6 +1131,32 @@ impl SessionManager {
         auto_reconnect: bool,
         shared_frame: Option<Arc<SharedFrame>>,
     ) -> Result<String, String> {
+        self.create_session_with_transport(
+            config,
+            password,
+            frame_channel,
+            SessionEventSink::app(app_handle),
+            auto_reconnect,
+            shared_frame,
+            real_connect(),
+        )
+        .await
+    }
+
+    /// `create_session` with the transport seams injected.
+    /// Production callers use [`SessionManager::create_session`]; deterministic
+    /// lifecycle tests script the connector and record frontend events here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_session_with_transport(
+        &self,
+        config: ConnectionConfig,
+        password: Option<String>,
+        frame_channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+        events: SessionEventSink,
+        auto_reconnect: bool,
+        shared_frame: Option<Arc<SharedFrame>>,
+        connect: ConnectFn,
+    ) -> Result<String, String> {
         let count = self.session_count().await;
         if count >= MAX_SESSIONS {
             return Err(format!(
@@ -1077,9 +1203,10 @@ impl SessionManager {
             info_tx,
             clipboard_tx,
             frame_channel,
-            app_handle,
+            events,
             auto_reconnect,
             shared_frame,
+            connect,
         );
 
         // Spawn the actor task
@@ -1158,5 +1285,534 @@ impl SessionManager {
 impl Default for SessionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Characterization tests for the session actor baseline (task 3.2).
+///
+/// All tests are deterministic: the RDP connector is scripted through the
+/// `ConnectFn` seam, frontend events are captured through the
+/// `SessionEventSink::Recorded` seam, and frame-transport loss is driven by
+/// scripted `tauri::ipc::Channel` callbacks (the production loss model is
+/// "frame packet send failure = connection lost"). Time-dependent behavior
+/// uses the tokio test-util paused clock with auto-advance; there are no
+/// sleeps, no network I/O and no user-data access.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rdp::client::ConnectionOutcome;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tauri::ipc::{Channel, InvokeResponseBody};
+
+    /// Scripted frame-channel behavior.
+    enum FrameScript {
+        Ok,
+        Fail,
+        /// Only the send with this 1-based index fails.
+        FailOnly(usize),
+    }
+
+    struct TestSession {
+        id: String,
+        cmd_tx: mpsc::Sender<SessionCommand>,
+        events: Arc<RecordedEvents>,
+        events_rx: watch::Receiver<usize>,
+        frame_sizes: Arc<std::sync::Mutex<Vec<usize>>>,
+        connect_calls: Arc<AtomicUsize>,
+    }
+
+    fn test_config(tag: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: format!("conn-{tag}"),
+            name: format!("Conn {tag}"),
+            // Never dialed: every test below scripts the connector.
+            host: "session-actor-test.invalid".to_string(),
+            port: 3389,
+            username: "user".to_string(),
+            domain: String::new(),
+            color_accent: None,
+            tags: vec![],
+            display_width: Some(64),
+            display_height: Some(64),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_connected_at: None,
+        }
+    }
+
+    fn scripted_frame_channel(
+        script: FrameScript,
+        sizes: Arc<std::sync::Mutex<Vec<usize>>>,
+    ) -> Channel<InvokeResponseBody> {
+        let sent = Arc::new(AtomicUsize::new(0));
+        Channel::new(move |response| {
+            let n = sent.fetch_add(1, Ordering::SeqCst) + 1;
+            let fail = match &script {
+                FrameScript::Ok => false,
+                FrameScript::Fail => true,
+                FrameScript::FailOnly(idx) => n == *idx,
+            };
+            if fail {
+                return Err(tauri::Error::AssetNotFound(format!(
+                    "scripted frame-transport failure #{n}"
+                )));
+            }
+            let size = match &response {
+                InvokeResponseBody::Raw(bytes) => bytes.len(),
+                InvokeResponseBody::Json(value) => value.to_string().len(),
+            };
+            sizes.lock().unwrap().push(size);
+            Ok(())
+        })
+    }
+
+    fn scripted_connect(calls: Arc<AtomicUsize>) -> ConnectFn {
+        Arc::new(move |_config, _password, _width, _height| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { ConnectionOutcome::Failed("scripted connect failure".to_string()) })
+        })
+    }
+
+    async fn create_scripted(
+        manager: &SessionManager,
+        tag: &str,
+        auto_reconnect: bool,
+        script: FrameScript,
+    ) -> TestSession {
+        let (events, events_rx) = RecordedEvents::new();
+        let frame_sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connect_calls = Arc::new(AtomicUsize::new(0));
+        let id = manager
+            .create_session_with_transport(
+                test_config(tag),
+                None,
+                scripted_frame_channel(script, Arc::clone(&frame_sizes)),
+                SessionEventSink::recorded(Arc::clone(&events)),
+                auto_reconnect,
+                None,
+                scripted_connect(Arc::clone(&connect_calls)),
+            )
+            .await
+            .expect("scripted session creation should succeed");
+        let cmd_tx = manager
+            .get_cmd_sender(&id)
+            .await
+            .expect("session handle exists right after creation");
+        TestSession {
+            id,
+            cmd_tx,
+            events,
+            events_rx,
+            frame_sizes,
+            connect_calls,
+        }
+    }
+
+    /// Session-info payloads recorded for this session, in publication order.
+    fn info_events(
+        id: &str,
+        events: &Arc<RecordedEvents>,
+    ) -> Vec<(tokio::time::Instant, serde_json::Value)> {
+        let event_name = format!("session-info-{id}");
+        events
+            .snapshot()
+            .into_iter()
+            .filter(|(_, event, _)| *event == event_name)
+            .map(|(at, _, value)| (at, value))
+            .collect()
+    }
+
+    /// `SessionState` serializes as camelCase strings; `Error(String)` as
+    /// `{"error": msg}`.
+    fn status_string(info: &serde_json::Value) -> String {
+        match &info["status"] {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Object(map) => format!(
+                "error:{}",
+                map.get("error").and_then(|v| v.as_str()).unwrap_or("?")
+            ),
+            other => format!("{other}"),
+        }
+    }
+
+    fn statuses_of(recorded: &[(tokio::time::Instant, serde_json::Value)]) -> Vec<String> {
+        recorded.iter().map(|(_, v)| status_string(v)).collect()
+    }
+
+    /// Await (without polling or sleeping) until recorded session-info events
+    /// satisfy `pred`. The recorder notifies through a watch channel, so the
+    /// paused clock only advances when both tasks are parked.
+    async fn wait_for(
+        id: &str,
+        events: &Arc<RecordedEvents>,
+        events_rx: &mut watch::Receiver<usize>,
+        pred: impl Fn(&[(tokio::time::Instant, serde_json::Value)]) -> bool,
+    ) {
+        loop {
+            if pred(&info_events(id, events)) {
+                return;
+            }
+            events_rx.changed().await.expect("event recorder alive");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_admission_admits_tenth_rejects_eleventh_and_frees_slot_on_removal() {
+        let manager = SessionManager::new();
+        let mut sessions = Vec::new();
+        for i in 1..=10u32 {
+            let session =
+                create_scripted(&manager, &format!("adm{i}"), true, FrameScript::Ok).await;
+            assert_eq!(
+                manager.session_count().await,
+                i as usize,
+                "sessions 1..=10 must be admitted"
+            );
+            sessions.push(session);
+        }
+
+        // The 11th connect is rejected with an explanatory message (Req 2.2).
+        let (events, _rx) = RecordedEvents::new();
+        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let err = manager
+            .create_session_with_transport(
+                test_config("adm11"),
+                None,
+                scripted_frame_channel(FrameScript::Ok, sizes),
+                SessionEventSink::recorded(events),
+                true,
+                None,
+                scripted_connect(Arc::new(AtomicUsize::new(0))),
+            )
+            .await
+            .expect_err("the 11th concurrent session must be rejected");
+        assert_eq!(
+            err,
+            "Maximum session limit (10) reached. Disconnect an existing session first."
+        );
+        assert_eq!(manager.session_count().await, 10);
+
+        // Teardown race: removal frees the admission slot immediately, even
+        // though the removed actor may still be shutting down.
+        manager
+            .remove_session(&sessions[0].id)
+            .await
+            .expect("removing a live session succeeds");
+        assert_eq!(manager.session_count().await, 9);
+        create_scripted(&manager, "adm12", true, FrameScript::Ok).await;
+        assert_eq!(manager.session_count().await, 10);
+        assert_eq!(manager.list_sessions().await.len(), 10);
+
+        // Unknown ids report not found.
+        assert_eq!(
+            manager.remove_session("no-such-session").await.unwrap_err(),
+            "Session 'no-such-session' not found"
+        );
+        assert!(manager.get_session_info("no-such-session").await.is_none());
+
+        // The removed session's actor observes the disconnect command and
+        // publishes its final disconnected state.
+        let removed = &sessions[0];
+        let mut rx = removed.events_rx.clone();
+        wait_for(&removed.id, &removed.events, &mut rx, |events| {
+            events
+                .iter()
+                .any(|(_, v)| status_string(v) == "disconnected")
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_transport_loss_retries_capped_backoff_then_error_state_is_transient_defect_b3_8()
+    {
+        let manager = SessionManager::new();
+        let session = create_scripted(&manager, "recon", true, FrameScript::Fail).await;
+        let mut rx = session.events_rx.clone();
+
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events
+                .iter()
+                .any(|(_, v)| status_string(v) == "disconnected")
+        })
+        .await;
+
+        let recorded = info_events(&session.id, &session.events);
+        // connecting → connected (mock fallback) → MAX_RECONNECT_ATTEMPTS ×
+        // (reconnecting → connected via mock fallback) → terminal error →
+        // final disconnected.
+        let mut expected: Vec<&str> = vec!["connecting", "connected"];
+        for _ in 0..MAX_RECONNECT_ATTEMPTS {
+            expected.push("reconnecting");
+            expected.push("connected");
+        }
+        expected.push("error:Reconnection failed after 5 attempts");
+        expected.push("disconnected");
+        assert_eq!(statuses_of(&recorded), expected);
+
+        // One initial attempt plus exactly MAX_RECONNECT_ATTEMPTS retries.
+        assert_eq!(session.connect_calls.load(Ordering::SeqCst), 6);
+
+        // Capped exponential backoff measured on the paused clock:
+        // 2, 4, 8, 16, 30 seconds (the 6th doubling is capped at 30).
+        let backoffs: Vec<std::time::Duration> = recorded
+            .windows(2)
+            .filter(|pair| {
+                status_string(&pair[0].1) == "reconnecting"
+                    && status_string(&pair[1].1) == "connected"
+            })
+            .map(|pair| pair[1].0 - pair[0].0)
+            .collect();
+        let expected_backoffs: Vec<std::time::Duration> = [2u64, 4, 8, 16, 30]
+            .iter()
+            .map(|s| std::time::Duration::from_secs(*s))
+            .collect();
+        assert_eq!(backoffs, expected_backoffs);
+
+        // Defect B3-8: the terminal error state is published and then
+        // immediately overwritten by "disconnected" in the same watch
+        // channel; the final resting status is disconnected while the error
+        // reason survives only in last_error.
+        let (_, last) = recorded.last().expect("final event recorded");
+        assert_eq!(status_string(last), "disconnected");
+        assert_eq!(
+            last["lastError"].as_str(),
+            Some("Reconnection failed after 5 attempts")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_failed_reconnect_falls_back_to_mock_as_connected_defect_b3_7() {
+        let manager = SessionManager::new();
+        // Frame send #1 (initial mock frame) succeeds; send #2 (triggered by
+        // resize) fails, modeling transport loss on an otherwise healthy sink.
+        let session = create_scripted(&manager, "fallback", true, FrameScript::FailOnly(2)).await;
+        let mut rx = session.events_rx.clone();
+        let sizes = Arc::clone(&session.frame_sizes);
+
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                && !sizes.lock().unwrap().is_empty()
+        })
+        .await;
+
+        // The second frame send (resize) hits the scripted transport loss.
+        session
+            .cmd_tx
+            .send(SessionCommand::Resize {
+                width: 64,
+                height: 64,
+            })
+            .await
+            .expect("resize command accepted");
+
+        // The reconnect attempt also fails (scripted connector), yet the
+        // session reports connected again via mock frames: defect B3-7.
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events
+                .iter()
+                .any(|(_, v)| status_string(v) == "reconnecting")
+                && events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+        })
+        .await;
+
+        let recorded = info_events(&session.id, &session.events);
+        assert_eq!(
+            statuses_of(&recorded),
+            vec![
+                "connecting".to_string(),
+                "connected".to_string(),
+                "connected".to_string(), // resize re-publish
+                "reconnecting".to_string(),
+                "connected".to_string(),
+            ]
+        );
+        // Defect B3-7: with the server unreachable, retries do NOT run to the
+        // cap; exactly one reconnect attempt runs and the failure is masked
+        // by the mock fallback.
+        assert_eq!(session.connect_calls.load(Ordering::SeqCst), 2);
+        // The reconnecting event reports attempt 1 of 5 …
+        let (_, reconnecting) = recorded
+            .iter()
+            .find(|(_, v)| status_string(v) == "reconnecting")
+            .expect("reconnecting event recorded");
+        assert_eq!(reconnecting["reconnectAttempts"].as_u64(), Some(1));
+        assert_eq!(reconnecting["maxReconnectAttempts"].as_u64(), Some(5));
+        // … and the mock fallback clears the error surface entirely.
+        let (_, settled) = recorded.last().expect("settled event recorded");
+        assert_eq!(settled["reconnectAttempts"].as_u64(), Some(0));
+        assert_eq!(settled["lastError"].as_str(), None);
+        assert_eq!(
+            session.frame_sizes.lock().unwrap().len(),
+            2,
+            "mock frames resumed after the fallback"
+        );
+
+        // The session still answers a user disconnect normally.
+        session
+            .cmd_tx
+            .send(SessionCommand::Disconnect)
+            .await
+            .expect("disconnect accepted");
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_cancel_during_backoff_stops_retrying_and_marks_disconnected() {
+        let manager = SessionManager::new();
+        let session = create_scripted(&manager, "cancel", true, FrameScript::Fail).await;
+        let mut rx = session.events_rx.clone();
+
+        // First scripted transport loss → first reconnect backoff (2 s on the
+        // paused clock).
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events
+                .iter()
+                .any(|(_, v)| status_string(v) == "reconnecting")
+        })
+        .await;
+
+        // Cancel while parked in the backoff wait. This is the same command
+        // the disconnect/cancel_reconnect commands deliver.
+        session
+            .cmd_tx
+            .send(SessionCommand::Disconnect)
+            .await
+            .expect("cancel delivered during backoff");
+
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+        })
+        .await;
+
+        let recorded = info_events(&session.id, &session.events);
+        assert_eq!(
+            statuses_of(&recorded),
+            vec![
+                "connecting".to_string(),
+                "connected".to_string(),
+                "reconnecting".to_string(),
+                "disconnected".to_string(),
+                "disconnected".to_string(),
+            ]
+        );
+        // Cancellation stopped retrying before any reconnect attempt ran.
+        assert_eq!(session.connect_calls.load(Ordering::SeqCst), 1);
+        // The backoff never completed: no virtual time passed beyond the
+        // cancellation point (Req 2.4 — stop retrying).
+        let first = recorded.first().expect("first event recorded");
+        let last = recorded.last().expect("last event recorded");
+        assert!(
+            last.0 - first.0 < std::time::Duration::from_secs(2),
+            "cancel must preempt the first backoff, elapsed={:?}",
+            last.0 - first.0
+        );
+        // Session state remains observable with the loss reason (Req 2.5).
+        assert!(
+            last.1["lastError"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Frame emit failed"),
+            "last error should surface the transport loss, got {:?}",
+            last.1["lastError"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_user_disconnect_from_connected_session_publishes_disconnected() {
+        let manager = SessionManager::new();
+        let session = create_scripted(&manager, "user", false, FrameScript::Ok).await;
+        let mut rx = session.events_rx.clone();
+        let sizes = Arc::clone(&session.frame_sizes);
+
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                && !sizes.lock().unwrap().is_empty()
+        })
+        .await;
+
+        let recorded = info_events(&session.id, &session.events);
+        assert_eq!(
+            statuses_of(&recorded),
+            vec!["connecting".to_string(), "connected".to_string()]
+        );
+
+        // Req 2.5: SessionInfo surfaces identity, progress and error fields.
+        let (_, connected) = recorded.last().expect("connected event recorded");
+        assert_eq!(connected["status"].as_str(), Some("connected"));
+        assert_eq!(connected["connectionId"].as_str(), Some("conn-user"));
+        assert_eq!(connected["reconnectAttempts"].as_u64(), Some(0));
+        assert_eq!(connected["maxReconnectAttempts"].as_u64(), Some(5));
+        assert_eq!(connected["lastError"].as_str(), None);
+        assert!(connected["connectedAt"].as_str().is_some());
+
+        session
+            .cmd_tx
+            .send(SessionCommand::Disconnect)
+            .await
+            .expect("disconnect accepted");
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+        })
+        .await;
+
+        let recorded = info_events(&session.id, &session.events);
+        assert_eq!(
+            statuses_of(&recorded),
+            vec![
+                "connecting".to_string(),
+                "connected".to_string(),
+                "disconnected".to_string(),
+                "disconnected".to_string(),
+            ]
+        );
+        assert_eq!(
+            session.frame_sizes.lock().unwrap().len(),
+            1,
+            "no additional frames after disconnect"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_dropping_all_command_senders_stops_the_actor() {
+        let manager = SessionManager::new();
+        let session = create_scripted(&manager, "drop", true, FrameScript::Ok).await;
+        let mut rx = session.events_rx.clone();
+        let sizes = Arc::clone(&session.frame_sizes);
+
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                && !sizes.lock().unwrap().is_empty()
+        })
+        .await;
+
+        // Teardown race: dropping the manager and the last sender clones
+        // closes the command channel; the actor treats channel closure as a
+        // user-initiated disconnect and publishes its final state.
+        let id = session.id.clone();
+        let events = Arc::clone(&session.events);
+        let last_sender = manager
+            .get_cmd_sender(&session.id)
+            .await
+            .expect("sender clone for teardown");
+        drop(manager);
+        drop(last_sender);
+        drop(session.cmd_tx);
+
+        wait_for(&id, &events, &mut rx, |event_list| {
+            event_list.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+        })
+        .await;
+        assert_eq!(
+            statuses_of(&info_events(&id, &events)),
+            vec![
+                "connecting".to_string(),
+                "connected".to_string(),
+                "disconnected".to_string(),
+                "disconnected".to_string(),
+            ]
+        );
     }
 }

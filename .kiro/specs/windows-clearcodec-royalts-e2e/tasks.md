@@ -85,7 +85,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Tests preserve fields, secret exclusion, validation, imports and cleanup; missing baseline coverage is explicit.
   - _Boundary: Persistence baseline_
   - _Requirements: 1.1,1.2,1.3,1.4,1.5,6.1,6.2,6.3,12.6_
-- [ ] 3.2 Pin actor admission and lifecycle behavior
+- [x] 3.2 Pin actor admission and lifecycle behavior
   - Use existing Tokio channels and test-util paused time; extract only a narrow transport seam. Test 9/10/11 admission, retries, cancellation and teardown races.
   - Done: Deterministic lifecycle tests run without sleeps or a replacement actor framework.
   - _Boundary: Session baseline_

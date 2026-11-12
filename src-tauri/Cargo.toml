@@ -43,3 +43,5 @@ openh264 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
+# Tokio "full" does not include test-util; paused-clock tests (task 3.2) need it.
+tokio = { version = "1", features = ["test-util"] }
