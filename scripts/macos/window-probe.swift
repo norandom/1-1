@@ -7,6 +7,7 @@
 // TCC-gated (unlike window titles), so this needs no Screen Recording /
 // Accessibility permission on the runner.
 import CoreGraphics
+import Foundation
 
 let args = CommandLine.arguments
 if args.count < 2 || Int32(args[1]) == nil {

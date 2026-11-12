@@ -1138,6 +1138,21 @@ try {
         $ctSpikeSh -match 'kill_bounded' -and
         @([regex]::Matches($ctSpikeSh, 'wait "')).Count -le 2
     } 'CT15m app teardown goes through a bounded TERM/KILL+reap helper — no unbounded wait on a live GUI process can hang the job again (run-43077191197 hang)'
+
+    # ─── CT15 run-2 harness fix (live run 43089420631, classified
+    # harness/config-error): the once-compiled probe itself failed to
+    # build — window-probe.swift uses FileHandle, NSNumber and
+    # String.data(using:) (Foundation types) but imported only
+    # CoreGraphics, so swiftc emitted 7 "cannot find in scope" errors and
+    # stage 1 aborted before the app ever launched. CT15k pins
+    # compile-once; this pins the import set the probe needs to compile.
+    $ctProbeSwiftPath = Join-Path $RepoRoot 'scripts\macos\window-probe.swift'
+    $ctProbeSwift = ''
+    if (Test-Path -LiteralPath $ctProbeSwiftPath -PathType Leaf) { $ctProbeSwift = Get-Content -LiteralPath $ctProbeSwiftPath -Raw }
+    Assert-That {
+        $ctProbeSwift -match '(?m)^import Foundation' -and
+        $ctProbeSwift -match '(?m)^import CoreGraphics'
+    } 'CT15n the window probe imports Foundation (FileHandle/NSNumber/data(using:) are Foundation types) alongside CoreGraphics — run-43089420631 swiftc-compile-failed root cause'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.
