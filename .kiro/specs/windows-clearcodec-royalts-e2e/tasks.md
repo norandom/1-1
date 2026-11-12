@@ -58,7 +58,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Built-app Windows cold launch passes or a specific prerequisite blocks upgrade.
   - _Boundary: Windows E2E bootstrap_
   - _Requirements: 8.1,12.1,12.5,12.7,12.8_
-- [ ] 2.4 Prove native macOS cold launch on the old stack (CI-runner spike)
+- [x] 2.4 Prove native macOS cold launch on the old stack (CI-runner spike)
   - Converted per user decision 2026-11-11 (was a local 3-hour spike; no macOS host exists in this environment): run as an Actions macOS-runner job on the fork. Build on the runner, prove the WebdriverIO Tauri service embedded server on the built app (not safaridriver), isolate data, export evidence artifacts (logs/screenshots/driver output); evidence comes from the live run, recorded in research.md. Keep the 3-hour investigation cap (runner wait excluded).
   - Done: Built-app macOS cold launch passes in CI with exported evidence, or unsupported driver evidence blocks upgrade.
   - _Boundary: macOS E2E bootstrap (CI)_
