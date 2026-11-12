@@ -472,3 +472,90 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoCertVerifier
         ]
     }
 }
+
+/// Task 4.3 — builder-adapter seam characterization.
+///
+/// `active_stage_from_connection_result` is the whole "builder" half of the
+/// session-adapter boundary (0.13 replaced `ActiveStage::new(ConnectionResult)`
+/// with `ActiveStageBuilder` pub fields). The observables below pin the
+/// mappings the session layer depends on, deterministically and without a
+/// server: static channels survive onto the stage (the clipboard SVC the
+/// connector attaches — Req 3.5 session plumbing), the typed DVC accessor
+/// surface declines for DisplayControl (the connector attaches no DVC —
+/// found behavior also recorded by the smoke `display_control_resize`
+/// field), and a builder-produced stage still encodes fast-path input and
+/// graceful shutdown (lifecycle behavior preserved end-to-end).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_stage_adapter_carries_channels_and_preserves_stage_behavior() {
+        use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
+
+        // Production-shaped ConnectionResult with the clipboard SVC attached
+        // (the connector attaches exactly this channel today).
+        let mut result = crate::rdp::baseline::synthetic_connection_result(64, 64);
+        result
+            .static_channels
+            .insert(ironrdp_cliprdr::CliprdrClient::new(Box::new(
+                SessionClipboardBackend::new(),
+            )));
+
+        let mut stage = active_stage_from_connection_result(result);
+
+        // static_channels passthrough: the clipboard SVC stays reachable
+        // through the stage (session.rs flush_clipboard_messages depends on it).
+        assert!(
+            stage
+                .get_svc_processor_mut::<ironrdp_cliprdr::CliprdrClient>()
+                .is_some(),
+            "attached clipboard SVC must be reachable through the built stage"
+        );
+
+        // Typed DVC accessors (0.13 shape): no DisplayControlClient is
+        // attached, so the typed lookup declines and resize declines with it.
+        assert!(
+            stage
+                .get_dvc::<ironrdp_displaycontrol::client::DisplayControlClient>()
+                .is_none(),
+            "no DisplayControl DVC is attached by the connector"
+        );
+        assert!(
+            stage.encode_resize(1280, 720, None, None).is_none(),
+            "resize must decline while the DisplayControl DVC is absent"
+        );
+
+        // Graceful shutdown still encodes through the built stage.
+        let outputs = stage
+            .graceful_shutdown()
+            .expect("graceful shutdown encodes");
+        assert!(
+            outputs.iter().any(|out| matches!(
+                out,
+                ironrdp_session::ActiveStageOutput::ResponseFrame(frame) if !frame.is_empty()
+            )),
+            "graceful shutdown must produce a response frame"
+        );
+
+        // Fast-path input still encodes through the rebuilt fast-path processor.
+        use ironrdp_graphics::image_processing::PixelFormat;
+        let mut image = ironrdp_session::image::DecodedImage::new(PixelFormat::RgbA32, 64, 64);
+        let outputs = stage
+            .process_fastpath_input(
+                &mut image,
+                &[FastPathInputEvent::KeyboardEvent(
+                    KeyboardFlags::empty(),
+                    0x1E,
+                )],
+            )
+            .expect("fast-path input encodes");
+        assert!(
+            outputs.iter().any(|out| matches!(
+                out,
+                ironrdp_session::ActiveStageOutput::ResponseFrame(frame) if !frame.is_empty()
+            )),
+            "fast-path input must produce a response frame"
+        );
+    }
+}

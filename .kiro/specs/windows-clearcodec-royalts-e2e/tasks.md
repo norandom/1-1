@@ -117,7 +117,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Connector compiles and TLS/NLA smoke still succeeds on the pinned stack.
   - _Boundary: Connector adapter_
   - _Requirements: 2.1,8.3_
-- [ ] 4.3 Adapt session APIs preserving lifecycle
+- [x] 4.3 Adapt session APIs preserving lifecycle
   - Keep actor commands/watch channels and existing reconnect path; adapt DVC accessors and builder only.
   - Done: Nextest characterization and native smoke pass on all supported OSes; actor behavior stays stable.
   - _Boundary: Session adapter_

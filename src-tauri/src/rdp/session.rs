@@ -674,9 +674,18 @@ impl SessionActor {
                             }
                             ActiveStageOutput::DeactivateAll => {
                                 log::info!("Session {} deactivate-all received", self.id);
-                                // Server wants to re-negotiate capabilities; treat as disconnect
-                                // (0.13 carries the re-activation sequence on the stage instead
-                                // of the output variant; handling that is session-layer work.)
+                                // Task 4.3 evaluation (behavior kept): the 0.12/0.13
+                                // stack CAN re-activate in place — ConnectionResult
+                                // carries `activation_factory` (fresh
+                                // ConnectionActivationSequence) and ActiveStage
+                                // exposes `reactivate()` — but driving that is new
+                                // mid-loop control flow beyond the accessor/builder
+                                // boundary, and it would change the pinned observable
+                                // behavior: DeactivateAll → ConnectionLost → the
+                                // existing reconnect loop with backoff (identical to
+                                // the old stack; a full reconnect re-runs activation).
+                                // Deferred deliberately — see baseline-coverage.md
+                                // task 4.3.
                                 return DisconnectReason::ConnectionLost;
                             }
                             _ => {

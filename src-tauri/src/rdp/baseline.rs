@@ -916,7 +916,7 @@ fn real_server_tls_nla_smoke() {
         assert_eq!(
             r.outcome,
             "connected",
-            "{}: old-stack TLS/NLA smoke did not connect — upgrade gate blocked ({})",
+            "{}: TLS/NLA smoke did not connect — upgrade gate blocked ({})",
             label,
             r.error.clone().unwrap_or_default()
         );
@@ -1180,8 +1180,23 @@ async fn session_layer_checks(
     use ironrdp_session::image::DecodedImage;
     use ironrdp_tokio::FramedWrite as _;
 
+    // Task 4.3 harness fix (found behavior): size the decode image from the
+    // NEGOTIATED desktop, mirroring production session.rs (which sizes its
+    // DecodedImage from connection_result.desktop_size). The harness
+    // previously hardcoded 1920x1080 — silently matching the requested size
+    // on hosts that honor it. Host3 (IronRDP server) negotiates 3064x1264
+    // regardless of the request, and the 0.13 fast-path processor drops
+    // every bitmap update whose declared destination exceeds the image
+    // ("Ignoring bitmap update with an invalid declared destination"), so
+    // the old harness observed 0–1 frames on host3 (the 4.2 runs passed on
+    // a single in-bounds update at 12.3 s/30.5 s — knife's edge, run
+    // smoke-20261112-182323 then measured 0 and failed the gate).
+    let (desktop_width, desktop_height) = (
+        connection_result.desktop_size.width,
+        connection_result.desktop_size.height,
+    );
     let mut stage = crate::rdp::client::active_stage_from_connection_result(connection_result);
-    let mut image = DecodedImage::new(PixelFormat::RgbA32, 1920, 1080);
+    let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop_width, desktop_height);
     let (mut reader, mut writer) = ironrdp_tokio::split_tokio_framed(framed);
 
     let loop_start = std::time::Instant::now();
