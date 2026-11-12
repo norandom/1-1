@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use tauri::{
-    ipc::{Channel, InvokeResponseBody},
     AppHandle, State,
+    ipc::{Channel, InvokeResponseBody},
 };
 
 use crate::rdp::client::SessionCommand;
-use crate::rdp::session::{SessionInfo, SessionManager, MAX_SESSIONS};
+use crate::rdp::session::{MAX_SESSIONS, SessionInfo, SessionManager};
 use crate::renderer::shared_frame::SharedFrame;
 use crate::store::connections::ConnectionStore;
 use crate::store::credentials::CredentialStore;

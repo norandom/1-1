@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 
-use ironrdp::connector::{self, ClientConnector, ConnectionResult, Credentials, ServerName};
-use ironrdp_tokio::reqwest::ReqwestNetworkClient;
+use ironrdp_connector::{
+    self as connector, ClientConnector, ConnectionResult, Credentials, ServerName,
+};
 use ironrdp_tokio::TokioFramed;
+use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 
 use crate::rdp::clipboard::SessionClipboardBackend;
 use crate::store::connections::ConnectionConfig;
@@ -83,9 +85,9 @@ pub(crate) fn build_connector_config(
     width: u32,
     height: u32,
 ) -> connector::Config {
-    use ironrdp::pdu::gcc::KeyboardType;
-    use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
-    use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+    use ironrdp_pdu::gcc::{ConnectionType, KeyboardType};
+    use ironrdp_pdu::rdp::capability_sets::{MajorPlatformType, RailSupportLevel};
+    use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 
     let domain = if config.domain.is_empty() {
         None
@@ -99,6 +101,15 @@ pub(crate) fn build_connector_config(
         | PerformanceFlags::DISABLE_THEMING
         | PerformanceFlags::DISABLE_CURSOR_SHADOW;
 
+    // connector 0.12's Config has no `Default` — all fields are pub and the
+    // literal is constructed explicitly (task 4.1 probe C8a shape). Values for
+    // fields that the old 0.8 connector hardcoded internally are preserved:
+    // `connection_type: Lan` and empty `alternate_shell`/`work_dir` were 0.8
+    // constants; `enable_standard_rdp_security: false` matches 0.8, which
+    // rejected standard RDP security at negotiation. New 0.12 switches stay in
+    // their off position: `support_dyn_vc_gfx_protocol` waits for the EGFX
+    // graphics pipeline (group 9), `multitransport_flags`/`compression_type`
+    // off, `remote_application_mode` off.
     connector::Config {
         credentials: Credentials::UsernamePassword {
             username: config.username.clone(),
@@ -107,10 +118,12 @@ pub(crate) fn build_connector_config(
         domain,
         enable_tls: true,
         enable_credssp: true,
-        keyboard_type: KeyboardType::IbmEnhanced,
+        enable_standard_rdp_security: false,
+        keyboard_type: KeyboardType::IBM_ENHANCED,
         keyboard_subtype: 0,
         keyboard_layout: 0,
         keyboard_functional_keys_count: 12,
+        connection_type: ConnectionType::Lan,
         ime_file_name: String::new(),
         dig_product_id: String::new(),
         desktop_size: connector::DesktopSize {
@@ -118,26 +131,65 @@ pub(crate) fn build_connector_config(
             height: height as u16,
         },
         desktop_scale_factor: 0,
+        monitor_layout: None,
+        desktop_physical_size: None,
+        desktop_orientation: None,
+        device_scale_factor: None,
+        monitor_extended_layout: None,
+        relative_mouse_input: false,
         bitmap: None,
         client_build: 0,
         client_name: "rdp-client".to_owned(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
+        #[cfg(target_os = "windows")]
+        platform: MajorPlatformType::WINDOWS,
         #[cfg(target_os = "macos")]
         platform: MajorPlatformType::MACINTOSH,
         #[cfg(target_os = "linux")]
         platform: MajorPlatformType::UNIX,
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         platform: MajorPlatformType::UNSPECIFIED,
         enable_server_pointer: true,
         request_data: None,
         autologon: false,
         enable_audio_playback: false,
+        enable_audio_capture: false,
         pointer_software_rendering: true,
         performance_flags,
         hardware_id: None,
         license_cache: None,
         timezone_info: TimezoneInfo::default(),
+        compression_type: None,
+        multitransport_flags: None,
+        support_dyn_vc_gfx_protocol: false,
+        alternate_shell: String::new(),
+        work_dir: String::new(),
+        remote_application_mode: false,
+        rail_support_level: RailSupportLevel::SUPPORTED,
     }
+}
+
+/// Build a session-layer `ActiveStage` from a connector `ConnectionResult`.
+///
+/// Adapter for the 0.13 session API: `ActiveStage::new(ConnectionResult)` was
+/// replaced upstream by `ActiveStageBuilder` with pub fields taken straight
+/// from the connection result (upstream's documented pattern). Shared by the
+/// session actor and the baseline harnesses so both construct the stage
+/// identically.
+pub(crate) fn active_stage_from_connection_result(
+    result: ConnectionResult,
+) -> ironrdp_session::ActiveStage {
+    ironrdp_session::ActiveStageBuilder {
+        static_channels: result.static_channels,
+        user_channel_id: result.user_channel_id,
+        io_channel_id: result.io_channel_id,
+        message_channel_id: result.message_channel_id,
+        share_id: result.share_id,
+        compression_type: result.compression_type,
+        enable_server_pointer: result.enable_server_pointer,
+        pointer_software_rendering: result.pointer_software_rendering,
+    }
+    .build()
 }
 
 /// Attempt to establish an IronRDP session.
@@ -170,7 +222,7 @@ pub async fn attempt_rdp_connection(
         .local_addr()
         .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
     let mut connector = ClientConnector::new(connector_config, client_addr);
-    connector.attach_static_channel(ironrdp::cliprdr::CliprdrClient::new(Box::new(
+    connector.attach_static_channel(ironrdp_cliprdr::CliprdrClient::new(Box::new(
         SessionClipboardBackend::new(),
     )));
 
@@ -264,7 +316,11 @@ pub async fn attempt_rdp_connection(
 
     log::info!("Starting CredSSP/NLA finalization...");
 
-    // Step 5: Finalize connection (CredSSP/NLA + MCS + licensing + capabilities)
+    // Step 5: Finalize connection (CredSSP/NLA + MCS + licensing + capabilities).
+    // 0.12 transport API: connect_finalize returns a ConnectionOutcome enum —
+    // `into_connected()` yields the ConnectionResult and turns a Server
+    // Redirection PDU into an error, matching the old 0.8 stack, which had no
+    // redirection handling at this seam.
     let connection_result = match ironrdp_tokio::connect_finalize(
         upgraded,
         connector,
@@ -276,7 +332,13 @@ pub async fn attempt_rdp_connection(
     )
     .await
     {
-        Ok(result) => result,
+        Ok(outcome) => match outcome.into_connected() {
+            Ok(result) => result,
+            Err(e) => {
+                log::warn!("RDP connection was redirected (unsupported): {:?}", e);
+                return ConnectionOutcome::Failed(format!("RDP connection finalize failed: {}", e));
+            }
+        },
         Err(e) => {
             log::warn!("RDP connection finalize failed: {:?}", e);
             return ConnectionOutcome::Failed(format!("RDP connection finalize failed: {}", e));
@@ -308,10 +370,18 @@ where
     use tokio_rustls::rustls::pki_types::ServerName as RustlsServerName;
 
     log::info!("[TLS] Step 1: Building rustls config...");
-    let mut config = rustls::client::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(std::sync::Arc::new(NoCertVerifier))
-        .with_no_client_auth();
+    // The ring CryptoProvider is pinned on this ClientConfig instead of
+    // relying on a process-wide install (B3-15): the connector path is
+    // standalone-usable headless — the Tauri entrypoint's install_default is
+    // neither required nor disturbed by this (same provider either way).
+    let mut config = rustls::client::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring CryptoProvider with safe default protocol versions")
+    .dangerous()
+    .with_custom_certificate_verifier(std::sync::Arc::new(NoCertVerifier))
+    .with_no_client_auth();
     config.key_log = std::sync::Arc::new(rustls::KeyLogFile::new());
     config.resumption = rustls::client::Resumption::disabled();
     let config = std::sync::Arc::new(config);

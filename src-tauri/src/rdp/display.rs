@@ -1,6 +1,6 @@
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use image::{codecs::png::PngEncoder, ImageEncoder};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use image::{ImageEncoder, codecs::png::PngEncoder};
 use std::io::Cursor;
 
 /// Raw frame buffer holding pixel data.
@@ -136,7 +136,7 @@ impl FrameBuffer {
                 row_bytes += 3;
             }
             // Pad row to 4-byte boundary
-            while row_bytes % 4 != 0 {
+            while !row_bytes.is_multiple_of(4) {
                 bmp.push(0);
                 row_bytes += 1;
             }

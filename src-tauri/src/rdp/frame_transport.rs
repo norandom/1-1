@@ -1,5 +1,5 @@
-use ironrdp::pdu::geometry::{InclusiveRectangle, Rectangle as _};
-use ironrdp::session::image::DecodedImage;
+use ironrdp_pdu::geometry::{InclusiveRectangle, Rectangle as _};
+use ironrdp_session::image::DecodedImage;
 
 use crate::rdp::display::FrameBuffer;
 
@@ -201,8 +201,8 @@ mod tests {
 
     #[test]
     fn encode_image_update_packet_layout_tracks_the_decoded_image() {
-        use ironrdp::graphics::image_processing::PixelFormat;
-        use ironrdp::session::image::DecodedImage;
+        use ironrdp_graphics::image_processing::PixelFormat;
+        use ironrdp_session::image::DecodedImage;
 
         // DecodedImage has no public data setter; a zeroed image pins the
         // delegation (kind, surface dims, rect headers, payload length).

@@ -1,6 +1,6 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::shared_frame::SharedFrame;

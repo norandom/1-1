@@ -1,6 +1,6 @@
+use openh264::OpenH264API;
 use openh264::encoder::{EncodedBitStream, Encoder, EncoderConfig};
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
-use openh264::OpenH264API;
 
 pub struct H264FrameEncoder {
     encoder: Encoder,

@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Condvar, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 /// Immutable snapshot of a frame. The renderer holds an `Arc<FrameSnapshot>`

@@ -112,7 +112,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Small compile probe demonstrates required upstream APIs and feature graph; decode/error hooks for 9.6/9.7 proven or the advertised caps shrink to proven codecs; per-codec fixtures defined; the resolved set is recorded and group-9 tasks stay blocked until it is. Stop on missing capability, not a custom codec/fork.
   - _Boundary: Protocol dependencies_
   - _Requirements: 9.1,9.2,9.3,9.5,9.6,9.7_
-- [ ] 4.2 Adapt connector and transport APIs
+- [x] 4.2 Adapt connector and transport APIs
   - Reuse ironrdp-tokio, TLS/rustls and existing connection flow; no protocol implementation or runtime replacement.
   - Done: Connector compiles and TLS/NLA smoke still succeeds on the pinned stack.
   - _Boundary: Connector adapter_

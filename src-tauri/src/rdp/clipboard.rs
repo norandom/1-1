@@ -1,16 +1,13 @@
 use std::{collections::VecDeque, env};
 
-use ironrdp::{
-    cliprdr::{
-        backend::{ClipboardMessage, CliprdrBackend},
-        pdu::{
-            ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags,
-            FileContentsRequest, FileContentsResponse, FormatDataRequest, FormatDataResponse,
-            LockDataId,
-        },
+use ironrdp_cliprdr::{
+    backend::{ClipboardMessage, CliprdrBackend},
+    pdu::{
+        ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsRequest,
+        FileContentsResponse, FormatDataRequest, FormatDataResponse, LockDataId,
     },
-    core::IntoOwned,
 };
+use ironrdp_core::IntoOwned;
 
 #[derive(Debug)]
 pub struct SessionClipboardBackend {
@@ -55,7 +52,7 @@ impl Default for SessionClipboardBackend {
     }
 }
 
-impl ironrdp::core::AsAny for SessionClipboardBackend {
+impl ironrdp_core::AsAny for SessionClipboardBackend {
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
@@ -162,8 +159,8 @@ impl CliprdrBackend for SessionClipboardBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironrdp::cliprdr::backend::{ClipboardMessage, CliprdrBackend};
-    use ironrdp::cliprdr::pdu::{ClipboardFormat, ClipboardFormatId, FormatDataRequest};
+    use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackend};
+    use ironrdp_cliprdr::pdu::{ClipboardFormat, ClipboardFormatId, FormatDataRequest};
 
     fn unicode_text_format() -> ClipboardFormat {
         ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)

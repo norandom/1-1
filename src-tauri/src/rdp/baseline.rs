@@ -48,8 +48,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use ironrdp::connector::ConnectionResult;
-use ironrdp::pdu::geometry::{InclusiveRectangle, Rectangle as _};
+use ironrdp_connector::ConnectionResult;
+use ironrdp_pdu::geometry::{InclusiveRectangle, Rectangle as _};
 
 /// Text-scroll fixture geometry (design.md L481): 32 dirty rectangles of
 /// 64x32 pixels per frame, arranged as a 16x2 band that scrolls downward
@@ -263,9 +263,9 @@ pub fn encode_bitmap_update_pdu_16bpp(
     rects: &[InclusiveRectangle],
     rect_rows: &[&[u8]],
 ) -> Vec<Vec<u8>> {
-    use ironrdp::pdu::bitmap::Compression;
-    use ironrdp::pdu::encode_vec as pdu_encode_vec;
-    use ironrdp::pdu::fast_path::Fragmentation;
+    use ironrdp_pdu::bitmap::Compression;
+    use ironrdp_pdu::encode_vec as pdu_encode_vec;
+    use ironrdp_pdu::fast_path::Fragmentation;
 
     assert_eq!(rects.len(), rect_rows.len());
     for (idx, rows) in rect_rows.iter().enumerate() {
@@ -278,7 +278,7 @@ pub fn encode_bitmap_update_pdu_16bpp(
     let rectangles = rects
         .iter()
         .zip(rect_rows)
-        .map(|(rect, rows)| ironrdp::pdu::bitmap::BitmapData {
+        .map(|(rect, rows)| ironrdp_pdu::bitmap::BitmapData {
             rectangle: rect.clone(),
             width: rect.width(),
             height: rect.height(),
@@ -288,7 +288,7 @@ pub fn encode_bitmap_update_pdu_16bpp(
             bitmap_data: rows,
         })
         .collect::<Vec<_>>();
-    let update_bytes = pdu_encode_vec(&ironrdp::pdu::bitmap::BitmapUpdateData { rectangles })
+    let update_bytes = pdu_encode_vec(&ironrdp_pdu::bitmap::BitmapUpdateData { rectangles })
         .expect("bitmap update encodes");
 
     let mut out = Vec::new();
@@ -312,10 +312,10 @@ pub fn encode_bitmap_update_pdu_16bpp(
 
 fn encode_fragment(
     payload: &[u8],
-    fragmentation: ironrdp::pdu::fast_path::Fragmentation,
+    fragmentation: ironrdp_pdu::fast_path::Fragmentation,
 ) -> Vec<u8> {
-    use ironrdp::pdu::encode_vec as pdu_encode_vec;
-    use ironrdp::pdu::fast_path::{EncryptionFlags, FastPathHeader, FastPathUpdatePdu, UpdateCode};
+    use ironrdp_pdu::encode_vec as pdu_encode_vec;
+    use ironrdp_pdu::fast_path::{EncryptionFlags, FastPathHeader, FastPathUpdatePdu, UpdateCode};
 
     let header = FastPathHeader::new(EncryptionFlags::empty(), payload.len());
     let pdu = FastPathUpdatePdu {
@@ -336,8 +336,8 @@ fn encode_fragment(
 /// (1003 io / 1004 user); the empty `StaticChannelSet` matches a connection
 /// whose only attached channel (cliprdr) is irrelevant to graphics decoding.
 pub fn synthetic_connection_result(width: u16, height: u16) -> ConnectionResult {
-    use ironrdp::connector::connection_activation::ConnectionActivationSequence;
-    use ironrdp::connector::DesktopSize;
+    use ironrdp_connector::DesktopSize;
+    use ironrdp_connector::connection_activation::ConnectionActivationFactory;
 
     let config = crate::store::connections::ConnectionConfig {
         id: "baseline-fixture".to_string(),
@@ -357,17 +357,30 @@ pub fn synthetic_connection_result(width: u16, height: u16) -> ConnectionResult 
     let connector_config =
         crate::rdp::client::build_connector_config(&config, "", width as u32, height as u32);
 
+    // 0.12 ConnectionResult: `connection_activation` became `activation_factory`
+    // (same constructor shape), and the negotiation fields the session layer now
+    // consumes are explicit. The fixture pins the neutral values that the old
+    // stack produced implicitly: no message channel, no compression, and no
+    // refresh/suppress support asserted.
     ConnectionResult {
         io_channel_id: 1003,
         user_channel_id: 1004,
-        // `ironrdp::svc` is feature-gated out of this build; the empty set is
-        // expressed through `Default` instead of naming the type (an empty
-        // channel set is exactly what fixtures need — graphics only).
+        message_channel_id: None,
+        share_id: 0,
+        // `ironrdp_svc` carries no default feature wiring into this build; the
+        // empty set is expressed through `Default` instead of naming the type
+        // (an empty channel set is exactly what fixtures need — graphics only).
         static_channels: Default::default(),
         desktop_size: DesktopSize { width, height },
+        input_flags: ironrdp_pdu::rdp::capability_sets::InputFlags::empty(),
         enable_server_pointer: false,
         pointer_software_rendering: false,
-        connection_activation: ConnectionActivationSequence::new(connector_config, 1003, 1004),
+        refresh_rect_support: false,
+        suppress_output_support: false,
+        window_support_level: None,
+        monitor_layout: None,
+        activation_factory: ConnectionActivationFactory::new(connector_config, 1003, 1004),
+        compression_type: None,
     }
 }
 
@@ -384,7 +397,7 @@ pub fn percentile_us(sorted_samples: &[f64], pct: f64) -> f64 {
 /// `frame_idx` (0-based, 30 per second) is the once-per-second full-frame
 /// update.
 pub fn frame_is_full_frame(frame_idx: usize) -> bool {
-    frame_idx % FRAMES_PER_FULL_FRAME == 0
+    frame_idx.is_multiple_of(FRAMES_PER_FULL_FRAME)
 }
 
 /// Warmup/sample/repeat durations (design L481). `DRIFT_BENCH_QUICK=1`
@@ -475,6 +488,10 @@ struct HostSmokeReport {
     fastpath_mouse_move: Option<String>,
     display_control_resize: Option<String>,
     graceful_shutdown: Option<String>,
+    /// Server-side reaction observed during the bounded post-shutdown drain
+    /// (task 4.2): whether the server closed the connection or kept
+    /// streaming after the client's ShutdownRequest.
+    teardown_observation: Option<String>,
     teardown_ms: Option<f64>,
     reconnect_cycle: Option<BTreeMap<String, serde_json::Value>>,
     error: Option<String>,
@@ -666,12 +683,12 @@ fn is_credential_bearing_sspi_record(target: &str, args: &str) -> bool {
     // credssp TSRequest traces: on credssp targets a NON-EMPTY decimal byte
     // array return value is wire payload (credential-bearing); the empty
     // array `return=Ok([])` is not.
-    if target.starts_with("sspi::credssp") {
-        if let Some(pos) = args.find("return=Ok([") {
-            let after = &args[pos + "return=Ok([".len()..];
-            if after.starts_with(|c: char| c.is_ascii_digit()) {
-                return true;
-            }
+    if target.starts_with("sspi::credssp")
+        && let Some(pos) = args.find("return=Ok([")
+    {
+        let after = &args[pos + "return=Ok([".len()..];
+        if after.starts_with(|c: char| c.is_ascii_digit()) {
+            return true;
         }
     }
     false
@@ -731,31 +748,30 @@ impl log::Log for TranscriptLogger {
         // Server negotiation policy evidence worth surfacing in the report
         // (selected security protocol, nego flags, joined channels, NLA
         // routing decisions inside connect_finalize).
-        if args.contains("Server confirmed connection")
+        if (args.contains("Server confirmed connection")
             || args.contains("static_channel_ids=")
             || args.contains("Could not encode a resize")
             || args.contains("CredSSP is disabled")
-            || args.contains("Begin NLA using CredSSP")
+            || args.contains("Begin NLA using CredSSP"))
+            && let Ok(mut n) = self.notable.lock()
         {
-            if let Ok(mut n) = self.notable.lock() {
-                n.push(line.trim().to_string());
-            }
+            n.push(line.trim().to_string());
         }
         // Codec capability evidence (task 3.5 codec observation): the
         // DemandActive/ConfirmActive DEBUG records of the activation phase
         // carry the negotiated BitmapCodecs capability list.
-        if record.target() == "ironrdp_connector::connection_activation" {
-            if let Some(fragment) = extract_bitmap_codecs_fragment(&args) {
-                let direction = if args.starts_with("Received message=ServerDemandActive") {
-                    "server DemandActive"
-                } else if args.starts_with("Send message=ClientConfirmActive") {
-                    "client ConfirmActive"
-                } else {
-                    "capability record"
-                };
-                if let Ok(mut c) = self.codecs.lock() {
-                    c.push(format!("{direction}: {}", self.scrub(&fragment)));
-                }
+        if record.target() == "ironrdp_connector::connection_activation"
+            && let Some(fragment) = extract_bitmap_codecs_fragment(&args)
+        {
+            let direction = if args.starts_with("Received message=ServerDemandActive") {
+                "server DemandActive"
+            } else if args.starts_with("Send message=ClientConfirmActive") {
+                "client ConfirmActive"
+            } else {
+                "capability record"
+            };
+            if let Ok(mut c) = self.codecs.lock() {
+                c.push(format!("{direction}: {}", self.scrub(&fragment)));
             }
         }
         eprint!("{line}");
@@ -850,11 +866,10 @@ fn classify_nla_route(cycle1_lines: &[String], tls_protocol: Option<&str>) -> (S
 #[test]
 #[ignore = "real-server smoke: run explicitly via scripts/Invoke-Baseline.ps1 -Mode Smoke (task 3.5)"]
 fn real_server_tls_nla_smoke() {
-    // The production app installs the rustls ring CryptoProvider inside the
-    // Tauri entrypoint (lib.rs L20-22); a headless harness must install it
-    // itself or the TLS handshake task panics (found by this smoke — the
-    // connector is not standalone-reusable as-is; recorded as a finding).
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // B3-15 resolved in task 4.2: the connector's TLS upgrade pins the ring
+    // CryptoProvider on its own ClientConfig (client.rs do_tls_upgrade), so
+    // this headless harness no longer needs to compensate with a process-wide
+    // install — the connector path is standalone-reusable now.
 
     let out_dir = baseline_out_dir();
     std::fs::create_dir_all(&out_dir).expect("create baseline output dir");
@@ -935,7 +950,7 @@ async fn smoke_host(
     notable: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     codecs: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) -> HostSmokeReport {
-    use crate::rdp::client::{attempt_rdp_connection, ConnectionOutcome};
+    use crate::rdp::client::{ConnectionOutcome, attempt_rdp_connection};
     use crate::store::connections::ConnectionConfig;
 
     eprintln!("SMOKE host{n}={host}:{port} user=<user{n}> starting");
@@ -991,6 +1006,7 @@ async fn smoke_host(
         fastpath_mouse_move: None,
         display_control_resize: None,
         graceful_shutdown: None,
+        teardown_observation: None,
         teardown_ms: None,
         reconnect_cycle: None,
         error: None,
@@ -1005,21 +1021,22 @@ async fn smoke_host(
     // logon when the account is machine-local; retrying once with the bare
     // local part distinguishes a name-form problem from a wrong password.
     // Both attempts are recorded; no guessing beyond the staged secret.
-    if let ConnectionOutcome::Failed(reason) = &outcome {
-        if reason.contains("CredSSP") && config.username.contains('@') {
-            let local_part = config.username.split('@').next().unwrap_or("").to_string();
-            if !local_part.is_empty() {
-                eprintln!(
-                    "SMOKE host{n}: CredSSP failed with the staged UPN form; retrying once with the local-part form (diagnostic)"
-                );
-                config.username = local_part;
-                config.domain = String::new();
-                report.auth_variant = Some("local-part retry after UPN CredSSP failure".into());
-                report.error = Some(reason.clone());
-                let t0 = std::time::Instant::now();
-                outcome = attempt_rdp_connection(&config, Some(pass), 1920, 1080).await;
-                report.connect_ms = Some(t0.elapsed().as_secs_f64() * 1000.0);
-            }
+    if let ConnectionOutcome::Failed(reason) = &outcome
+        && reason.contains("CredSSP")
+        && config.username.contains('@')
+    {
+        let local_part = config.username.split('@').next().unwrap_or("").to_string();
+        if !local_part.is_empty() {
+            eprintln!(
+                "SMOKE host{n}: CredSSP failed with the staged UPN form; retrying once with the local-part form (diagnostic)"
+            );
+            config.username = local_part;
+            config.domain = String::new();
+            report.auth_variant = Some("local-part retry after UPN CredSSP failure".into());
+            report.error = Some(reason.clone());
+            let t0 = std::time::Instant::now();
+            outcome = attempt_rdp_connection(&config, Some(pass), 1920, 1080).await;
+            report.connect_ms = Some(t0.elapsed().as_secs_f64() * 1000.0);
         }
     }
 
@@ -1068,7 +1085,7 @@ async fn smoke_host(
     report.cliprdr_channel_joined = Some(
         connection_result
             .static_channels
-            .get_channel_id_by_type::<ironrdp::cliprdr::CliprdrClient>()
+            .get_channel_id_by_type::<ironrdp_cliprdr::CliprdrClient>()
             .is_some(),
     );
     eprintln!(
@@ -1118,9 +1135,9 @@ async fn smoke_host(
                 )),
             );
             // immediately release the second session
-            use ironrdp::session::{ActiveStage, ActiveStageOutput};
+            use ironrdp_session::ActiveStageOutput;
             use ironrdp_tokio::FramedWrite as _;
-            let stage = ActiveStage::new(*cr2);
+            let stage = crate::rdp::client::active_stage_from_connection_result(*cr2);
             let (mut _r, mut w) = ironrdp_tokio::split_tokio_framed(*f2);
             if let Ok(outputs) = stage.graceful_shutdown() {
                 for out in outputs {
@@ -1155,15 +1172,15 @@ async fn smoke_host(
 
 async fn session_layer_checks(
     report: &mut HostSmokeReport,
-    connection_result: ironrdp::connector::ConnectionResult,
+    connection_result: ironrdp_connector::ConnectionResult,
     framed: crate::rdp::client::TlsFramed,
 ) {
-    use ironrdp::graphics::image_processing::PixelFormat;
-    use ironrdp::session::image::DecodedImage;
-    use ironrdp::session::{ActiveStage, ActiveStageOutput};
+    use ironrdp_graphics::image_processing::PixelFormat;
+    use ironrdp_session::ActiveStageOutput;
+    use ironrdp_session::image::DecodedImage;
     use ironrdp_tokio::FramedWrite as _;
 
-    let mut stage = ActiveStage::new(connection_result);
+    let mut stage = crate::rdp::client::active_stage_from_connection_result(connection_result);
     let mut image = DecodedImage::new(PixelFormat::RgbA32, 1920, 1080);
     let (mut reader, mut writer) = ironrdp_tokio::split_tokio_framed(framed);
 
@@ -1193,7 +1210,9 @@ async fn session_layer_checks(
                 break;
             }
         };
-        let outputs = match stage.process(&mut image, pdu.0, &pdu.1) {
+        // `received_at: None` preserves the pre-0.13 behavior (the timestamp
+        // only feeds upstream's new bandwidth auto-detect measurement).
+        let outputs = match stage.process(&mut image, pdu.0, &pdu.1, None) {
             Ok(outputs) => outputs,
             Err(e) => {
                 // Production diverges here: the session loop treats a
@@ -1233,8 +1252,8 @@ async fn session_layer_checks(
 
                 // FastPath input on the wire: a pointer move is the least
                 // intrusive real input event. Coordinates (16,16) are safe.
-                use ironrdp::pdu::input::fast_path::FastPathInputEvent;
-                use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
+                use ironrdp_pdu::input::fast_path::FastPathInputEvent;
+                use ironrdp_pdu::input::mouse::{MousePdu, PointerFlags};
                 let event = FastPathInputEvent::MouseEvent(MousePdu {
                     flags: PointerFlags::MOVE,
                     number_of_wheel_rotation_units: 0,
@@ -1245,10 +1264,10 @@ async fn session_layer_checks(
                     Ok(outs) => {
                         let mut sent = false;
                         for out in outs {
-                            if let ActiveStageOutput::ResponseFrame(frame) = out {
-                                if !frame.is_empty() {
-                                    sent = writer.write_all(&frame).await.is_ok();
-                                }
+                            if let ActiveStageOutput::ResponseFrame(frame) = out
+                                && !frame.is_empty()
+                            {
+                                sent = writer.write_all(&frame).await.is_ok();
                             }
                         }
                         report.fastpath_mouse_move = Some(if sent {
@@ -1260,12 +1279,13 @@ async fn session_layer_checks(
                     Err(e) => report.fastpath_mouse_move = Some(format!("error: {e}")),
                 }
 
-                // Display-control resize probe: the old connector never
-                // attaches the DisplayControlClient DVC, so encode_resize is
-                // expected to return None — recorded as found behavior.
+                // Display-control resize probe: the connector never attaches
+                // the DisplayControlClient DVC (session-layer work), so
+                // encode_resize is expected to return None — recorded as
+                // found behavior.
                 report.display_control_resize =
                     Some(match stage.encode_resize(1280, 720, None, None) {
-                        None => "None (display-control DVC not negotiated by old stack)".into(),
+                        None => "None (display-control DVC not negotiated by the connector)".into(),
                         Some(Ok(frame)) => {
                             let ok = writer.write_all(&frame).await.is_ok();
                             format!("encoded+sent (write ok: {ok})")
@@ -1290,18 +1310,46 @@ async fn session_layer_checks(
     let mut clean = false;
     if let Ok(outputs) = stage.graceful_shutdown() {
         for out in outputs {
-            if let ActiveStageOutput::ResponseFrame(frame) = out {
-                if !frame.is_empty() {
-                    let _ = writer.write_all(&frame).await;
-                }
+            if let ActiveStageOutput::ResponseFrame(frame) = out
+                && !frame.is_empty()
+            {
+                let _ = writer.write_all(&frame).await;
             }
         }
         clean = true;
     }
     // Drain briefly so the shutdown PDU is flushed and the server's reaction
-    // (close or final PDU) is observed.
-    while let Ok(Ok(_pdu)) = tokio::time::timeout(Duration::from_secs(2), reader.read_pdu()).await {
+    // (close or continued streaming) is observed. Bounded at 10s total (task
+    // 4.2): the 0.12 connector negotiates the MCS message channel and network
+    // characteristics auto-detection, after which servers keep sending
+    // auto-detect/graphics traffic indefinitely — an unbounded
+    // "drain until quiet" never terminates on the new stack (found by this
+    // smoke). The bound covers the old stack's worst observed teardown window
+    // (~8.2s), so observation semantics are unchanged for quiet servers; the
+    // observation itself is recorded in `teardown_observation`.
+    let drain_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut drained = 0usize;
+    let mut server_closed = false;
+    loop {
+        if std::time::Instant::now() >= drain_deadline {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_secs(2), reader.read_pdu()).await {
+            Ok(Ok(_pdu)) => drained += 1,
+            Ok(Err(_)) => {
+                server_closed = true;
+                break;
+            }
+            Err(_) => break, // quiet: >2s without a PDU
+        }
     }
+    report.teardown_observation = Some(if server_closed {
+        format!("server closed the connection after the shutdown request ({drained} pdus drained)")
+    } else {
+        format!(
+            "server kept streaming after the shutdown request; drain bounded at 10s ({drained} pdus drained)"
+        )
+    });
     report.graceful_shutdown = Some(if clean {
         "clean".into()
     } else {
@@ -1309,9 +1357,10 @@ async fn session_layer_checks(
     });
     report.teardown_ms = Some(t_teardown.elapsed().as_secs_f64() * 1000.0);
     eprintln!(
-        "SMOKE teardown: {} in {:.0} ms",
+        "SMOKE teardown: {} in {:.0} ms ({})",
         report.graceful_shutdown.as_deref().unwrap_or("?"),
-        report.teardown_ms.unwrap_or(0.0)
+        report.teardown_ms.unwrap_or(0.0),
+        report.teardown_observation.as_deref().unwrap_or("?")
     );
 }
 
@@ -1336,13 +1385,15 @@ fn run_session_pipeline(
     sample: Duration,
     frame_offset: &std::sync::atomic::AtomicUsize,
 ) -> SessionBenchResult {
-    use ironrdp::graphics::image_processing::PixelFormat;
-    use ironrdp::pdu::Action;
-    use ironrdp::session::image::DecodedImage;
-    use ironrdp::session::{ActiveStage, ActiveStageOutput};
+    use ironrdp_graphics::image_processing::PixelFormat;
+    use ironrdp_pdu::Action;
+    use ironrdp_session::ActiveStageOutput;
+    use ironrdp_session::image::DecodedImage;
 
     let mut image = DecodedImage::new(PixelFormat::RgbA32, width, height);
-    let mut stage = ActiveStage::new(synthetic_connection_result(width, height));
+    let mut stage = crate::rdp::client::active_stage_from_connection_result(
+        synthetic_connection_result(width, height),
+    );
     let shared = crate::renderer::shared_frame::SharedFrame::new(width as u32, height as u32);
     let mut scratch: Vec<u8> = Vec::new();
 
@@ -1398,7 +1449,7 @@ fn run_session_pipeline(
         let mut updated_regions: Vec<InclusiveRectangle> = Vec::new();
         for fragment in &fragments {
             let outputs = stage
-                .process(&mut image, Action::FastPath, fragment)
+                .process(&mut image, Action::FastPath, fragment, None)
                 .expect("fixture fragment decodes");
             for out in outputs {
                 match out {
@@ -1628,10 +1679,10 @@ fn workload_matrix_baseline() {
 mod tests {
     use super::*;
 
-    use ironrdp::graphics::image_processing::PixelFormat;
-    use ironrdp::pdu::Action;
-    use ironrdp::session::image::DecodedImage;
-    use ironrdp::session::{ActiveStage, ActiveStageOutput};
+    use ironrdp_graphics::image_processing::PixelFormat;
+    use ironrdp_pdu::Action;
+    use ironrdp_session::ActiveStageOutput;
+    use ironrdp_session::image::DecodedImage;
 
     // --- fixture geometry -------------------------------------------------
 
@@ -1786,11 +1837,13 @@ mod tests {
         );
 
         let mut image = DecodedImage::new(PixelFormat::RgbA32, 1920, 1080);
-        let mut stage = ActiveStage::new(synthetic_connection_result(1920, 1080));
+        let mut stage = crate::rdp::client::active_stage_from_connection_result(
+            synthetic_connection_result(1920, 1080),
+        );
         let mut graphics = Vec::new();
         for fragment in &fragments {
             let outputs = stage
-                .process(&mut image, Action::FastPath, fragment)
+                .process(&mut image, Action::FastPath, fragment, None)
                 .expect("fixture fragment decodes through the real ActiveStage");
             for out in outputs {
                 if let ActiveStageOutput::GraphicsUpdate(r) = out {
@@ -1826,9 +1879,11 @@ mod tests {
                 encode_bitmap_update_pdu_16bpp(std::slice::from_ref(&rect), &[rows.as_slice()]);
             assert_eq!(fragments.len(), 1, "single small rect fits one fragment");
             let mut image = DecodedImage::new(PixelFormat::RgbA32, 1920, 1080);
-            let mut stage = ActiveStage::new(synthetic_connection_result(1920, 1080));
+            let mut stage = crate::rdp::client::active_stage_from_connection_result(
+                synthetic_connection_result(1920, 1080),
+            );
             stage
-                .process(&mut image, Action::FastPath, &fragments[0])
+                .process(&mut image, Action::FastPath, &fragments[0], None)
                 .expect("decodes");
             let stride = image.stride();
             let off = ((32 + y) * stride) + (64 + x) * 4;
@@ -2273,6 +2328,9 @@ mod tests {
             fastpath_mouse_move: Some("sent-ok".into()),
             display_control_resize: Some("encode_resize-returned-None".into()),
             graceful_shutdown: Some("clean".into()),
+            teardown_observation: Some(
+                "server closed the connection after the shutdown request (3 pdus drained)".into(),
+            ),
             teardown_ms: Some(88.0),
             reconnect_cycle: None,
             error: None,

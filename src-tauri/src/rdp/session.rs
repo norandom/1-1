@@ -1,13 +1,13 @@
 use chrono::{DateTime, Utc};
-use ironrdp::pdu::input::fast_path::FastPathInputEvent;
+use ironrdp_pdu::input::fast_path::FastPathInputEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::Emitter;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
 
-use crate::rdp::client::{attempt_rdp_connection, ConnectionOutcome, SessionCommand};
+use crate::rdp::client::{ConnectionOutcome, SessionCommand, attempt_rdp_connection};
 use crate::rdp::clipboard::SessionClipboardBackend;
 use crate::rdp::display::FrameBuffer;
 use crate::rdp::frame_transport::{
@@ -389,15 +389,15 @@ impl SessionActor {
 
     async fn flush_clipboard_messages<W>(
         &mut self,
-        active_stage: &mut ironrdp::session::ActiveStage,
+        active_stage: &mut ironrdp_session::ActiveStage,
         writer: &mut W,
     ) -> Result<(), DisconnectReason>
     where
         W: ironrdp_tokio::FramedWrite,
     {
-        use ironrdp::cliprdr::{
-            backend::ClipboardMessage, Client as CliprdrRoleClient, CliprdrClient,
-            CliprdrSvcMessages,
+        use ironrdp_cliprdr::{
+            Client as CliprdrRoleClient, CliprdrClient, CliprdrSvcMessages,
+            backend::ClipboardMessage,
         };
 
         let (pending_messages, remote_text_update) = {
@@ -430,6 +430,15 @@ impl SessionActor {
                         cliprdr.submit_format_data(response)
                     }
                     ClipboardMessage::SendInitiatePaste(format) => cliprdr.initiate_paste(format),
+                    // cliprdr 0.9 file-transfer variants: the plain-text backend
+                    // never queues them (file clipboard sync is out of scope), so
+                    // skipping them cannot change observable behavior.
+                    ClipboardMessage::SendFileContentsRequest(_)
+                    | ClipboardMessage::SendFileContentsResponse(_)
+                    | ClipboardMessage::SendInitiateFileCopy(_) => {
+                        log::debug!("Ignoring file-clipboard message for session {}", self.id);
+                        continue;
+                    }
                     ClipboardMessage::Error(error) => {
                         log::warn!("Clipboard backend error for session {}: {}", self.id, error);
                         continue;
@@ -494,21 +503,21 @@ impl SessionActor {
 
     async fn set_local_clipboard_text<W>(
         &mut self,
-        active_stage: &mut ironrdp::session::ActiveStage,
+        active_stage: &mut ironrdp_session::ActiveStage,
         writer: &mut W,
         text: String,
     ) -> Result<(), DisconnectReason>
     where
         W: ironrdp_tokio::FramedWrite,
     {
-        use ironrdp::cliprdr::CliprdrClient;
+        use ironrdp_cliprdr::CliprdrClient;
 
         self.local_clipboard_text = Some(text.clone());
 
-        if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
-            if let Some(backend) = cliprdr.downcast_backend_mut::<SessionClipboardBackend>() {
-                backend.set_local_text(text);
-            }
+        if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>()
+            && let Some(backend) = cliprdr.downcast_backend_mut::<SessionClipboardBackend>()
+        {
+            backend.set_local_text(text);
         }
 
         self.flush_clipboard_messages(active_stage, writer).await
@@ -585,28 +594,30 @@ impl SessionActor {
     /// and emits frame data to the frontend.
     async fn run_real_session_loop(
         &mut self,
-        connection_result: ironrdp::connector::ConnectionResult,
+        connection_result: ironrdp_connector::ConnectionResult,
         framed: crate::rdp::client::TlsFramed,
     ) -> DisconnectReason {
-        use ironrdp::graphics::image_processing::PixelFormat;
-        use ironrdp::session::image::DecodedImage;
-        use ironrdp::session::{ActiveStage, ActiveStageOutput};
+        use ironrdp_graphics::image_processing::PixelFormat;
+        use ironrdp_session::ActiveStageOutput;
+        use ironrdp_session::image::DecodedImage;
         use ironrdp_tokio::FramedWrite;
-        let mut active_stage = ActiveStage::new(connection_result);
+        // 0.13 session API: the stage is built through the connector adapter
+        // (ActiveStage::new(ConnectionResult) no longer exists upstream).
+        let mut active_stage =
+            crate::rdp::client::active_stage_from_connection_result(connection_result);
         let mut image =
             DecodedImage::new(PixelFormat::RgbA32, self.width as u16, self.height as u16);
 
         // Split the framed stream for concurrent read/write
         let (mut reader, mut writer) = ironrdp_tokio::split_tokio_framed(framed);
 
-        if let Some(text) = self.local_clipboard_text.clone() {
-            if self
+        if let Some(text) = self.local_clipboard_text.clone()
+            && self
                 .set_local_clipboard_text(&mut active_stage, &mut writer, text)
                 .await
                 .is_err()
-            {
-                return DisconnectReason::ConnectionLost;
-            }
+        {
+            return DisconnectReason::ConnectionLost;
         }
 
         loop {
@@ -624,7 +635,9 @@ impl SessionActor {
                         }
                     };
 
-                    let outputs = match active_stage.process(&mut image, action, &payload) {
+                    // `received_at: None` preserves the pre-0.13 behavior: the
+                    // timestamp only feeds upstream's new bandwidth auto-detect.
+                    let outputs = match active_stage.process(&mut image, action, &payload, None) {
                         Ok(outputs) => outputs,
                         Err(e) => {
                             log::warn!("Session {} process error: {}", self.id, e);
@@ -639,13 +652,12 @@ impl SessionActor {
                     for out in outputs {
                         match out {
                             ActiveStageOutput::ResponseFrame(frame) => {
-                                if !frame.is_empty() {
-                                    if let Err(e) = writer.write_all(&frame).await {
+                                if !frame.is_empty()
+                                    && let Err(e) = writer.write_all(&frame).await {
                                         log::warn!("Session {} write error: {}", self.id, e);
                                         self.last_error = Some(format!("Write error: {}", e));
                                         return DisconnectReason::ConnectionLost;
                                     }
-                                }
                             }
                             ActiveStageOutput::GraphicsUpdate(region) => {
                                 updated_regions.push(region);
@@ -660,9 +672,11 @@ impl SessionActor {
                                 self.publish_info();
                                 return DisconnectReason::UserDisconnect;
                             }
-                            ActiveStageOutput::DeactivateAll(_cas) => {
+                            ActiveStageOutput::DeactivateAll => {
                                 log::info!("Session {} deactivate-all received", self.id);
                                 // Server wants to re-negotiate capabilities; treat as disconnect
+                                // (0.13 carries the re-activation sequence on the stage instead
+                                // of the output variant; handling that is session-layer work.)
                                 return DisconnectReason::ConnectionLost;
                             }
                             _ => {
@@ -678,7 +692,7 @@ impl SessionActor {
 
                         // Write dirty rects to SharedFrame for GPU renderer (batched — one lock)
                         if let Some(ref sf) = self.shared_frame {
-                            use ironrdp::pdu::geometry::Rectangle as _;
+                            use ironrdp_pdu::geometry::Rectangle as _;
                             let stride = image.stride();
                             let img_data = image.data();
                             let mut guard = sf.begin_write();
@@ -710,7 +724,7 @@ impl SessionActor {
 
                             // Track FPS at the session level
                             self.metrics.frames_sent += 1;
-                            if self.metrics.frames_sent % 100 == 0 {
+                            if self.metrics.frames_sent.is_multiple_of(100) {
                                 let elapsed = self.metrics.started_at.unwrap_or_else(std::time::Instant::now).elapsed();
                                 let fps = self.metrics.frames_sent as f64 / elapsed.as_secs_f64();
                                 log::info!(
@@ -770,12 +784,11 @@ impl SessionActor {
                                 match active_stage.process_fastpath_input(&mut image, &[event]) {
                                     Ok(outputs) => {
                                         for out in outputs {
-                                            if let ActiveStageOutput::ResponseFrame(frame) = out {
-                                                if let Err(e) = writer.write_all(&frame).await {
+                                            if let ActiveStageOutput::ResponseFrame(frame) = out
+                                                && let Err(e) = writer.write_all(&frame).await {
                                                     log::warn!("Write error on key event: {}", e);
                                                     return DisconnectReason::ConnectionLost;
                                                 }
-                                            }
                                         }
                                     }
                                     Err(e) => {
@@ -801,12 +814,11 @@ impl SessionActor {
                             match active_stage.process_fastpath_input(&mut image, &[event]) {
                                 Ok(outputs) => {
                                     for out in outputs {
-                                        if let ActiveStageOutput::ResponseFrame(frame) = out {
-                                            if let Err(e) = writer.write_all(&frame).await {
+                                        if let ActiveStageOutput::ResponseFrame(frame) = out
+                                            && let Err(e) = writer.write_all(&frame).await {
                                                 log::warn!("Write error on mouse event: {}", e);
                                                 return DisconnectReason::ConnectionLost;
                                             }
-                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -1044,7 +1056,7 @@ enum DisconnectReason {
 }
 
 fn normalize_remote_resolution(width: u32, height: u32) -> (u32, u32) {
-    ironrdp::displaycontrol::pdu::MonitorLayoutEntry::adjust_display_size(width, height)
+    ironrdp_displaycontrol::pdu::MonitorLayoutEntry::adjust_display_size(width, height)
 }
 
 /// Encode a frontend keyboard event as a FastPath keyboard event.
@@ -1056,7 +1068,7 @@ fn normalize_remote_resolution(width: u32, height: u32) -> (u32, u32) {
 /// Returns `None` for events without a scancode (unmapped keys), which the
 /// session loop drops without touching the transport.
 fn encode_keyboard_fastpath_event(key_code: u32, is_down: bool) -> Option<FastPathInputEvent> {
-    use ironrdp::pdu::input::fast_path::KeyboardFlags;
+    use ironrdp_pdu::input::fast_path::KeyboardFlags;
 
     let scancode = (key_code & 0xff) as u8;
     if scancode == 0 {
@@ -1087,7 +1099,7 @@ fn encode_mouse_fastpath_event(
     event_type: &str,
     scroll_delta: i32,
 ) -> FastPathInputEvent {
-    use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
+    use ironrdp_pdu::input::mouse::{MousePdu, PointerFlags};
 
     let mut flags = PointerFlags::empty();
     let mut wheel_units: i16 = 0;
@@ -1851,7 +1863,7 @@ mod tests {
 
     // ── Task 3.3: input and display controls (Req 3.1–3.3) ──────────────
 
-    fn mouse_pdu(event: FastPathInputEvent) -> ironrdp::pdu::input::MousePdu {
+    fn mouse_pdu(event: FastPathInputEvent) -> ironrdp_pdu::input::MousePdu {
         match event {
             FastPathInputEvent::MouseEvent(pdu) => pdu,
             other => panic!("expected a mouse event, got {:?}", other),
@@ -1863,7 +1875,7 @@ mod tests {
     /// scancodes (right-hand variants only differ by EXTENDED).
     #[test]
     fn test_keyboard_encoding_scancode_release_and_extended_flags() {
-        use ironrdp::pdu::input::fast_path::KeyboardFlags;
+        use ironrdp_pdu::input::fast_path::KeyboardFlags;
 
         // 'A' down: plain scancode, no flags.
         assert_eq!(
@@ -1922,7 +1934,7 @@ mod tests {
     /// strings are equivalent, unknown values default to left/move.
     #[test]
     fn test_mouse_encoding_button_flags_for_down_up_move_and_unknown() {
-        use ironrdp::pdu::input::mouse::PointerFlags;
+        use ironrdp_pdu::input::mouse::PointerFlags;
 
         let down_left = mouse_pdu(encode_mouse_fastpath_event(10, 20, Some("1"), "down", 0));
         assert!(down_left.flags.contains(PointerFlags::DOWN));
@@ -1939,9 +1951,11 @@ mod tests {
         // Named buttons are equivalent to the numeric TS mapping.
         let down_middle = mouse_pdu(encode_mouse_fastpath_event(1, 2, Some("middle"), "down", 0));
         assert!(down_middle.flags.contains(PointerFlags::DOWN));
-        assert!(down_middle
-            .flags
-            .contains(PointerFlags::MIDDLE_BUTTON_OR_WHEEL));
+        assert!(
+            down_middle
+                .flags
+                .contains(PointerFlags::MIDDLE_BUTTON_OR_WHEEL)
+        );
 
         // Unknown button defaults to left; unknown event type defaults to move.
         let unknown_button = mouse_pdu(encode_mouse_fastpath_event(1, 2, None, "down", 0));
@@ -1961,7 +1975,7 @@ mod tests {
     /// set WHEEL_NEGATIVE with the magnitude as units.
     #[test]
     fn test_mouse_encoding_wheel_units_clamp_and_negative_flag() {
-        use ironrdp::pdu::input::mouse::PointerFlags;
+        use ironrdp_pdu::input::mouse::PointerFlags;
 
         let scroll_up = mouse_pdu(encode_mouse_fastpath_event(0, 0, None, "scroll", 120));
         assert!(scroll_up.flags.contains(PointerFlags::VERTICAL_WHEEL));

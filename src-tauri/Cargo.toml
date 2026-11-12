@@ -5,8 +5,11 @@ description = "Beautiful RDP Client for Mac & Linux"
 authors = ["you"]
 license = "MIT"
 repository = ""
-edition = "2021"
-rust-version = "1.77.2"
+edition = "2024"
+# MSRV of the pinned IronRDP 2026-10-27/28 train (task 4.1 resolved set,
+# research.md §4.1): every train crate declares rust-version 1.94
+# (sspi 0.23.0 declares 1.93). Supersedes the facade-era 1.77.2.
+rust-version = "1.94"
 
 [lib]
 name = "app_lib"
@@ -29,12 +32,41 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 keyring = { version = "3", features = ["apple-native", "linux-native"] }
 dirs = "5"
-ironrdp = { version = "0.14", features = ["connector", "session", "graphics", "input", "cliprdr", "displaycontrol"] }
-ironrdp-tokio = { version = "0.8", features = ["reqwest"] }
-ironrdp-tls = { version = "0.2", features = ["rustls"] }
-x509-cert = "0.2"
-rustls = { version = "0.23", features = ["ring"] }
-tokio-rustls = "0.26"
+# IronRDP component crates — the task 4.1 resolved set (research.md §4.1),
+# pinned exactly (`=`) like the registry-verified compile probe
+# (probes/ironrdp-egfx-05). The `ironrdp` facade is dropped on purpose: the
+# newest facade (0.17.0) pins an older component train (connector ^0.10,
+# pdu ^0.9, sspi ^0.21) that cannot co-resolve with this set.
+ironrdp-connector = "=0.12.0"
+ironrdp-pdu = "=0.11.0"
+ironrdp-core = "=0.3.1"
+ironrdp-graphics = "=0.11.0"
+ironrdp-session = "=0.13.0"
+ironrdp-dvc = "=0.10.0"
+ironrdp-svc = "=0.10.0"
+ironrdp-input = "=0.9.0"
+ironrdp-cliprdr = "=0.9.0"
+ironrdp-displaycontrol = "=0.10.0"
+# no features: openh264/openh264-bundled/openh264-libloading stay OFF
+# (Req 9.1/9.5 — no H.264 decoder in the build).
+ironrdp-egfx = { version = "=0.5.0", default-features = false }
+# ironrdp-tls: `rustls-ring`, NOT `rustls` — in the 0.3 train the plain
+# `rustls` feature maps to aws-lc-rs; `rustls-ring` keeps the ring
+# CryptoProvider path Drift installs today.
+ironrdp-tls = { version = "=0.3.0", features = ["rustls-ring"] }
+ironrdp-tokio = { version = "=0.12.0", features = ["reqwest"] }
+# sspi pinned to 0.23.0 (NOT 0.23.1): connector 0.12.0 and sspi 0.23.1 pin
+# conflicting picky release candidates (=7.0.0-rc.26 vs =7.0.0-rc.27);
+# sspi 0.23.0 pins rc.26 and co-resolves with the train. No feature here
+# activates sspi's optional rustls (that would pull aws-lc-rs).
+sspi = "=0.23.0"
+# x509-cert aligned with ironrdp-tls 0.3 (extract_tls_server_public_key
+# takes the 0.3 Certificate type).
+x509-cert = "0.3"
+# aws-lc-rs kept OUT of the Windows build chain: both crates pin the ring
+# provider explicitly and disable the aws-lc-rs defaults.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 webpki-roots = "1"
 wgpu = "24"
 pollster = "0.4"

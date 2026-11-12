@@ -43,10 +43,10 @@ pub async fn create_connection(
     let conn = store.create(config).await?;
 
     // Store password in keychain if provided
-    if let Some(ref pw) = password {
-        if !pw.is_empty() {
-            cred_store.store_password(&conn.id, pw)?;
-        }
+    if let Some(ref pw) = password
+        && !pw.is_empty()
+    {
+        cred_store.store_password(&conn.id, pw)?;
     }
 
     log::info!("Created connection: {} ({})", conn.name, conn.id);
