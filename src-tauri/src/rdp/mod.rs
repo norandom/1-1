@@ -1,3 +1,4 @@
+pub mod baseline;
 pub mod client;
 pub mod clipboard;
 pub mod display;

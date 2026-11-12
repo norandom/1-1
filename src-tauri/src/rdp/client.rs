@@ -74,7 +74,10 @@ pub async fn tcp_connect(host: &str, port: u16) -> Result<TcpStream, RdpError> {
 }
 
 /// Build the IronRDP connector Config.
-fn build_connector_config(
+/// `pub(crate)` seam (task 3.5): the baseline harnesses reuse the production
+/// config builder so synthetic fixtures decode through a production-shaped
+/// connector state; behavior is unchanged.
+pub(crate) fn build_connector_config(
     config: &ConnectionConfig,
     password: &str,
     width: u32,

@@ -100,7 +100,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Characterization records existing behavior and known defects without freezing incorrect defaults or tab identity.
   - _Boundary: Shell/render baseline_
   - _Requirements: 4.1,4.2,4.3,5.1,5.2,5.3,5.4,12.6_
-- [ ] 3.5 Record reproducible performance and interoperability baselines
+- [x] 3.5 Record reproducible performance and interoperability baselines
   - Run the design workload matrix and old-stack TLS/NLA smoke; record hardware/build, actual route, server/policy and timings. If a workload cannot run, agree a budget before upgrade.
   - Done: Baseline artifact contains benchmark results and real-server checks; missing mandatory evidence blocks the upgrade.
   - _Boundary: Baseline integration_

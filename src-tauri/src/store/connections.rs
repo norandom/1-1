@@ -476,7 +476,10 @@ mod tests {
         rich.display_height = Some(1440);
         let created = store.create(rich).await.unwrap();
         store.update_last_connected(&created.id).await.unwrap();
-        store.create(sample_input("Alpha", "alpha.example.com")).await.unwrap(); // list is name-sorted
+        store
+            .create(sample_input("Alpha", "alpha.example.com"))
+            .await
+            .unwrap(); // list is name-sorted
 
         // Reopen from the same data dir: every field must survive the JSON round trip.
         drop(store);
@@ -499,7 +502,10 @@ mod tests {
 
         let list = reopened.list().await;
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].name, "Alpha", "list() sorts by name (current behavior)");
+        assert_eq!(
+            list[0].name, "Alpha",
+            "list() sorts by name (current behavior)"
+        );
     }
 
     #[tokio::test]
@@ -622,7 +628,10 @@ mod tests {
             .await
             .unwrap();
         assert!(store.delete(&drop_conn.id).await.unwrap());
-        assert!(!store.delete(&drop_conn.id).await.unwrap(), "second delete: already gone");
+        assert!(
+            !store.delete(&drop_conn.id).await.unwrap(),
+            "second delete: already gone"
+        );
 
         let raw = std::fs::read_to_string(&file_path).unwrap();
         assert!(!raw.contains(&drop_conn.id), "deleted id leaves the file");

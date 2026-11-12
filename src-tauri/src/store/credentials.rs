@@ -48,9 +48,7 @@ impl Default for CredentialStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keyring::credential::{
-        Credential, CredentialApi, CredentialBuilder, CredentialBuilderApi,
-    };
+    use keyring::credential::{Credential, CredentialApi, CredentialBuilder, CredentialBuilderApi};
     use keyring::{mock, set_default_credential_builder};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, MutexGuard};
@@ -205,14 +203,19 @@ mod tests {
 
     #[test]
     fn test_round_trip_through_scripted_keyring() {
-        let (_lock, _guard) = install_scripted(Arc::new(Mutex::new(Vec::new())), false, None, None, None);
+        let (_lock, _guard) =
+            install_scripted(Arc::new(Mutex::new(Vec::new())), false, None, None, None);
         let store = CredentialStore::new();
         let id = "char-3-1-roundtrip";
 
         store.store_password(id, "s3cret!").unwrap();
         assert_eq!(store.get_password(id).unwrap(), Some("s3cret!".to_string()));
         store.delete_password(id).unwrap();
-        assert_eq!(store.get_password(id).unwrap(), None, "deleted entry reads as None");
+        assert_eq!(
+            store.get_password(id).unwrap(),
+            None,
+            "deleted entry reads as None"
+        );
     }
 
     #[test]
@@ -319,16 +322,13 @@ mod tests {
 
     #[test]
     fn test_entry_creation_failure_maps_to_error_string() {
-        let (_lock, _guard) = install_scripted(
-            Arc::new(Mutex::new(Vec::new())),
-            true,
-            None,
-            None,
-            None,
-        );
+        let (_lock, _guard) =
+            install_scripted(Arc::new(Mutex::new(Vec::new())), true, None, None, None);
         let store = CredentialStore::new();
         for err in [
-            store.store_password("char-3-1-fail-build", "pw").unwrap_err(),
+            store
+                .store_password("char-3-1-fail-build", "pw")
+                .unwrap_err(),
             store.get_password("char-3-1-fail-build").unwrap_err(),
             store.delete_password("char-3-1-fail-build").unwrap_err(),
         ] {
