@@ -184,3 +184,41 @@ function mapMouseButton(button: number): number {
       return 0;
   }
 }
+
+/**
+ * Convert a browser wheel `deltaY` (with its `deltaMode`) into RDP wheel
+ * rotation units. Browser deltaY is positive for scrolling down; RDP wheel
+ * units are positive for scrolling up, so the sign is flipped. Line mode
+ * (deltaMode 1) multiplies by 3 units per line; pixel mode (and any other
+ * mode) normalizes ~40px to one unit, always at least one unit in the
+ * scrolled direction, clamped to the RDP maximum of 255 units.
+ */
+export function normalizeWheelDelta(deltaY: number, deltaMode: number): number {
+  let delta = -deltaY;
+  if (deltaMode === 1) {
+    // Line mode (mouse wheel) — each line = 3 rotation units
+    delta *= 3;
+  } else {
+    // Pixel mode (trackpad) — normalize: ~40px = 1 rotation unit
+    delta = Math.sign(delta) * Math.max(1, Math.round(Math.abs(delta) / 40));
+  }
+
+  // Clamp to RDP max (255 rotation units)
+  return Math.max(-255, Math.min(255, delta));
+}
+
+/**
+ * Key event sequence for the Ctrl+Alt+Del special-key action: left Ctrl
+ * (0x1d) and left Alt (0x38) held down while extended Delete (0x53 with the
+ * 0x100 extended flag) is tapped, then released in reverse order.
+ */
+export function ctrlAltDelSequence(): KeyEvent[] {
+  return [
+    { keyCode: 0x1d, isDown: true },
+    { keyCode: 0x38, isDown: true },
+    { keyCode: 0x153, isDown: true },
+    { keyCode: 0x153, isDown: false },
+    { keyCode: 0x38, isDown: false },
+    { keyCode: 0x1d, isDown: false },
+  ];
+}

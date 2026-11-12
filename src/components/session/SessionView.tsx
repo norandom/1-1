@@ -11,6 +11,11 @@ import { SessionToolbar } from './SessionToolbar';
 import { SessionTabs } from './SessionTabs';
 import { PerformanceHUD } from './PerformanceHUD';
 import * as tauri from '../../lib/tauri';
+import { ctrlAltDelSequence } from '../../lib/input-mapper';
+import {
+  createTrailingResizeScheduler,
+  type ResizeScheduler,
+} from '../../lib/resize-debounce';
 
 export function SessionView() {
   const { id } = useParams<{ id: string }>();
@@ -38,8 +43,18 @@ export function SessionView() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const connectingRef = useRef(false);
-  const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resizeSchedulerRef = useRef<ResizeScheduler | null>(null);
   useClipboard({ sessionId });
+  // The debounced resize emit captures the current sessionId; the scheduler
+  // is rebuilt whenever the session changes (matching the original closure
+  // semantics of the inline timer, including a pending stale-id emission
+  // when the session id changes while a resize is still debouncing).
+  useEffect(() => {
+    if (sessionId === null) return;
+    resizeSchedulerRef.current = createTrailingResizeScheduler((width, height) => {
+      tauri.resizeSession(sessionId, width, height).catch(() => {});
+    });
+  }, [sessionId]);
   const sessionResolution = useSessionStore((s) =>
     sessionId ? s.sessions.get(sessionId) : null
   );
@@ -67,15 +82,7 @@ export function SessionView() {
   const handleCtrlAltDel = useCallback(() => {
     if (!sessionId) return;
     // Send Ctrl+Alt+Del key sequence
-    const keys = [
-      { keyCode: 0x1d, isDown: true },
-      { keyCode: 0x38, isDown: true },
-      { keyCode: 0x153, isDown: true },
-      { keyCode: 0x153, isDown: false },
-      { keyCode: 0x38, isDown: false },
-      { keyCode: 0x1d, isDown: false },
-    ];
-    for (const key of keys) {
+    for (const key of ctrlAltDelSequence()) {
       tauri.sendKeyEvent(sessionId, key).catch(() => {});
     }
   }, [sessionId]);
@@ -103,13 +110,7 @@ export function SessionView() {
   const handleResize = useCallback(
     (width: number, height: number) => {
       if (!sessionId) return;
-      if (resizeTimerRef.current) {
-        clearTimeout(resizeTimerRef.current);
-      }
-      resizeTimerRef.current = setTimeout(() => {
-        tauri.resizeSession(sessionId, width, height).catch(() => {});
-        resizeTimerRef.current = null;
-      }, 200);
+      resizeSchedulerRef.current?.schedule(width, height);
     },
     [sessionId]
   );

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -762,37 +763,24 @@ impl SessionActor {
                                 "Session {} key event: code={}, down={}",
                                 self.id, key_code, is_down
                             );
-                            // Encode key event as FastPath input
-                            use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 
-                            let scancode = (key_code & 0xff) as u8;
-                            if scancode == 0 {
-                                continue;
-                            }
-
-                            let mut flags = KeyboardFlags::empty();
-                            if !is_down {
-                                flags |= KeyboardFlags::RELEASE;
-                            }
-                            if (key_code & 0x100) != 0 {
-                                flags |= KeyboardFlags::EXTENDED;
-                            }
-
-                            let event = FastPathInputEvent::KeyboardEvent(flags, scancode);
-
-                            match active_stage.process_fastpath_input(&mut image, &[event]) {
-                                Ok(outputs) => {
-                                    for out in outputs {
-                                        if let ActiveStageOutput::ResponseFrame(frame) = out {
-                                            if let Err(e) = writer.write_all(&frame).await {
-                                                log::warn!("Write error on key event: {}", e);
-                                                return DisconnectReason::ConnectionLost;
+                            // Encode key event as FastPath input; events without a
+                            // scancode (unmapped keys) are dropped silently.
+                            if let Some(event) = encode_keyboard_fastpath_event(key_code, is_down) {
+                                match active_stage.process_fastpath_input(&mut image, &[event]) {
+                                    Ok(outputs) => {
+                                        for out in outputs {
+                                            if let ActiveStageOutput::ResponseFrame(frame) = out {
+                                                if let Err(e) = writer.write_all(&frame).await {
+                                                    log::warn!("Write error on key event: {}", e);
+                                                    return DisconnectReason::ConnectionLost;
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    log::warn!("Failed to encode key event: {}", e);
+                                    Err(e) => {
+                                        log::warn!("Failed to encode key event: {}", e);
+                                    }
                                 }
                             }
                         }
@@ -802,59 +790,13 @@ impl SessionActor {
                                 self.id, x, y, button, event_type, scroll_delta
                             );
                             // Encode mouse event as FastPath input
-                            use ironrdp::pdu::input::fast_path::FastPathInputEvent;
-                            use ironrdp::pdu::input::mouse::PointerFlags;
-                            use ironrdp::pdu::input::MousePdu;
-
-                            let mut flags = PointerFlags::empty();
-                            let mut wheel_units: i16 = 0;
-
-                            match event_type.as_str() {
-                                "move" => {
-                                    flags |= PointerFlags::MOVE;
-                                }
-                                "down" => {
-                                    flags |= PointerFlags::DOWN;
-                                    match button.as_deref() {
-                                        Some("1") | Some("left") => flags |= PointerFlags::LEFT_BUTTON,
-                                        Some("2") | Some("right") => flags |= PointerFlags::RIGHT_BUTTON,
-                                        Some("3") | Some("middle") => flags |= PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
-                                        _ => flags |= PointerFlags::LEFT_BUTTON,
-                                    }
-                                }
-                                "up" => {
-                                    match button.as_deref() {
-                                        Some("1") | Some("left") => flags |= PointerFlags::LEFT_BUTTON,
-                                        Some("2") | Some("right") => flags |= PointerFlags::RIGHT_BUTTON,
-                                        Some("3") | Some("middle") => flags |= PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
-                                        _ => flags |= PointerFlags::LEFT_BUTTON,
-                                    }
-                                }
-                                "scroll" => {
-                                    // Per MS-RDPBCGR spec:
-                                    // PTRFLAGS_WHEEL (0x0200) = vertical wheel
-                                    // PTRFLAGS_WHEEL_NEGATIVE (0x0100) = negative rotation
-                                    // WheelRotationMask (0x01FF) = rotation units in bottom 9 bits
-                                    flags |= PointerFlags::VERTICAL_WHEEL;
-                                    let delta = scroll_delta.clamp(-255, 255);
-                                    if delta < 0 {
-                                        flags |= PointerFlags::WHEEL_NEGATIVE;
-                                        wheel_units = (-delta) as i16;
-                                    } else {
-                                        wheel_units = delta as i16;
-                                    }
-                                }
-                                _ => {
-                                    flags |= PointerFlags::MOVE;
-                                }
-                            }
-
-                            let event = FastPathInputEvent::MouseEvent(MousePdu {
-                                flags,
-                                number_of_wheel_rotation_units: wheel_units,
-                                x_position: x.max(0) as u16,
-                                y_position: y.max(0) as u16,
-                            });
+                            let event = encode_mouse_fastpath_event(
+                                x,
+                                y,
+                                button.as_deref(),
+                                event_type.as_str(),
+                                scroll_delta,
+                            );
 
                             match active_stage.process_fastpath_input(&mut image, &[event]) {
                                 Ok(outputs) => {
@@ -1103,6 +1045,97 @@ enum DisconnectReason {
 
 fn normalize_remote_resolution(width: u32, height: u32) -> (u32, u32) {
     ironrdp::displaycontrol::pdu::MonitorLayoutEntry::adjust_display_size(width, height)
+}
+
+/// Encode a frontend keyboard event as a FastPath keyboard event.
+///
+/// The frontend `key_code` packs the set-1 scancode in the low byte and an
+/// "extended key" flag in bit 8 (`0x100`, set for e.g. right-side modifiers,
+/// arrows, NumpadEnter). Modifiers are ordinary scancodes — the client does
+/// not track modifier state, it forwards each modifier key-down/-up itself.
+/// Returns `None` for events without a scancode (unmapped keys), which the
+/// session loop drops without touching the transport.
+fn encode_keyboard_fastpath_event(key_code: u32, is_down: bool) -> Option<FastPathInputEvent> {
+    use ironrdp::pdu::input::fast_path::KeyboardFlags;
+
+    let scancode = (key_code & 0xff) as u8;
+    if scancode == 0 {
+        return None;
+    }
+
+    let mut flags = KeyboardFlags::empty();
+    if !is_down {
+        flags |= KeyboardFlags::RELEASE;
+    }
+    if (key_code & 0x100) != 0 {
+        flags |= KeyboardFlags::EXTENDED;
+    }
+
+    Some(FastPathInputEvent::KeyboardEvent(flags, scancode))
+}
+
+/// Encode a frontend pointer event as a FastPath mouse event.
+///
+/// Button values arrive as the strings "1"/"2"/"3" (from the TS mapper) or
+/// "left"/"right"/"middle"; unknown values default to the left button and
+/// unknown event types default to a move. Wheel deltas are clamped to
+/// ±255 rotation units with `WHEEL_NEGATIVE` marking downward rotation.
+fn encode_mouse_fastpath_event(
+    x: i32,
+    y: i32,
+    button: Option<&str>,
+    event_type: &str,
+    scroll_delta: i32,
+) -> FastPathInputEvent {
+    use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
+
+    let mut flags = PointerFlags::empty();
+    let mut wheel_units: i16 = 0;
+
+    match event_type {
+        "move" => {
+            flags |= PointerFlags::MOVE;
+        }
+        "down" => {
+            flags |= PointerFlags::DOWN;
+            match button {
+                Some("1") | Some("left") => flags |= PointerFlags::LEFT_BUTTON,
+                Some("2") | Some("right") => flags |= PointerFlags::RIGHT_BUTTON,
+                Some("3") | Some("middle") => flags |= PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+                _ => flags |= PointerFlags::LEFT_BUTTON,
+            }
+        }
+        "up" => match button {
+            Some("1") | Some("left") => flags |= PointerFlags::LEFT_BUTTON,
+            Some("2") | Some("right") => flags |= PointerFlags::RIGHT_BUTTON,
+            Some("3") | Some("middle") => flags |= PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+            _ => flags |= PointerFlags::LEFT_BUTTON,
+        },
+        "scroll" => {
+            // Per MS-RDPBCGR spec:
+            // PTRFLAGS_WHEEL (0x0200) = vertical wheel
+            // PTRFLAGS_WHEEL_NEGATIVE (0x0100) = negative rotation
+            // WheelRotationMask (0x01FF) = rotation units in bottom 9 bits
+            flags |= PointerFlags::VERTICAL_WHEEL;
+            let delta = scroll_delta.clamp(-255, 255);
+            if delta < 0 {
+                flags |= PointerFlags::WHEEL_NEGATIVE;
+                wheel_units = (-delta) as i16;
+            } else {
+                wheel_units = delta as i16;
+            }
+        }
+        _ => {
+            flags |= PointerFlags::MOVE;
+        }
+    }
+
+    FastPathInputEvent::MouseEvent(MousePdu {
+        flags,
+        number_of_wheel_rotation_units: wheel_units,
+        x_position: x.max(0) as u16,
+        y_position: y.max(0) as u16,
+    })
 }
 
 /// Manages all active sessions using lightweight handles.
@@ -1813,6 +1846,435 @@ mod tests {
                 "disconnected".to_string(),
                 "disconnected".to_string(),
             ]
+        );
+    }
+
+    // ── Task 3.3: input and display controls (Req 3.1–3.3) ──────────────
+
+    fn mouse_pdu(event: FastPathInputEvent) -> ironrdp::pdu::input::MousePdu {
+        match event {
+            FastPathInputEvent::MouseEvent(pdu) => pdu,
+            other => panic!("expected a mouse event, got {:?}", other),
+        }
+    }
+
+    /// Req 3.1 — keyboard events are forwarded as scancodes; key-up adds
+    /// RELEASE and the `0x100` bit adds EXTENDED. Modifiers are ordinary
+    /// scancodes (right-hand variants only differ by EXTENDED).
+    #[test]
+    fn test_keyboard_encoding_scancode_release_and_extended_flags() {
+        use ironrdp::pdu::input::fast_path::KeyboardFlags;
+
+        // 'A' down: plain scancode, no flags.
+        assert_eq!(
+            encode_keyboard_fastpath_event(0x1e, true),
+            Some(FastPathInputEvent::KeyboardEvent(
+                KeyboardFlags::empty(),
+                0x1e
+            ))
+        );
+        // 'A' up: RELEASE only.
+        assert_eq!(
+            encode_keyboard_fastpath_event(0x1e, false),
+            Some(FastPathInputEvent::KeyboardEvent(
+                KeyboardFlags::RELEASE,
+                0x1e
+            ))
+        );
+        // Right Ctrl (0x11d) and Right Alt (0x138): same scancode as the left
+        // variants, plus EXTENDED.
+        assert_eq!(
+            encode_keyboard_fastpath_event(0x11d, true),
+            Some(FastPathInputEvent::KeyboardEvent(
+                KeyboardFlags::EXTENDED,
+                0x1d
+            ))
+        );
+        assert_eq!(
+            encode_keyboard_fastpath_event(0x138, false),
+            Some(FastPathInputEvent::KeyboardEvent(
+                KeyboardFlags::EXTENDED | KeyboardFlags::RELEASE,
+                0x38
+            ))
+        );
+        // Left Shift (0x2a) is a plain scancode without EXTENDED.
+        assert_eq!(
+            encode_keyboard_fastpath_event(0x2a, true),
+            Some(FastPathInputEvent::KeyboardEvent(
+                KeyboardFlags::empty(),
+                0x2a
+            ))
+        );
+    }
+
+    /// Req 3.1 — key codes without a scancode (TS mapper returns 0 for
+    /// unmapped keys) are dropped silently at the actor seam: no event, no
+    /// transport write, no disconnect.
+    #[test]
+    fn test_keyboard_encoding_drops_keycode_zero_silently() {
+        assert_eq!(encode_keyboard_fastpath_event(0, true), None);
+        // The extended flag alone does not rescue a zero scancode.
+        assert_eq!(encode_keyboard_fastpath_event(0x100, false), None);
+    }
+
+    /// Req 3.2 — pointer button/type encoding: down carries DOWN plus the
+    /// button bit, up carries only the button bit, numeric and named button
+    /// strings are equivalent, unknown values default to left/move.
+    #[test]
+    fn test_mouse_encoding_button_flags_for_down_up_move_and_unknown() {
+        use ironrdp::pdu::input::mouse::PointerFlags;
+
+        let down_left = mouse_pdu(encode_mouse_fastpath_event(10, 20, Some("1"), "down", 0));
+        assert!(down_left.flags.contains(PointerFlags::DOWN));
+        assert!(down_left.flags.contains(PointerFlags::LEFT_BUTTON));
+        assert!(!down_left.flags.contains(PointerFlags::RIGHT_BUTTON));
+        assert_eq!(down_left.x_position, 10);
+        assert_eq!(down_left.y_position, 20);
+
+        // Button-up carries the button bit without DOWN.
+        let up_right = mouse_pdu(encode_mouse_fastpath_event(10, 20, Some("2"), "up", 0));
+        assert!(!up_right.flags.contains(PointerFlags::DOWN));
+        assert!(up_right.flags.contains(PointerFlags::RIGHT_BUTTON));
+
+        // Named buttons are equivalent to the numeric TS mapping.
+        let down_middle = mouse_pdu(encode_mouse_fastpath_event(1, 2, Some("middle"), "down", 0));
+        assert!(down_middle.flags.contains(PointerFlags::DOWN));
+        assert!(down_middle
+            .flags
+            .contains(PointerFlags::MIDDLE_BUTTON_OR_WHEEL));
+
+        // Unknown button defaults to left; unknown event type defaults to move.
+        let unknown_button = mouse_pdu(encode_mouse_fastpath_event(1, 2, None, "down", 0));
+        assert!(unknown_button.flags.contains(PointerFlags::DOWN));
+        assert!(unknown_button.flags.contains(PointerFlags::LEFT_BUTTON));
+        let unknown_type = mouse_pdu(encode_mouse_fastpath_event(1, 2, Some("1"), "hover", 0));
+        assert!(unknown_type.flags.contains(PointerFlags::MOVE));
+        assert!(!unknown_type.flags.contains(PointerFlags::DOWN));
+
+        // Move never carries a button bit.
+        let plain_move = mouse_pdu(encode_mouse_fastpath_event(3, 4, Some("1"), "move", 0));
+        assert!(plain_move.flags.contains(PointerFlags::MOVE));
+        assert!(!plain_move.flags.contains(PointerFlags::LEFT_BUTTON));
+    }
+
+    /// Req 3.2 — wheel deltas clamp to ±255 rotation units; negative deltas
+    /// set WHEEL_NEGATIVE with the magnitude as units.
+    #[test]
+    fn test_mouse_encoding_wheel_units_clamp_and_negative_flag() {
+        use ironrdp::pdu::input::mouse::PointerFlags;
+
+        let scroll_up = mouse_pdu(encode_mouse_fastpath_event(0, 0, None, "scroll", 120));
+        assert!(scroll_up.flags.contains(PointerFlags::VERTICAL_WHEEL));
+        assert!(!scroll_up.flags.contains(PointerFlags::WHEEL_NEGATIVE));
+        assert_eq!(scroll_up.number_of_wheel_rotation_units, 120);
+
+        let scroll_down = mouse_pdu(encode_mouse_fastpath_event(0, 0, None, "scroll", -30));
+        assert!(scroll_down.flags.contains(PointerFlags::VERTICAL_WHEEL));
+        assert!(scroll_down.flags.contains(PointerFlags::WHEEL_NEGATIVE));
+        assert_eq!(scroll_down.number_of_wheel_rotation_units, 30);
+
+        // Clamped to the 9-bit wheel rotation range.
+        let big_up = mouse_pdu(encode_mouse_fastpath_event(0, 0, None, "scroll", 999));
+        assert_eq!(big_up.number_of_wheel_rotation_units, 255);
+        assert!(!big_up.flags.contains(PointerFlags::WHEEL_NEGATIVE));
+        let big_down = mouse_pdu(encode_mouse_fastpath_event(0, 0, None, "scroll", -999));
+        assert_eq!(big_down.number_of_wheel_rotation_units, 255);
+        assert!(big_down.flags.contains(PointerFlags::WHEEL_NEGATIVE));
+
+        // A zero delta still produces a zero-unit wheel event.
+        let zero = mouse_pdu(encode_mouse_fastpath_event(0, 0, None, "scroll", 0));
+        assert!(zero.flags.contains(PointerFlags::VERTICAL_WHEEL));
+        assert_eq!(zero.number_of_wheel_rotation_units, 0);
+    }
+
+    /// Req 3.2 — negative coordinates clamp to 0, but values above `u16::MAX`
+    /// wrap modulo 65536 instead of clamping: the IPC boundary accepts any
+    /// `i32` and the truncated coordinate silently relocates the pointer.
+    /// Pinned as defect B3-9 (the TS mapper clamps today, the backend does not).
+    #[test]
+    fn test_mouse_encoding_clamps_negative_and_wraps_large_coordinates_defect_b3_9() {
+        let clamped = mouse_pdu(encode_mouse_fastpath_event(-5, -1, Some("1"), "move", 0));
+        assert_eq!(clamped.x_position, 0);
+        assert_eq!(clamped.y_position, 0);
+
+        let wrapped = mouse_pdu(encode_mouse_fastpath_event(
+            65536 + 7,
+            65536 + 9,
+            Some("1"),
+            "move",
+            0,
+        ));
+        assert_eq!(
+            wrapped.x_position, 7,
+            "B3-9: x wraps mod 65536 (expected 7)"
+        );
+        assert_eq!(
+            wrapped.y_position, 9,
+            "B3-9: y wraps mod 65536 (expected 9)"
+        );
+    }
+
+    /// Req 3.3 — remote resolution changes are normalized to the
+    /// MS-RDPEDI display-control bounds before use: width becomes even and
+    /// both axes clamp to [200, 8192].
+    #[test]
+    fn test_normalize_remote_resolution_even_width_and_display_bounds() {
+        assert_eq!(normalize_remote_resolution(0, 0), (200, 200));
+        // Odd width is decremented before clamping, so 199 -> 198 -> 200.
+        assert_eq!(normalize_remote_resolution(199, 199), (200, 200));
+        assert_eq!(normalize_remote_resolution(201, 201), (200, 201));
+        assert_eq!(normalize_remote_resolution(8191, 8192), (8190, 8192));
+        assert_eq!(normalize_remote_resolution(9999, 9999), (8192, 8192));
+        assert_eq!(normalize_remote_resolution(641, 481), (640, 481));
+        assert_eq!(normalize_remote_resolution(200, 200), (200, 200));
+    }
+
+    /// Req 3.1/3.2 — the mock frame loop (pre-real-session fallback) accepts
+    /// key/mouse/clipboard commands but does not forward them anywhere: no
+    /// frames, no state change, no disconnect. This is the documented TODO
+    /// zone deferred from task 3.2; mock sessions can never prove input
+    /// forwarding (Req 12.9 — real-server check only).
+    #[tokio::test(start_paused = true)]
+    async fn test_mock_session_accepts_input_commands_without_frames_or_disconnect() {
+        let manager = SessionManager::new();
+        let session = create_scripted(&manager, "mock-input", true, FrameScript::Ok).await;
+        let mut rx = session.events_rx.clone();
+        let sizes = Arc::clone(&session.frame_sizes);
+
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                && !sizes.lock().unwrap().is_empty()
+        })
+        .await;
+
+        let frames_before = sizes.lock().unwrap().len();
+
+        session
+            .cmd_tx
+            .send(SessionCommand::SendKey {
+                key_code: 0x1e,
+                is_down: true,
+            })
+            .await
+            .expect("key command accepted");
+        session
+            .cmd_tx
+            .send(SessionCommand::SendMouse {
+                x: 1,
+                y: 2,
+                button: Some("1".to_string()),
+                event_type: "down".to_string(),
+                scroll_delta: 0,
+            })
+            .await
+            .expect("mouse command accepted");
+        session
+            .cmd_tx
+            .send(SessionCommand::ClipboardWrite {
+                text: "local text".to_string(),
+            })
+            .await
+            .expect("clipboard command accepted");
+
+        // Ordering barrier: the resize that follows is only processed after
+        // the commands above, proving the actor survived them all. The size
+        // must sit above the 200 px display-control minimum (the session's
+        // 64x64 config already normalized up to 200x200 at creation).
+        session
+            .cmd_tx
+            .send(SessionCommand::Resize {
+                width: 320,
+                height: 240,
+            })
+            .await
+            .expect("resize command accepted");
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events
+                .last()
+                .is_some_and(|(_, v)| v["width"].as_u64() == Some(320))
+        })
+        .await;
+
+        // The actor publishes before it sends the refresh frame, so a
+        // disconnect barrier (processed strictly after the resize arm) makes
+        // the frame count deterministic without sleeps.
+        session
+            .cmd_tx
+            .send(SessionCommand::Disconnect)
+            .await
+            .expect("disconnect accepted");
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+        })
+        .await;
+
+        // Only the resize refresh produced a frame; input commands produced
+        // none and never disturbed the session state.
+        assert_eq!(sizes.lock().unwrap().len(), frames_before + 1);
+        assert_eq!(
+            statuses_of(&info_events(&session.id, &session.events)),
+            vec![
+                "connecting".to_string(),
+                "connected".to_string(),
+                "connected".to_string(), // resize re-publish
+                "disconnected".to_string(),
+                "disconnected".to_string(),
+            ],
+            "input commands never change mock-session state"
+        );
+        // Clipboard sync is a real-session-only seam: the mock loop stores
+        // the text but never publishes a remote clipboard update.
+        assert_eq!(
+            manager.get_remote_clipboard(&session.id).await,
+            None,
+            "mock sessions never publish remote clipboard text"
+        );
+    }
+
+    /// Req 3.3 — resize commands are normalized (even width, [200, 8192])
+    /// before the new dimensions are published and the mock frame refresh is
+    /// sent; a repeat resize to the same size still refreshes.
+    #[tokio::test(start_paused = true)]
+    async fn test_actor_resize_normalizes_before_publish_and_refreshes_mock_frame() {
+        let manager = SessionManager::new();
+        let session = create_scripted(&manager, "resize-norm", true, FrameScript::Ok).await;
+        let mut rx = session.events_rx.clone();
+        let sizes = Arc::clone(&session.frame_sizes);
+
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                && !sizes.lock().unwrap().is_empty()
+        })
+        .await;
+
+        session
+            .cmd_tx
+            .send(SessionCommand::Resize {
+                width: 201,
+                height: 9999,
+            })
+            .await
+            .expect("resize command accepted");
+
+        // 201 -> 200 (even), 9999 -> 8192 (clamped) before publication.
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().is_some_and(|(_, v)| {
+                v["width"].as_u64() == Some(200) && v["height"].as_u64() == Some(8192)
+            })
+        })
+        .await;
+
+        // Repeating the (already normalized) size still refreshes. The frame
+        // send follows the publish, so the disconnect barrier below makes the
+        // frame count deterministic.
+        session
+            .cmd_tx
+            .send(SessionCommand::Resize {
+                width: 200,
+                height: 8192,
+            })
+            .await
+            .expect("repeat resize accepted");
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.len() >= 4
+        })
+        .await;
+
+        // Sub-minimum sizes clamp UP to the 200 px display-control floor
+        // (the same rule that lifted this session's 64x64 config to 200x200
+        // at creation).
+        session
+            .cmd_tx
+            .send(SessionCommand::Resize {
+                width: 128,
+                height: 96,
+            })
+            .await
+            .expect("sub-minimum resize accepted");
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().is_some_and(|(_, v)| {
+                v["width"].as_u64() == Some(200) && v["height"].as_u64() == Some(200)
+            })
+        })
+        .await;
+
+        session
+            .cmd_tx
+            .send(SessionCommand::Disconnect)
+            .await
+            .expect("disconnect accepted");
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+        })
+        .await;
+
+        assert_eq!(
+            sizes.lock().unwrap().len(),
+            4,
+            "each resize refreshed the frame"
+        );
+
+        let settled = info_events(&session.id, &session.events)
+            .last()
+            .map(|(_, v)| v.clone())
+            .expect("settled event recorded");
+        assert_eq!(settled["width"].as_u64(), Some(200));
+        assert_eq!(settled["height"].as_u64(), Some(200));
+    }
+
+    /// Req 3.6 — the backend frame snapshot (`get_frame`) returns a base64
+    /// PNG tracking the session's current dimensions. It fabricates a mock
+    /// frame on demand rather than capturing the live frame content (see the
+    /// source comment); real-content capture is a real-server-only check.
+    #[tokio::test(start_paused = true)]
+    async fn test_get_frame_returns_base64_png_tracking_session_dimensions() {
+        use base64::Engine as _;
+
+        let manager = SessionManager::new();
+        let session = create_scripted(&manager, "get-frame", true, FrameScript::Ok).await;
+        let mut rx = session.events_rx.clone();
+        let sizes = Arc::clone(&session.frame_sizes);
+
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                && !sizes.lock().unwrap().is_empty()
+        })
+        .await;
+
+        session
+            .cmd_tx
+            .send(SessionCommand::Resize {
+                width: 320,
+                height: 240,
+            })
+            .await
+            .expect("resize command accepted");
+        wait_for(&session.id, &session.events, &mut rx, |events| {
+            events
+                .last()
+                .is_some_and(|(_, v)| v["width"].as_u64() == Some(320))
+        })
+        .await;
+
+        let frame_b64 = manager
+            .get_frame(&session.id)
+            .await
+            .expect("live session has a frame snapshot");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(frame_b64.as_bytes())
+            .expect("snapshot is valid base64");
+        assert_eq!(
+            &png[0..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+            "snapshot is a PNG"
+        );
+        let decoded = image::load_from_memory(&png).expect("snapshot PNG decodes");
+        use image::GenericImageView as _;
+        assert_eq!(decoded.dimensions(), (320, 240));
+
+        assert!(
+            manager.get_frame("no-such-session").await.is_none(),
+            "unknown sessions have no snapshot"
         );
     }
 }

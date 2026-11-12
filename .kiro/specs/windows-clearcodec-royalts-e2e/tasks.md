@@ -90,7 +90,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Deterministic lifecycle tests run without sleeps or a replacement actor framework.
   - _Boundary: Session baseline_
   - _Requirements: 2.1,2.2,2.3,2.4,2.5,12.6,13.2_
-- [ ] 3.3 Pin input and display controls
+- [x] 3.3 Pin input and display controls
   - Reuse existing input/display tests; add modifier, pointer scaling, resize debounce, special keys, clipboard and screenshot checks at current seams.
   - Done: Automated tests and required real-server checks cover each control; no assumption that mock frames prove clipboard/NLA.
   - _Boundary: Input baseline_

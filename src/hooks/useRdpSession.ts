@@ -10,6 +10,7 @@ import { toFrameBytes } from '../lib/frame-protocol';
 import {
   mapKeyEvent,
   mapMouseEvent,
+  normalizeWheelDelta,
   type MouseSurfaceBounds,
 } from '../lib/input-mapper';
 
@@ -271,23 +272,7 @@ export function useRdpSession(): UseRdpSessionReturn {
       // Map wheel position using same coordinate mapping as mouse
       const mapped = mapMouseEvent(e as unknown as globalThis.MouseEvent, 'scroll', bounds);
 
-      // Convert deltaY from pixels to RDP wheel rotation units
-      // Browser deltaY: positive = scroll down, negative = scroll up
-      // RDP: positive = scroll up, so we negate
-      // Normalize: trackpad gives small deltas (1-10px), mouse gives 100+ (line mode)
-      let delta = -e.deltaY;
-      if (e.deltaMode === 1) {
-        // Line mode (mouse wheel) — each line = 3 rotation units
-        delta *= 3;
-      } else {
-        // Pixel mode (trackpad) — normalize: ~40px = 1 rotation unit
-        delta = Math.sign(delta) * Math.max(1, Math.round(Math.abs(delta) / 40));
-      }
-
-      // Clamp to RDP max (255 rotation units)
-      delta = Math.max(-255, Math.min(255, delta));
-
-      mapped.scrollDelta = delta;
+      mapped.scrollDelta = normalizeWheelDelta(e.deltaY, e.deltaMode);
       mapped.eventType = 'scroll';
 
       tauri.sendMouseEvent(currentSessionId, mapped).catch(() => {});
