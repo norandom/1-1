@@ -441,4 +441,205 @@ mod tests {
         let list = store.list().await;
         assert!(list.is_empty());
     }
+
+    // ---- Task 3.1 characterization tests (persistence baseline, Req 1.2/1.5/6.1).
+    // These pin CURRENT old-stack behavior for the baseline-coverage.md rows; they
+    // do not approve it. Defect-marked tests reference their baseline row. ----
+
+    fn sample_input(name: &str, host: &str) -> ConnectionInput {
+        ConnectionInput {
+            name: name.into(),
+            host: host.into(),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: vec![],
+            display_width: None,
+            display_height: None,
+            password: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_crud_round_trip_preserves_fields_across_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("connections.json");
+        let store = ConnectionStore::new(dir.path().to_path_buf());
+        let mut rich = sample_input("Rich", "rich.example.com");
+        rich.port = 3390;
+        rich.username = "admin".into();
+        rich.domain = "CORP".into();
+        rich.color_accent = Some("#ff8800".into());
+        rich.tags = vec!["prod".into(), "rdp".into()];
+        rich.display_width = Some(2560);
+        rich.display_height = Some(1440);
+        let created = store.create(rich).await.unwrap();
+        store.update_last_connected(&created.id).await.unwrap();
+        store.create(sample_input("Alpha", "alpha.example.com")).await.unwrap(); // list is name-sorted
+
+        // Reopen from the same data dir: every field must survive the JSON round trip.
+        drop(store);
+        assert!(file_path.exists(), "connections.json must be written");
+        let reopened = ConnectionStore::new(dir.path().to_path_buf());
+        let reloaded = reopened.get(&created.id).await.unwrap();
+        assert_eq!(reloaded.id, created.id);
+        assert_eq!(reloaded.name, "Rich");
+        assert_eq!(reloaded.host, "rich.example.com");
+        assert_eq!(reloaded.port, 3390);
+        assert_eq!(reloaded.username, "admin");
+        assert_eq!(reloaded.domain, "CORP");
+        assert_eq!(reloaded.color_accent, Some("#ff8800".to_string()));
+        assert_eq!(reloaded.tags, vec!["prod".to_string(), "rdp".to_string()]);
+        assert_eq!(reloaded.display_width, Some(2560));
+        assert_eq!(reloaded.display_height, Some(1440));
+        assert_eq!(reloaded.created_at, created.created_at);
+        assert_eq!(reloaded.updated_at, created.updated_at);
+        assert!(reloaded.last_connected_at.is_some());
+
+        let list = reopened.list().await;
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "Alpha", "list() sorts by name (current behavior)");
+    }
+
+    #[tokio::test]
+    async fn test_created_file_is_json_array_without_password_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("connections.json");
+        let store = ConnectionStore::new(dir.path().to_path_buf());
+        let mut input = sample_input("SecretHolder", "vault.example.com");
+        input.password = Some("Sup3rSecret-Vault!".into());
+        let created = store.create(input).await.unwrap();
+
+        let raw = std::fs::read_to_string(&file_path).unwrap();
+        assert!(
+            !raw.contains("Sup3rSecret-Vault!"),
+            "password value must never reach connections.json (Req 1.2/6.1)"
+        );
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let array = value
+            .as_array()
+            .expect("connections.json is a v1 JSON array (current schema)");
+        assert_eq!(array.len(), 1);
+        assert!(
+            array[0].get("password").is_none(),
+            "persisted objects carry no password key"
+        );
+        assert_eq!(array[0]["id"].as_str(), Some(created.id.as_str()));
+        assert_eq!(array[0]["host"].as_str(), Some("vault.example.com"));
+    }
+
+    // DEFECT B3-2 (baseline-coverage.md row 1.2): the update path silently drops the
+    // submitted password (commands/connection.rs update_connection never touches the
+    // CredentialStore). Pinned at the store seam: the file stays secret-free either way.
+    #[tokio::test]
+    async fn test_update_with_password_keeps_file_secret_free_defect_b3_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("connections.json");
+        let store = ConnectionStore::new(dir.path().to_path_buf());
+        let created = store
+            .create(sample_input("Editable", "edit.example.com"))
+            .await
+            .unwrap();
+        let mut updated = sample_input("Editable", "edit2.example.com");
+        updated.password = Some("EditedSecret-2026!".into());
+        store.update(&created.id, updated).await.unwrap().unwrap();
+
+        let raw = std::fs::read_to_string(&file_path).unwrap();
+        assert!(!raw.contains("EditedSecret-2026!"));
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value[0].get("password").is_none());
+    }
+
+    // DEFECT B3-1 (baseline-coverage.md row 1.1): the store update seam applies no
+    // validation, so update_connection persists empty name/host (backend side). The
+    // UI form validates, but nothing behind the IPC boundary does. Fix belongs to a
+    // later group; this test documents the current acceptance, not the desired one.
+    #[tokio::test]
+    async fn test_update_accepts_empty_name_and_host_defect_b3_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path().to_path_buf());
+        let created = store
+            .create(sample_input("Valid", "valid.example.com"))
+            .await
+            .unwrap();
+        let result = store
+            .update(&created.id, sample_input("", ""))
+            .await
+            .unwrap();
+        let updated = result.expect("current behavior: update accepts empty name+host");
+        assert_eq!(updated.name, "");
+        assert_eq!(updated.host, "");
+        // ...and the invalid values persist to disk.
+        let reopened = ConnectionStore::new(dir.path().to_path_buf());
+        let reloaded = reopened.get(&created.id).await.unwrap();
+        assert_eq!(reloaded.name, "");
+        assert_eq!(reloaded.host, "");
+    }
+
+    // DEFECT B3-4 (baseline-coverage.md row 6.1): a malformed connections.json loads
+    // as an empty store (no error surfaced) and the NEXT save silently replaces the
+    // file — user data loss. Write-blocked recovery is planned work (task 6.3); this
+    // pins the current hazard without approving it.
+    #[tokio::test]
+    async fn test_corrupt_connections_file_replaced_by_next_save_defect_b3_4() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("connections.json");
+        std::fs::write(&file_path, "{ not valid json !!").unwrap();
+
+        let store = ConnectionStore::new(dir.path().to_path_buf());
+        assert!(
+            store.list().await.is_empty(),
+            "current behavior: corrupt file loads as an empty store"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "{ not valid json !!",
+            "load alone does not rewrite the file"
+        );
+
+        store
+            .create(sample_input("AfterCorrupt", "fresh.example.com"))
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(&file_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .expect("current behavior: next save replaces the corrupt file (data loss)");
+        assert_eq!(value.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_rewrites_file_without_deleted_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("connections.json");
+        let store = ConnectionStore::new(dir.path().to_path_buf());
+        let keep = store
+            .create(sample_input("Keep", "keep.example.com"))
+            .await
+            .unwrap();
+        let drop_conn = store
+            .create(sample_input("Drop", "drop.example.com"))
+            .await
+            .unwrap();
+        assert!(store.delete(&drop_conn.id).await.unwrap());
+        assert!(!store.delete(&drop_conn.id).await.unwrap(), "second delete: already gone");
+
+        let raw = std::fs::read_to_string(&file_path).unwrap();
+        assert!(!raw.contains(&drop_conn.id), "deleted id leaves the file");
+        let reopened = ConnectionStore::new(dir.path().to_path_buf());
+        assert!(reopened.get(&keep.id).await.is_some());
+        assert!(reopened.get(&drop_conn.id).await.is_none());
+        assert_eq!(reopened.list().await.len(), 1);
+    }
+
+    // DEFECT B3-5 (baseline-coverage.md row 1.3): IPv6 literals in `full address`
+    // are mangled — rsplit_once(':') treats the last colon-group separator as a
+    // host:port split, yielding host "fe80:" and port 1.
+    #[test]
+    fn test_parse_rdp_ipv6_literal_mangled_defect_b3_5() {
+        let f = write_temp_rdp("full address:s:fe80::1\n");
+        let result = parse_rdp_file(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(result.host, "fe80:", "current (defective) host split");
+        assert_eq!(result.port, 1, "current (defective) port parse");
+    }
 }

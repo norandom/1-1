@@ -100,4 +100,24 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
     }
+
+    // ---- Task 3.1 characterization tests (persistence baseline, Req 1.4).
+    // Deterministic success path: a loopback listener completes the TCP handshake
+    // from the kernel accept backlog; no external network, no sleeps. ----
+
+    #[tokio::test]
+    async fn test_tcp_connection_and_latency_against_local_listener() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let reachable = test_tcp_connection("127.0.0.1", addr.port(), 1000)
+            .await
+            .expect("accepted loopback connection is not an error");
+        assert!(reachable);
+
+        let latency = measure_tcp_latency("127.0.0.1", addr.port(), 1000)
+            .await
+            .expect("accepted loopback connection is not an error");
+        assert!(latency.is_some(), "a measured latency value is reported");
+    }
 }

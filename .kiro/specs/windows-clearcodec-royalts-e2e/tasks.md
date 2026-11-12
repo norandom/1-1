@@ -80,7 +80,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,7.3,12.8_
 
 - [ ] 3. Brownfield characterization gate
-- [ ] 3.1 Classify baseline and pin persistence behavior
+- [x] 3.1 Classify baseline and pin persistence behavior
   - Classify every Req 1-7 criterion as existing, defect or future delta; 4.4 is not an old-stack gate. Reuse tempfile and serde_json fixtures for CRUD/import/probe/keyring failure seams.
   - Done: Tests preserve fields, secret exclusion, validation, imports and cleanup; missing baseline coverage is explicit.
   - _Boundary: Persistence baseline_

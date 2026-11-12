@@ -139,3 +139,81 @@ impl SettingsStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Task 3.1 characterization tests (persistence baseline, Req 6.1). ----
+
+    /// AppSettings does not derive PartialEq; compare through its JSON shape
+    /// (which is exactly what the persistence layer round-trips).
+    fn json_eq(a: &AppSettings, b: &AppSettings) -> bool {
+        serde_json::to_value(a).unwrap() == serde_json::to_value(b).unwrap()
+    }
+
+    #[test]
+    fn test_settings_defaults_current_values() {
+        let d = AppSettings::default();
+        assert_eq!(d.theme, "system");
+        assert_eq!(d.default_port, 3389);
+        assert!(d.auto_reconnect);
+        assert!(!d.show_performance_hud);
+        assert!(!d.sidebar_collapsed);
+        assert_eq!(d.default_resolution, "1920x1080");
+        assert_eq!(d.color_depth, 32);
+        assert_eq!(d.quality, 80);
+        assert_eq!(d.reconnect_timeout, 5000);
+        // D2 (research.md): TS default is 10000 — mismatch tracked at Req 5.2 (task
+        // 3.4). This pins the CURRENT Rust-side default; not a behavior approval.
+        assert_eq!(d.connection_timeout, 30000);
+    }
+
+    #[tokio::test]
+    async fn test_settings_update_round_trip_via_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("settings.json");
+        let store = SettingsStore::new(dir.path().to_path_buf());
+        assert!(
+            json_eq(&store.get().await, &AppSettings::default()),
+            "empty dir -> defaults"
+        );
+
+        let mut custom = AppSettings::default();
+        custom.theme = "dark".into();
+        custom.default_port = 4000;
+        custom.show_performance_hud = true;
+        custom.connection_timeout = 12345;
+        let saved = store.update(custom.clone()).await.unwrap();
+        assert!(json_eq(&saved, &custom));
+
+        // File is a pretty JSON object whose keys are camelCase; reopen loads it back.
+        let raw = std::fs::read_to_string(&file_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["theme"].as_str(), Some("dark"));
+        assert_eq!(value["defaultPort"].as_u64(), Some(4000));
+        assert_eq!(value["showPerformanceHud"].as_bool(), Some(true));
+        assert_eq!(value["connectionTimeout"].as_u64(), Some(12345));
+
+        let reopened = SettingsStore::new(dir.path().to_path_buf());
+        assert!(json_eq(&reopened.get().await, &custom));
+    }
+
+    #[tokio::test]
+    async fn test_malformed_settings_file_falls_back_to_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("settings.json");
+        std::fs::write(&file_path, "]] not json [[").unwrap();
+
+        let store = SettingsStore::new(dir.path().to_path_buf());
+        assert!(
+            json_eq(&store.get().await, &AppSettings::default()),
+            "current behavior: malformed settings.json -> defaults, no error surfaced"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "]] not json [[",
+            "load alone does not rewrite the file"
+        );
+    }
+}

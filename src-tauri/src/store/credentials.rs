@@ -48,6 +48,316 @@ impl Default for CredentialStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keyring::credential::{
+        Credential, CredentialApi, CredentialBuilder, CredentialBuilderApi,
+    };
+    use keyring::{mock, set_default_credential_builder};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    // ---- Task 3.1 characterization tests (persistence baseline, Req 1.2/1.5/6.2).
+    //
+    // The OS keyring is unavailable in CI containers and must not be touched from
+    // tests (Req 12.7 isolation). keyring 3.6.3 exposes a public, unsealed
+    // `CredentialBuilderApi`, so these tests swap the process-wide default builder
+    // via `set_default_credential_builder` (keyring's own client-store hook) with a
+    // scripted in-memory backend. nextest runs every test in its own process; the
+    // extra mutex + restore-to-mock guard keeps plain `cargo test` (shared process)
+    // deterministic as well. No production seam was added for this. ----
+
+    fn keyring_lock() -> &'static Mutex<()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        &LOCK
+    }
+
+    /// Restores the keyring mock builder on drop so a later test in the same
+    /// process never inherits a scripted/failing builder.
+    struct BuilderGuard;
+    impl BuilderGuard {
+        fn install(builder: Box<CredentialBuilder>) -> Self {
+            set_default_credential_builder(builder);
+            BuilderGuard
+        }
+    }
+    impl Drop for BuilderGuard {
+        fn drop(&mut self) {
+            set_default_credential_builder(mock::default_credential_builder());
+        }
+    }
+
+    /// Which failure a scripted keyring operation returns.
+    #[derive(Clone, Copy)]
+    enum Fail {
+        NoEntry,
+        Platform,
+    }
+
+    fn err(f: Fail) -> keyring::Error {
+        match f {
+            Fail::NoEntry => keyring::Error::NoEntry,
+            Fail::Platform => keyring::Error::PlatformFailure("scripted keyring outage".into()),
+        }
+    }
+
+    type SharedStore = Arc<Mutex<HashMap<(String, String), Vec<u8>>>>;
+
+    /// Scripted keyring backend: a shared (service, user) -> secret map plus
+    /// injectable build/operation failures. Behaves like a real OS store across
+    /// Entry instances (CredentialStore creates a fresh Entry per call).
+    struct ScriptedBuilder {
+        store: SharedStore,
+        seen: Arc<Mutex<Vec<(String, String)>>>,
+        fail_build: bool,
+        fail_set: Option<Fail>,
+        fail_get: Option<Fail>,
+        fail_delete: Option<Fail>,
+    }
+
+    impl CredentialBuilderApi for ScriptedBuilder {
+        fn build(
+            &self,
+            _target: Option<&str>,
+            service: &str,
+            user: &str,
+        ) -> keyring::Result<Box<Credential>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((service.to_string(), user.to_string()));
+            if self.fail_build {
+                return Err(err(Fail::Platform));
+            }
+            Ok(Box::new(ScriptedCredential {
+                store: self.store.clone(),
+                key: (service.to_string(), user.to_string()),
+                fail_set: self.fail_set,
+                fail_get: self.fail_get,
+                fail_delete: self.fail_delete,
+            }))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    struct ScriptedCredential {
+        store: SharedStore,
+        key: (String, String),
+        fail_set: Option<Fail>,
+        fail_get: Option<Fail>,
+        fail_delete: Option<Fail>,
+    }
+
+    impl CredentialApi for ScriptedCredential {
+        fn set_secret(&self, password: &[u8]) -> keyring::Result<()> {
+            if let Some(f) = self.fail_set {
+                return Err(err(f));
+            }
+            self.store
+                .lock()
+                .unwrap()
+                .insert(self.key.clone(), password.to_vec());
+            Ok(())
+        }
+        fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+            if let Some(f) = self.fail_get {
+                return Err(err(f));
+            }
+            self.store
+                .lock()
+                .unwrap()
+                .get(&self.key)
+                .cloned()
+                .ok_or(keyring::Error::NoEntry)
+        }
+        fn delete_credential(&self) -> keyring::Result<()> {
+            if let Some(f) = self.fail_delete {
+                return Err(err(f));
+            }
+            match self.store.lock().unwrap().remove(&self.key) {
+                Some(_) => Ok(()),
+                None => Err(keyring::Error::NoEntry),
+            }
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn install_scripted(
+        seen: Arc<Mutex<Vec<(String, String)>>>,
+        fail_build: bool,
+        fail_set: Option<Fail>,
+        fail_get: Option<Fail>,
+        fail_delete: Option<Fail>,
+    ) -> (MutexGuard<'static, ()>, BuilderGuard) {
+        let lock = keyring_lock().lock().unwrap();
+        let guard = BuilderGuard::install(Box::new(ScriptedBuilder {
+            store: Arc::new(Mutex::new(HashMap::new())),
+            seen,
+            fail_build,
+            fail_set,
+            fail_get,
+            fail_delete,
+        }));
+        (lock, guard)
+    }
+
+    #[test]
+    fn test_round_trip_through_scripted_keyring() {
+        let (_lock, _guard) = install_scripted(Arc::new(Mutex::new(Vec::new())), false, None, None, None);
+        let store = CredentialStore::new();
+        let id = "char-3-1-roundtrip";
+
+        store.store_password(id, "s3cret!").unwrap();
+        assert_eq!(store.get_password(id).unwrap(), Some("s3cret!".to_string()));
+        store.delete_password(id).unwrap();
+        assert_eq!(store.get_password(id).unwrap(), None, "deleted entry reads as None");
+    }
+
+    #[test]
+    fn test_keyring_account_is_service_plus_connection_id() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (_lock, _guard) = install_scripted(seen.clone(), false, None, None, None);
+        let store = CredentialStore::new();
+        store.store_password("char-3-1-account", "pw").unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .any(|(service, user)| service == "com.rdpclient.app" && user == "char-3-1-account"),
+            "credentials are keyed as (service com.rdpclient.app, connection id): {:?}",
+            seen
+        );
+    }
+
+    #[test]
+    fn test_get_password_no_entry_maps_to_none() {
+        let (_lock, _guard) = install_scripted(
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+            None,
+            Some(Fail::NoEntry),
+            None,
+        );
+        let store = CredentialStore::new();
+        // Backend NoEntry -> Ok(None) (Req 1.2/6.2 mapping).
+        assert_eq!(store.get_password("char-3-1-never-stored").unwrap(), None);
+    }
+
+    #[test]
+    fn test_delete_password_no_entry_maps_to_ok() {
+        let (_lock, _guard) = install_scripted(
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+            None,
+            None,
+            Some(Fail::NoEntry),
+        );
+        let store = CredentialStore::new();
+        // Deleting a never-stored credential is Ok — "already gone, that's fine"
+        // (this is what makes the command-level delete cleanup best-effort safe).
+        store.delete_password("char-3-1-never-stored").unwrap();
+    }
+
+    #[test]
+    fn test_store_password_platform_failure_maps_to_error_string() {
+        let (_lock, _guard) = install_scripted(
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+            Some(Fail::Platform),
+            None,
+            None,
+        );
+        let err = CredentialStore::new()
+            .store_password("char-3-1-fail-set", "pw")
+            .unwrap_err();
+        assert!(
+            err.contains("Failed to store password in keychain"),
+            "unexpected error text: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_get_password_platform_failure_maps_to_error_string() {
+        let (_lock, _guard) = install_scripted(
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+            None,
+            Some(Fail::Platform),
+            None,
+        );
+        let err = CredentialStore::new()
+            .get_password("char-3-1-fail-get")
+            .unwrap_err();
+        assert!(
+            err.contains("Failed to retrieve password from keychain"),
+            "unexpected error text: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_delete_password_platform_failure_maps_to_error_string() {
+        let (_lock, _guard) = install_scripted(
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+            None,
+            None,
+            Some(Fail::Platform),
+        );
+        let err = CredentialStore::new()
+            .delete_password("char-3-1-fail-del")
+            .unwrap_err();
+        assert!(
+            err.contains("Failed to delete password from keychain"),
+            "unexpected error text: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_entry_creation_failure_maps_to_error_string() {
+        let (_lock, _guard) = install_scripted(
+            Arc::new(Mutex::new(Vec::new())),
+            true,
+            None,
+            None,
+            None,
+        );
+        let store = CredentialStore::new();
+        for err in [
+            store.store_password("char-3-1-fail-build", "pw").unwrap_err(),
+            store.get_password("char-3-1-fail-build").unwrap_err(),
+            store.delete_password("char-3-1-fail-build").unwrap_err(),
+        ] {
+            assert!(
+                err.contains("Failed to create keyring entry"),
+                "unexpected error text: {}",
+                err
+            );
+        }
+    }
+
+    // baseline-coverage.md row 6.2: Windows builds compile keyring WITHOUT the
+    // windows-native feature, so keyring falls back to its in-process mock store:
+    // set_password "succeeds", nothing persists, and a fresh Entry always reads
+    // NoEntry. This pins that exact shape deterministically on every platform.
+    #[test]
+    fn test_mock_keyring_shape_matches_windows_fallback() {
+        let _lock = keyring_lock().lock().unwrap();
+        let _guard = BuilderGuard::install(mock::default_credential_builder());
+        let store = CredentialStore::new();
+
+        store.store_password("char-3-1-mock-shape", "pw").unwrap();
+        assert_eq!(
+            store.get_password("char-3-1-mock-shape").unwrap(),
+            None,
+            "mock entries don't persist across Entry::new calls"
+        );
+        store.delete_password("char-3-1-mock-shape").unwrap();
+    }
 
     #[test]
     #[ignore] // Requires a keyring daemon; run with: cargo test -- --ignored
