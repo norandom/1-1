@@ -2298,7 +2298,9 @@ mod tests {
         let kinds = frame_kinds.lock().unwrap().clone();
         assert!(!kinds.is_empty());
         assert!(
-            kinds.iter().all(|k| *k == crate::rdp::frame_transport::PACKET_KIND_FULL_FRAME),
+            kinds
+                .iter()
+                .all(|k| *k == crate::rdp::frame_transport::PACKET_KIND_FULL_FRAME),
             "mock frames must emit only kind-1 full frames, got {kinds:?}"
         );
         assert!(!frame_sizes.lock().unwrap().is_empty());
