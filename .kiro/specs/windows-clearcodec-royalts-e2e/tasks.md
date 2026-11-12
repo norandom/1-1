@@ -42,7 +42,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Boundary: CI contract_
   - _Requirements: 7.1,7.2,8.4,12.5,13.3,13.4_
 
-- [ ] 2. Dagger Actions foundation on the old protocol stack
+- [x] 2. Dagger Actions foundation on the old protocol stack
 - [x] 2.1 Move portable checks into Dagger
   - Reuse npm lockfile and existing Rust commands; provision Linux Tauri libraries once. Cache registry/git and target separately by OS/arch/toolchain/features; never import host target/node_modules.
   - Done: Dagger frontend and Rust checks emit tests/JUnit and fail on an intentionally failing fixture; doctests remain included.
