@@ -128,7 +128,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Boundary: Frame transport integration_
   - _Requirements: 4.4,9.4,9.5_
 
-- [ ] 5. Windows and controlled test sessions
+- [x] 5. Windows and controlled test sessions
 - [x] 5.1 Complete native Windows integration
   - Reuse keyring windows-native, platform cfg and existing wgpu; verify credential round-trip, Windows identity, GPU init/fallback and installer bootstrap. Deliver the explicit NSIS bundle-config change: WebView2 bootstrapper mode pinned in config (downloadBootstrapper default, offline behavior documented); CI fails if the configured mode regresses.
   - Done: Native Windows smoke stores/retrieves credentials, reaches usable canvas and produces a runnable installer with the bootstrapper mode pinned in bundle config.
