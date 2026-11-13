@@ -15,6 +15,14 @@ rust-version = "1.94"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Task 5.3 build gate (design "SessionActor changes"): synthetic (mock)
+# sessions, their loss/cancel controls, E2E fixture seeding and the
+# harness-owned storage namespaces exist ONLY in builds that explicitly opt
+# in. Never default: production builds reject mock-session requests
+# (Req 12.2/12.10) and register none of the debug commands.
+test-support = []
+
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }
 

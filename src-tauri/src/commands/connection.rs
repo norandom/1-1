@@ -110,6 +110,7 @@ pub async fn import_ssh_config(store: State<'_, ConnectionStore>) -> Result<usiz
             tags: vec!["ssh-import".to_string()],
             display_width: None,
             display_height: None,
+            mock: false,
             password: None,
         };
         store.create(input).await?;

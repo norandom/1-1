@@ -112,6 +112,39 @@ pub(crate) fn real_connect() -> ConnectFn {
     })
 }
 
+/// Task 5.3 (Req 12.2/12.10): evaluate a mock-session request at the connect
+/// command boundary.
+///
+/// `persisted_mock` is the saved connection's `mock` field; `requested_mock`
+/// is the command-level flag. Either selecting mock means a synthetic
+/// session request:
+///
+/// - **test-support builds**: `Ok(true)` admits the request; the actor runs
+///   the existing mock loop and never dials the connector (no network).
+/// - **production builds**: the request is rejected. The allow-path is not
+///   compiled in, so no environment variable or persisted field can bypass
+///   the gate (Req 12.10).
+///
+/// `Ok(false)` means no mock was requested: proceed as a real connection.
+pub fn admit_mock_session(
+    persisted_mock: bool,
+    requested_mock: Option<bool>,
+) -> Result<bool, String> {
+    if !persisted_mock && requested_mock != Some(true) {
+        return Ok(false);
+    }
+    #[cfg(feature = "test-support")]
+    {
+        // Test-support build: synthetic sessions are available by design.
+        Ok(true)
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        // Production build: reject persisted and command mock flags alike.
+        Err("Mock sessions are only available in test-support builds; this production build rejects mock-session requests".to_string())
+    }
+}
+
 /// Recorded frontend-event emissions for deterministic lifecycle tests.
 /// Entries carry the (paused-clock) instant so backoff timing is assertable.
 #[cfg(test)]
@@ -465,6 +498,31 @@ impl SessionActor {
         self.flush_clipboard_messages(active_stage, writer).await
     }
 
+    /// Task 5.3: a synthetic (mock) session executes only in test-support
+    /// builds. The feature check is defense in depth on top of the command
+    /// boundary rejection ([`admit_mock_session`]): a production build can
+    /// never select mock execution, even from a hand-edited connections.json.
+    fn mock_enabled(&self) -> bool {
+        self.config.mock && cfg!(feature = "test-support")
+    }
+
+    /// Resolve the next connection outcome. Synthetic sessions short-circuit
+    /// to the mock path WITHOUT invoking the connector seam (no network,
+    /// Req 12.2); real sessions dial exactly as before.
+    async fn connect_outcome(&self) -> ConnectionOutcome {
+        if self.mock_enabled() {
+            ConnectionOutcome::Failed("synthetic mock session (test-support build)".to_string())
+        } else {
+            (self.connect)(
+                self.config.clone(),
+                self.password.clone(),
+                self.width,
+                self.height,
+            )
+            .await
+        }
+    }
+
     /// Main actor loop.
     async fn run(mut self) {
         // Publish initial "Connecting" state
@@ -478,13 +536,7 @@ impl SessionActor {
             self.config.port
         );
 
-        let outcome = (self.connect)(
-            self.config.clone(),
-            self.password.clone(),
-            self.width,
-            self.height,
-        )
-        .await;
+        let outcome = self.connect_outcome().await;
 
         match outcome {
             ConnectionOutcome::RealSession {
@@ -807,6 +859,16 @@ impl SessionActor {
                                 return DisconnectReason::ConnectionLost;
                             }
                         }
+                        // Task 5.3: the loss control targets synthetic
+                        // sessions only; on a real session the (real)
+                        // transport alone decides connection loss.
+                        #[cfg(feature = "test-support")]
+                        Some(SessionCommand::DropConnection) => {
+                            log::warn!(
+                                "Session {} ignored test loss control on a real session",
+                                self.id
+                            );
+                        }
                     }
                 }
             }
@@ -844,14 +906,9 @@ impl SessionActor {
                 return;
             }
 
-            // Attempt real reconnection
-            let outcome = (self.connect)(
-                self.config.clone(),
-                self.password.clone(),
-                self.width,
-                self.height,
-            )
-            .await;
+            // Attempt real reconnection (synthetic sessions re-admit the
+            // mock loop without dialing — see connect_outcome).
+            let outcome = self.connect_outcome().await;
 
             match outcome {
                 ConnectionOutcome::RealSession {
@@ -954,6 +1011,17 @@ impl SessionActor {
                     self.state = SessionState::Disconnected;
                     self.publish_info();
                     return DisconnectReason::UserDisconnect;
+                }
+                // Task 5.3 loss control (test-support builds only, Req 12.2):
+                // the E2E harness forces a connection loss so the shared
+                // reconnect loop runs against the synthetic session.
+                #[cfg(feature = "test-support")]
+                Some(SessionCommand::DropConnection) => {
+                    log::info!(
+                        "Session {} synthetic connection dropped by test control",
+                        self.id
+                    );
+                    return DisconnectReason::ConnectionLost;
                 }
                 Some(SessionCommand::Resize { width, height }) => {
                     let (width, height) = normalize_remote_resolution(width, height);
@@ -1330,6 +1398,7 @@ mod tests {
             tags: vec![],
             display_width: Some(64),
             display_height: Some(64),
+            mock: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_connected_at: None,
@@ -2318,5 +2387,299 @@ mod tests {
             evs.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
         })
         .await;
+    }
+
+    // ---- Task 5.3: build-gated synthetic (mock) sessions (Req 12.2/12.7/12.10).
+    //
+    // The `test-support` cargo feature is the single build gate: synthetic
+    // sessions, their loss/cancel controls and the E2E seeding commands exist
+    // only in feature builds. Production builds (no feature) reject every
+    // mock-session request — persisted flag or command flag — and read no
+    // environment variables anywhere on that path (Req 12.10).
+
+    /// Production-path admission (compiled WITHOUT the test-support feature):
+    /// every mock-session request is rejected, and no environment variable can
+    /// bypass the gate because the allow-path is not compiled in (Req 12.10).
+    #[cfg(not(feature = "test-support"))]
+    mod production_mock_rejection {
+        use super::*;
+
+        /// Removes a test-set environment variable on scope exit, including
+        /// the panic path, so shared-process test runs never inherit it.
+        struct EnvVarGuard(&'static str);
+        impl EnvVarGuard {
+            fn set(key: &'static str, value: &str) -> Self {
+                unsafe { std::env::set_var(key, value) };
+                EnvVarGuard(key)
+            }
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(self.0) };
+            }
+        }
+
+        #[test]
+        fn test_production_rejects_persisted_mock_flag() {
+            let err = admit_mock_session(true, None)
+                .expect_err("production must reject persisted mock flags");
+            assert!(
+                err.to_lowercase().contains("mock"),
+                "rejection must name mock sessions: {err}"
+            );
+        }
+
+        #[test]
+        fn test_production_rejects_command_mock_flag() {
+            admit_mock_session(false, Some(true))
+                .expect_err("production must reject command mock flags");
+        }
+
+        #[test]
+        fn test_production_rejects_mock_even_with_test_env_vars_set() {
+            // Req 12.10: environment variables must not admit mock sessions.
+            let _a = EnvVarGuard::set(
+                "DRIFT_TEST_DATA_DIR",
+                "D:\\BuildArtifacts\\drift-rdp\\env-bypass-probe",
+            );
+            let _b = EnvVarGuard::set("DRIFT_TEST_CREDENTIAL_NAMESPACE", "env-bypass-probe");
+            let rejected = admit_mock_session(true, Some(true)).is_err();
+            assert!(
+                rejected,
+                "env vars must never admit mock sessions in production builds"
+            );
+        }
+
+        #[test]
+        fn test_production_admits_untagged_and_explicitly_real_requests() {
+            assert_eq!(admit_mock_session(false, None), Ok(false));
+            assert_eq!(admit_mock_session(false, Some(false)), Ok(false));
+        }
+    }
+
+    /// Synthetic-session behavior in test-support builds (Req 12.2): the
+    /// admitted session reuses the existing mock loop, Tokio time and actor
+    /// state — never dialing the connector seam — and the loss control drives
+    /// the shared reconnect/cancel path.
+    #[cfg(feature = "test-support")]
+    mod synthetic_sessions {
+        use super::*;
+        use crate::rdp::client::ConnectionOutcome;
+        use crate::rdp::frame_transport::PACKET_KIND_FULL_FRAME;
+
+        struct SyntheticSession {
+            id: String,
+            cmd_tx: mpsc::Sender<SessionCommand>,
+            events: Arc<RecordedEvents>,
+            events_rx: watch::Receiver<usize>,
+            frame_kinds: Arc<std::sync::Mutex<Vec<u8>>>,
+            connect_calls: Arc<AtomicUsize>,
+        }
+
+        fn synthetic_config(tag: &str) -> ConnectionConfig {
+            let mut config = test_config(tag);
+            config.mock = true;
+            config
+        }
+
+        /// Connector seam that records every call. A synthetic session must
+        /// NEVER invoke it (Req 12.2: synthetic frames, no live server, no
+        /// network at all).
+        fn counting_connect(calls: Arc<AtomicUsize>) -> ConnectFn {
+            Arc::new(move |_config, _password, _width, _height| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    ConnectionOutcome::Failed("connector dialed by a synthetic session".to_string())
+                })
+            })
+        }
+
+        async fn create_synthetic(
+            manager: &SessionManager,
+            tag: &str,
+            auto_reconnect: bool,
+        ) -> SyntheticSession {
+            let (events, events_rx) = RecordedEvents::new();
+            let frame_kinds = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+            let connect_calls = Arc::new(AtomicUsize::new(0));
+            let kinds_sink = Arc::clone(&frame_kinds);
+            let frame_channel = tauri::ipc::Channel::new(move |response| {
+                if let tauri::ipc::InvokeResponseBody::Raw(bytes) = &response
+                    && let Some(kind) = bytes.first()
+                {
+                    kinds_sink.lock().unwrap().push(*kind);
+                }
+                Ok(())
+            });
+            let id = manager
+                .create_session_with_transport(
+                    synthetic_config(tag),
+                    None,
+                    frame_channel,
+                    SessionEventSink::recorded(Arc::clone(&events)),
+                    auto_reconnect,
+                    None,
+                    counting_connect(Arc::clone(&connect_calls)),
+                )
+                .await
+                .expect("synthetic session creation should succeed");
+            let cmd_tx = manager
+                .get_cmd_sender(&id)
+                .await
+                .expect("session handle exists right after creation");
+            SyntheticSession {
+                id,
+                cmd_tx,
+                events,
+                events_rx,
+                frame_kinds,
+                connect_calls,
+            }
+        }
+
+        /// Req 12.2: an admitted synthetic session renders kind-1 synthetic
+        /// frames through the existing mock loop without a live RDP server —
+        /// the connector seam is never dialed.
+        #[tokio::test(start_paused = true)]
+        async fn test_synthetic_session_reuses_mock_loop_frames_without_dialing() {
+            // Boundary admission in test-support builds: the persisted flag
+            // and the command-level flag both select synthetic execution.
+            assert_eq!(admit_mock_session(true, None), Ok(true));
+            assert_eq!(admit_mock_session(false, Some(true)), Ok(true));
+            assert_eq!(admit_mock_session(false, None), Ok(false));
+            assert_eq!(admit_mock_session(false, Some(false)), Ok(false));
+
+            let manager = SessionManager::new();
+            let session = create_synthetic(&manager, "synth-frames", true).await;
+            let mut rx = session.events_rx.clone();
+            let kinds = Arc::clone(&session.frame_kinds);
+
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && !kinds.lock().unwrap().is_empty()
+            })
+            .await;
+
+            // Synthetic frames are kind-1 full frames on the IPC transport.
+            let recorded_kinds = kinds.lock().unwrap().clone();
+            assert!(!recorded_kinds.is_empty());
+            assert!(
+                recorded_kinds.iter().all(|k| *k == PACKET_KIND_FULL_FRAME),
+                "synthetic frames must be kind-1 full frames, got {recorded_kinds:?}"
+            );
+
+            // The connector seam was never invoked: no network (Req 12.2).
+            assert_eq!(session.connect_calls.load(Ordering::SeqCst), 0);
+
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .unwrap();
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+            assert_eq!(
+                session.connect_calls.load(Ordering::SeqCst),
+                0,
+                "disconnect also never dials"
+            );
+        }
+
+        /// Task 5.3 loss control: the test-only DropConnection command makes
+        /// the synthetic session take the existing ConnectionLost → reconnect
+        /// path, which re-admits the mock loop — still without dialing.
+        #[tokio::test(start_paused = true)]
+        async fn test_synthetic_loss_control_reconnects_without_network() {
+            let manager = SessionManager::new();
+            let session = create_synthetic(&manager, "synth-recon", true).await;
+            let mut rx = session.events_rx.clone();
+            let kinds = Arc::clone(&session.frame_kinds);
+
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && !kinds.lock().unwrap().is_empty()
+            })
+            .await;
+            let frames_before = kinds.lock().unwrap().len();
+
+            session
+                .cmd_tx
+                .send(SessionCommand::DropConnection)
+                .await
+                .expect("loss control accepted");
+
+            // Reconnecting (backoff) … then connected again with a fresh
+            // synthetic frame — the shared reconnect loop drives it.
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events
+                    .iter()
+                    .any(|(_, v)| status_string(v) == "reconnecting")
+                    && events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && kinds.lock().unwrap().len() > frames_before
+            })
+            .await;
+
+            // Reconnects stay synthetic: the connector seam is still untouched.
+            assert_eq!(session.connect_calls.load(Ordering::SeqCst), 0);
+        }
+
+        /// Task 5.3 cancel control: a Disconnect during the reconnect backoff
+        /// stops the synthetic session — reusing the actor's existing
+        /// cancel-on-disconnect behavior (characterized in task 3.2).
+        #[tokio::test(start_paused = true)]
+        async fn test_synthetic_loss_then_cancel_during_backoff_stops_reconnecting() {
+            let manager = SessionManager::new();
+            let session = create_synthetic(&manager, "synth-cancel", true).await;
+            let mut rx = session.events_rx.clone();
+            let kinds = Arc::clone(&session.frame_kinds);
+
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && !kinds.lock().unwrap().is_empty()
+            })
+            .await;
+
+            session
+                .cmd_tx
+                .send(SessionCommand::DropConnection)
+                .await
+                .expect("loss control accepted");
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events
+                    .iter()
+                    .any(|(_, v)| status_string(v) == "reconnecting")
+            })
+            .await;
+
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .expect("cancel accepted");
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+
+            assert_eq!(
+                session.connect_calls.load(Ordering::SeqCst),
+                0,
+                "cancel also never dials"
+            );
+            assert_eq!(
+                statuses_of(&info_events(&session.id, &session.events)),
+                vec![
+                    "connecting".to_string(),
+                    "connected".to_string(),
+                    "reconnecting".to_string(),
+                    "disconnected".to_string(), // cancel during backoff
+                    "disconnected".to_string(), // actor tail publish
+                ],
+                "loss → cancel drives the shared reconnect state machine"
+            );
+            let _ = kinds;
+        }
     }
 }

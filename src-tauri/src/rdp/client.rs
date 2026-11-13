@@ -32,6 +32,12 @@ pub enum SessionCommand {
         text: String,
     },
     Disconnect,
+    /// Task 5.3 (Req 12.2/12.10): force a mock-session connection loss so
+    /// E2E can drive the shared reconnect loop. Exists ONLY in
+    /// `test-support` builds (compiled out of production); a logged no-op on
+    /// real sessions.
+    #[cfg(feature = "test-support")]
+    DropConnection,
 }
 
 /// RDP connection error.
@@ -581,6 +587,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             last_connected_at: None,
+            mock: false,
         };
 
         let connector = build_connector_config(&config, "pw", 1280, 720);

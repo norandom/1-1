@@ -29,6 +29,13 @@ pub struct ConnectionConfig {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub last_connected_at: Option<DateTime<Utc>>,
+    /// Task 5.3 (Req 12.2/12.10): marks a synthetic (mock) saved connection.
+    /// Data only — production builds reject mock-session requests at the
+    /// connect boundary (`rdp::session::admit_mock_session`); test-support
+    /// builds execute it as a no-network synthetic session. The v2 library
+    /// model keeps this field (design "LibraryStore v2", ConnectionConfigV2).
+    #[serde(default)]
+    pub mock: bool,
 }
 
 /// Input type for creating/updating connections (no id or timestamps).
@@ -51,6 +58,9 @@ pub struct ConnectionInput {
     pub display_width: Option<u32>,
     #[serde(default)]
     pub display_height: Option<u32>,
+    /// Task 5.3: persisted mock flag (see `ConnectionConfig::mock`).
+    #[serde(default)]
+    pub mock: bool,
     #[serde(default)]
     pub password: Option<String>,
 }
@@ -121,6 +131,7 @@ impl ConnectionStore {
             tags: input.tags,
             display_width: input.display_width,
             display_height: input.display_height,
+            mock: input.mock,
             created_at: now,
             updated_at: now,
             last_connected_at: None,
@@ -149,6 +160,7 @@ impl ConnectionStore {
             existing.tags = input.tags;
             existing.display_width = input.display_width;
             existing.display_height = input.display_height;
+            existing.mock = input.mock;
             existing.updated_at = Utc::now();
             let updated = existing.clone();
             drop(conns);
@@ -266,6 +278,7 @@ pub fn parse_rdp_file(path: &str) -> Result<ConnectionInput, String> {
         tags: vec!["imported".to_string()],
         display_width: width,
         display_height: height,
+        mock: false,
         password: None,
     })
 }
@@ -345,6 +358,7 @@ mod tests {
             tags: vec![],
             display_width: None,
             display_height: None,
+            mock: false,
             password: None,
         };
         store.create(input).await.unwrap();
@@ -367,6 +381,7 @@ mod tests {
             tags: vec!["tag1".into()],
             display_width: Some(1920),
             display_height: Some(1080),
+            mock: false,
             password: None,
         };
         let created = store.create(input).await.unwrap();
@@ -393,6 +408,7 @@ mod tests {
             tags: vec![],
             display_width: None,
             display_height: None,
+            mock: false,
             password: None,
         };
         let created = store.create(input).await.unwrap();
@@ -406,6 +422,7 @@ mod tests {
             tags: vec![],
             display_width: None,
             display_height: None,
+            mock: false,
             password: None,
         };
         let updated = store
@@ -433,6 +450,7 @@ mod tests {
             tags: vec![],
             display_width: None,
             display_height: None,
+            mock: false,
             password: None,
         };
         let created = store.create(input).await.unwrap();
@@ -457,6 +475,7 @@ mod tests {
             tags: vec![],
             display_width: None,
             display_height: None,
+            mock: false,
             password: None,
         }
     }
@@ -650,5 +669,63 @@ mod tests {
         let result = parse_rdp_file(f.path().to_str().unwrap()).unwrap();
         assert_eq!(result.host, "fe80:", "current (defective) host split");
         assert_eq!(result.port, 1, "current (defective) port parse");
+    }
+
+    // ---- Task 5.3: persisted mock flag (Req 12.2/12.10).
+    //
+    // The `mock` field marks a saved connection as a synthetic (mock) session
+    // target. It is data only: production builds reject mock-session requests
+    // at the connect boundary (see rdp::session::admit_mock_session); the
+    // field exists so test-support builds — and later the v2 library model —
+    // can persist it (design "LibraryStore v2", ConnectionConfigV2.mock).
+
+    /// The mock flag round-trips through save/reload and update; legacy files
+    /// without the key load with mock=false (serde default).
+    #[tokio::test]
+    async fn test_mock_flag_round_trips_and_legacy_files_default_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path().to_path_buf());
+
+        let mut input = sample_input("mock flag", "mock-connection.invalid");
+        input.mock = true;
+        let created = store.create(input).await.unwrap();
+        assert!(created.mock, "created connection carries the mock flag");
+
+        // Reload from disk: the flag is persisted, not just in-memory.
+        let reloaded = ConnectionStore::new(dir.path().to_path_buf());
+        assert!(
+            reloaded.get(&created.id).await.unwrap().mock,
+            "persisted mock flag survives reload"
+        );
+
+        // Update is a full replacement: clearing the flag persists too.
+        let cleared = sample_input("mock flag", "mock-connection.invalid");
+        let updated = store
+            .update(&created.id, cleared)
+            .await
+            .unwrap()
+            .expect("connection exists");
+        assert!(!updated.mock, "update replaces the mock flag");
+        assert!(
+            !ConnectionStore::new(dir.path().to_path_buf())
+                .get(&created.id)
+                .await
+                .unwrap()
+                .mock,
+            "cleared mock flag persists"
+        );
+
+        // A legacy file without the key still loads, defaulting to false.
+        let legacy_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            legacy_dir.path().join("connections.json"),
+            r#"[{"id":"legacy","name":"Legacy","host":"legacy.invalid","port":3389,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}]"#,
+        )
+        .unwrap();
+        let legacy = ConnectionStore::new(legacy_dir.path().to_path_buf());
+        assert!(
+            !legacy.get("legacy").await.unwrap().mock,
+            "legacy files default mock=false"
+        );
     }
 }

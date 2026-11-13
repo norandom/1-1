@@ -353,6 +353,7 @@ pub fn synthetic_connection_result(width: u16, height: u16) -> ConnectionResult 
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         last_connected_at: None,
+        mock: false,
     };
     let connector_config =
         crate::rdp::client::build_connector_config(&config, "", width as u32, height as u32);
@@ -976,6 +977,7 @@ async fn smoke_host(
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         last_connected_at: None,
+        mock: false,
     };
 
     let mut report = HostSmokeReport {

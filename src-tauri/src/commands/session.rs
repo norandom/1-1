@@ -5,7 +5,7 @@ use tauri::{
 };
 
 use crate::rdp::client::SessionCommand;
-use crate::rdp::session::{MAX_SESSIONS, SessionInfo, SessionManager};
+use crate::rdp::session::{MAX_SESSIONS, SessionInfo, SessionManager, admit_mock_session};
 use crate::renderer::shared_frame::SharedFrame;
 use crate::store::connections::ConnectionStore;
 use crate::store::credentials::CredentialStore;
@@ -16,6 +16,9 @@ use crate::store::settings::SettingsStore;
 pub async fn connect(
     connection_id: String,
     frame_channel: Channel<InvokeResponseBody>,
+    // Task 5.3 (Req 12.2/12.10): optional command-level mock flag. Absent
+    // or `false` is a normal real connection request.
+    mock: Option<bool>,
     app: AppHandle,
     conn_store: State<'_, ConnectionStore>,
     cred_store: State<'_, CredentialStore>,
@@ -37,6 +40,14 @@ pub async fn connect(
         .get(&connection_id)
         .await
         .ok_or_else(|| format!("Connection '{}' not found", connection_id))?;
+
+    // Task 5.3 mock-session admission at the command boundary: production
+    // builds reject any mock flag — persisted or command-level — regardless
+    // of environment variables; test-support builds admit the request and
+    // the actor runs the synthetic no-network session (Req 12.2/12.10).
+    let mock_session = admit_mock_session(config.mock, mock)?;
+    let mut config = config;
+    config.mock = mock_session;
 
     // Look up the password from the credential store
     let password = match cred_store.get_password(&connection_id) {

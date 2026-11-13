@@ -2,26 +2,37 @@ use keyring::Entry;
 
 const SERVICE_NAME: &str = "com.rdpclient.app";
 
-pub struct CredentialStore;
+/// Task 5.3 (Req 12.7): reserved prefix for harness-owned credential
+/// namespaces in test-support builds. A namespaced service can never equal
+/// the production [`SERVICE_NAME`].
+#[cfg(feature = "test-support")]
+const TEST_SERVICE_PREFIX: &str = "com.rdpclient.app.test.";
+
+pub struct CredentialStore {
+    service: String,
+}
 
 impl CredentialStore {
     pub fn new() -> Self {
-        Self
+        Self {
+            service: SERVICE_NAME.to_string(),
+        }
+    }
+
+    fn entry(&self, connection_id: &str) -> Result<Entry, String> {
+        Entry::new(&self.service, connection_id)
+            .map_err(|e| format!("Failed to create keyring entry: {}", e))
     }
 
     pub fn store_password(&self, connection_id: &str, password: &str) -> Result<(), String> {
-        let entry = Entry::new(SERVICE_NAME, connection_id)
-            .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
-        entry
+        self.entry(connection_id)?
             .set_password(password)
             .map_err(|e| format!("Failed to store password in keychain: {}", e))?;
         Ok(())
     }
 
     pub fn get_password(&self, connection_id: &str) -> Result<Option<String>, String> {
-        let entry = Entry::new(SERVICE_NAME, connection_id)
-            .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
-        match entry.get_password() {
+        match self.entry(connection_id)?.get_password() {
             Ok(password) => Ok(Some(password)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(format!("Failed to retrieve password from keychain: {}", e)),
@@ -29,13 +40,55 @@ impl CredentialStore {
     }
 
     pub fn delete_password(&self, connection_id: &str) -> Result<(), String> {
-        let entry = Entry::new(SERVICE_NAME, connection_id)
-            .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
-        match entry.delete_credential() {
+        match self.entry(connection_id)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()), // Already gone, that's fine
             Err(e) => Err(format!("Failed to delete password from keychain: {}", e)),
         }
+    }
+
+    /// Task 5.3 (Req 12.7): a harness-owned namespace. Exists only in
+    /// test-support builds; the service can never collide with user data.
+    #[cfg(feature = "test-support")]
+    pub fn for_namespace(namespace: &str) -> Self {
+        Self {
+            service: format!("{TEST_SERVICE_PREFIX}{namespace}"),
+        }
+    }
+
+    /// The keyring service this store reads/writes. Test-support builds only.
+    #[cfg(feature = "test-support")]
+    pub fn service_name(&self) -> &str {
+        &self.service
+    }
+
+    /// Whether scoped cleanup is allowed on this store (harness namespace
+    /// only, never the production service). Test-support builds only.
+    #[cfg(feature = "test-support")]
+    pub fn is_test_namespaced(&self) -> bool {
+        self.service.starts_with(TEST_SERVICE_PREFIX)
+    }
+
+    /// Task 5.3 (Req 12.7): delete only this harness namespace's entries for
+    /// the given connection ids — never user data. Refuses to run against a
+    /// production (non-namespaced) store. Returns how many entries actually
+    /// existed and were removed.
+    #[cfg(feature = "test-support")]
+    pub fn delete_test_credentials(&self, connection_ids: &[String]) -> Result<usize, String> {
+        if !self.is_test_namespaced() {
+            return Err(
+                "Refusing to clean credentials: this store is not a harness-namespaced (test-support) store"
+                    .to_string(),
+            );
+        }
+        let mut removed = 0usize;
+        for id in connection_ids {
+            if self.get_password(id)?.is_some() {
+                self.delete_password(id)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 }
 
@@ -441,5 +494,104 @@ mod tests {
         store.delete_password(id).unwrap();
         let pw = store.get_password(id).unwrap();
         assert_eq!(pw, None);
+    }
+
+    // ---- Task 5.3: harness-owned credential namespace (Req 12.7).
+    //
+    // The E2E harness must isolate credential entries from user data and
+    // clean up only its own resources. Test-support builds can name a
+    // CredentialStore with a namespace that can never equal the production
+    // service; scoped cleanup refuses to run against a production store.
+
+    #[cfg(feature = "test-support")]
+    mod test_support_namespace_isolation {
+        use super::*;
+
+        #[test]
+        fn test_namespace_store_never_reuses_the_production_service_name() {
+            let namespaced = CredentialStore::for_namespace("e2e-run-1");
+            assert_ne!(
+                namespaced.service_name(),
+                SERVICE_NAME,
+                "harness namespace must never equal the production service"
+            );
+            assert!(
+                namespaced
+                    .service_name()
+                    .starts_with(&format!("{SERVICE_NAME}.test.")),
+                "harness service stays under the reserved test prefix: {}",
+                namespaced.service_name()
+            );
+            assert_eq!(CredentialStore::new().service_name(), SERVICE_NAME);
+            assert!(
+                !CredentialStore::new().is_test_namespaced(),
+                "production store is never cleanup-eligible"
+            );
+        }
+
+        #[test]
+        fn test_namespaced_credentials_do_not_collide_with_production_entries() {
+            let (_lock, _guard) =
+                install_scripted(Arc::new(Mutex::new(Vec::new())), false, None, None, None);
+            let production = CredentialStore::new();
+            let harness = CredentialStore::for_namespace("e2e-run-1");
+
+            production.store_password("prod-conn", "prod-pw").unwrap();
+            harness.store_password("e2e-conn", "e2e-pw").unwrap();
+
+            // Namespaces are disjoint: each store sees only its own entries.
+            assert_eq!(production.get_password("e2e-conn").unwrap(), None);
+            assert_eq!(harness.get_password("prod-conn").unwrap(), None);
+            assert_eq!(
+                production.get_password("prod-conn").unwrap(),
+                Some("prod-pw".to_string())
+            );
+            assert_eq!(
+                harness.get_password("e2e-conn").unwrap(),
+                Some("e2e-pw".to_string())
+            );
+        }
+
+        #[test]
+        fn test_scoped_cleanup_deletes_only_harness_namespaced_entries() {
+            let (_lock, _guard) =
+                install_scripted(Arc::new(Mutex::new(Vec::new())), false, None, None, None);
+            let production = CredentialStore::new();
+            let harness = CredentialStore::for_namespace("e2e-run-2");
+
+            production.store_password("prod-keep", "prod-pw").unwrap();
+            harness.store_password("e2e-a", "a").unwrap();
+            harness.store_password("e2e-b", "b").unwrap();
+
+            // Cleanup refuses to run against a non-namespaced store…
+            assert!(
+                production
+                    .delete_test_credentials(&["prod-keep".to_string()])
+                    .is_err(),
+                "scoped cleanup must refuse production stores"
+            );
+            // …and the refusal leaves production data intact.
+            assert_eq!(
+                production.get_password("prod-keep").unwrap(),
+                Some("prod-pw".to_string())
+            );
+
+            // Scoped cleanup removes exactly the harness's own entries.
+            let removed = harness
+                .delete_test_credentials(&[
+                    "e2e-a".to_string(),
+                    "e2e-b".to_string(),
+                    "e2e-missing".to_string(),
+                ])
+                .unwrap();
+            assert_eq!(removed, 2, "only entries that existed are counted");
+            assert_eq!(harness.get_password("e2e-a").unwrap(), None);
+            assert_eq!(harness.get_password("e2e-b").unwrap(), None);
+            assert_eq!(
+                production.get_password("prod-keep").unwrap(),
+                Some("prod-pw".to_string()),
+                "cleanup never touches production credentials"
+            );
+        }
     }
 }

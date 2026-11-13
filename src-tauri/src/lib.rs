@@ -1,4 +1,9 @@
 mod commands;
+/// Harness-owned storage isolation (task 5.3): compiled ONLY in
+/// `test-support` builds; the DRIFT_TEST_* environment variables do not
+/// exist in production builds (Req 12.10).
+#[cfg(feature = "test-support")]
+mod harness;
 mod rdp;
 mod renderer;
 mod store;
@@ -11,7 +16,6 @@ use rdp::session::SessionManager;
 use renderer::gpu::GpuRenderer;
 use renderer::shared_frame::SharedFrame;
 use store::connections::ConnectionStore;
-use store::credentials::CredentialStore;
 use store::settings::SettingsStore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,7 +36,19 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // Resolve the app data directory for persistent storage
+            // Resolve the app data directory for persistent storage.
+            //
+            // Task 5.3 (Req 12.7): test-support builds honor a harness-owned
+            // data-dir override so E2E connection files/settings never touch
+            // user data. Production builds resolve the real app-data dir
+            // only — the environment variable does not exist there (Req 12.10).
+            #[cfg(feature = "test-support")]
+            let data_dir = harness::harness_data_dir().unwrap_or_else(|| {
+                app.path()
+                    .app_data_dir()
+                    .expect("Failed to resolve app data directory")
+            });
+            #[cfg(not(feature = "test-support"))]
             let data_dir = app
                 .path()
                 .app_data_dir()
@@ -47,7 +63,20 @@ pub fn run() {
             let connection_store = ConnectionStore::new(data_dir.clone());
             let settings_store = SettingsStore::new(data_dir);
             let session_manager = SessionManager::new();
-            let credential_store = CredentialStore::new();
+            // Task 5.3 (Req 12.7): test-support builds may redirect
+            // credentials into a harness-owned namespace; production builds
+            // always use the production keyring service (the environment
+            // variable is compiled out there, Req 12.10).
+            let credential_store = {
+                #[cfg(feature = "test-support")]
+                {
+                    harness::harness_credential_store().unwrap_or_default()
+                }
+                #[cfg(not(feature = "test-support"))]
+                {
+                    store::credentials::CredentialStore::new()
+                }
+            };
             let shared_frame = SharedFrame::new(1920, 1080);
 
             // Register managed state
@@ -151,6 +180,15 @@ pub fn run() {
             // Settings commands
             commands::settings::get_settings,
             commands::settings::update_settings,
+            // Task 5.3 (Req 12.2/12.7/12.10): E2E test-support commands.
+            // The cfg attributes compile these match arms out of production
+            // builds, so the commands are not registered there at all.
+            #[cfg(feature = "test-support")]
+            commands::test_support::debug_seed_mock_connections,
+            #[cfg(feature = "test-support")]
+            commands::test_support::debug_drop_mock_connection,
+            #[cfg(feature = "test-support")]
+            commands::test_support::debug_cleanup_test_credentials,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

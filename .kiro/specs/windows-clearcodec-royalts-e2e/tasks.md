@@ -139,7 +139,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Windows/Linux Ctrl and macOS Cmd hints work; persisted settings and fresh defaults match.
   - _Boundary: Settings/platform UI_
   - _Requirements: 5.1,5.2,5.4,8.5_
-- [ ] 5.3 Gate synthetic sessions behind test support
+- [x] 5.3 Gate synthetic sessions behind test support
   - Reuse current mock loop, Tokio time and actor state; add loss/cancel controls and build-gated fixture seeding for synthetic saved connections in test builds, with no network. Harness owns isolated app-data/credential namespaces and scoped cleanup; production cannot register or call seeding.
   - Done: Tests cover frames and reconnect/cancel; production rejects persisted or command mock flags.
   - _Boundary: Test session boundary_
