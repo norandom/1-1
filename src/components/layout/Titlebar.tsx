@@ -1,21 +1,9 @@
-import { useEffect, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { platform } from '@tauri-apps/plugin-os';
 import { Minus, Square, X } from 'lucide-react';
+import { usePlatformLabel } from '../../hooks/usePlatformLabel';
 
 export function Titlebar() {
-  const [isMac, setIsMac] = useState(true);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const os = platform();
-        setIsMac(os === 'macos');
-      } catch {
-        setIsMac(navigator.userAgent.includes('Mac'));
-      }
-    })();
-  }, []);
+  const { isMac } = usePlatformLabel();
 
   const appWindow = getCurrentWindow();
 

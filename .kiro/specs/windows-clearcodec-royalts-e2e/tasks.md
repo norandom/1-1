@@ -134,7 +134,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Native Windows smoke stores/retrieves credentials, reaches usable canvas and produces a runnable installer with the bootstrapper mode pinned in bundle config.
   - _Boundary: Windows integration_
   - _Requirements: 8.1,8.2,8.3,8.4,8.6_
-- [ ] 5.2 Normalize shortcut labels and settings defaults
+- [x] 5.2 Normalize shortcut labels and settings defaults
   - Reuse existing platform helper and serde defaults; pin frontend/backend default parity rather than introduce code generation.
   - Done: Windows/Linux Ctrl and macOS Cmd hints work; persisted settings and fresh defaults match.
   - _Boundary: Settings/platform UI_

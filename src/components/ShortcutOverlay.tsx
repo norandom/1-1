@@ -9,7 +9,8 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { SHORTCUT_SECTIONS } from '../lib/shortcuts';
+import { SHORTCUT_SECTIONS, resolveShortcutKeys } from '../lib/shortcuts';
+import { usePlatformLabel } from '../hooks/usePlatformLabel';
 
 interface Props {
   onClose: () => void;
@@ -28,6 +29,9 @@ function KeyCap({ children }: { children: string }) {
 }
 
 export function ShortcutOverlay({ onClose }: Props) {
+  // Req 8.5: mod chords display ⌘ on macOS and Ctrl on Windows/Linux.
+  const { modLabel } = usePlatformLabel();
+
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="sm:max-w-md">
@@ -57,7 +61,7 @@ export function ShortcutOverlay({ onClose }: Props) {
                         {shortcut.description}
                       </span>
                       <div className="flex items-center gap-1">
-                        {shortcut.keys.map((key, i) => (
+                        {resolveShortcutKeys(shortcut.keys, modLabel).map((key, i) => (
                           <KeyCap key={i}>{key}</KeyCap>
                         ))}
                       </div>

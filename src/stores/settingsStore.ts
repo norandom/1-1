@@ -19,7 +19,10 @@ export const defaultSettings: AppSettings = {
   colorDepth: 32,
   quality: 80,
   reconnectTimeout: 5000,
-  connectionTimeout: 10000,
+  // Req 5.2 (D2 fixed, task 5.2): matches backend
+  // default_connection_timeout() in src-tauri/src/store/settings.rs;
+  // parity pinned in settingsStore.test.ts (BACKEND_DEFAULTS).
+  connectionTimeout: 30000,
 };
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({

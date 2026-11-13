@@ -76,7 +76,7 @@ export default function App() {
         {/* Quick Connect Modal */}
         <QuickConnect />
 
-        {/* New Connection Modal (from Cmd+N) */}
+        {/* New Connection Modal (from Cmd/Ctrl+N) */}
         <AnimatePresence>
           {showNewConnection && (
             <ConnectionForm
@@ -86,7 +86,7 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Shortcut Overlay (Cmd+?) */}
+        {/* Shortcut Overlay (Cmd/Ctrl+?) */}
         <AnimatePresence>
           {showShortcuts && (
             <ShortcutOverlay onClose={() => setShowShortcuts(false)} />

@@ -9,8 +9,24 @@ vi.mock('../../lib/tauri', () => ({
 import { useSettingsStore, defaultSettings } from '../settingsStore';
 import * as tauri from '../../lib/tauri';
 
-/** Backend default for connection_timeout (store/settings.rs). */
-const BACKEND_CONNECTION_TIMEOUT_DEFAULT_MS = 30000;
+/**
+ * Backend serde defaults (src-tauri/src/store/settings.rs `default_*` fns,
+ * pinned by `test_settings_defaults_current_values`). Req 5.2: frontend and
+ * backend defaults shall agree for every setting — both literals move
+ * together; there is deliberately no code generation between them.
+ */
+const BACKEND_DEFAULTS = {
+  theme: 'system',
+  defaultPort: 3389,
+  autoReconnect: true,
+  showPerformanceHud: false,
+  sidebarCollapsed: false,
+  defaultResolution: '1920x1080',
+  colorDepth: 32,
+  quality: 80,
+  reconnectTimeout: 5000,
+  connectionTimeout: 30000,
+} as const;
 
 describe('defaultSettings', () => {
   it('pins the ten frontend defaults', () => {
@@ -24,18 +40,16 @@ describe('defaultSettings', () => {
       colorDepth: 32,
       quality: 80,
       reconnectTimeout: 5000,
-      connectionTimeout: 10000,
+      connectionTimeout: 30000,
     });
   });
 
-  it('disagrees with the backend connectionTimeout default_defect_d2', () => {
-    // D2 (research.md): frontend default 10000 ms vs backend
-    // default_connection_timeout() = 30000 ms in src-tauri/src/store/settings.rs.
-    // Every other default agrees. Pinned as a defect; task 5.2 fixes parity.
-    expect(defaultSettings.connectionTimeout).toBe(10000);
-    expect(defaultSettings.connectionTimeout).not.toBe(
-      BACKEND_CONNECTION_TIMEOUT_DEFAULT_MS
-    );
+  it('agrees with the backend serde defaults for every setting (D2 fixed)', () => {
+    // D2 (research.md): connectionTimeout used to diverge (TS 10000 vs Rust
+    // default_connection_timeout() = 30000). Task 5.2 restored parity; this
+    // is the Req 5.2 default-parity pin mirroring the Rust-side literal.
+    expect(defaultSettings).toEqual(BACKEND_DEFAULTS);
+    expect(defaultSettings.connectionTimeout).toBe(BACKEND_DEFAULTS.connectionTimeout);
   });
 });
 

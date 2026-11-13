@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { useToastStore } from '../../stores/toastStore';
+import { usePlatformLabel } from '../../hooks/usePlatformLabel';
 import { ConnectionCard } from './ConnectionCard';
 import { ConnectionForm } from './ConnectionForm';
 import type { ConnectionConfig } from '../../types';
@@ -40,6 +41,8 @@ export function ConnectionGrid() {
   const addToast = useToastStore((s) => s.addToast);
   const [showForm, setShowForm] = useState(false);
   const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
+  // Req 8.5: the search hint labels the platform modifier (Ctrl/⌘).
+  const { modLabel } = usePlatformLabel();
 
   useEffect(() => {
     fetchConnections();
@@ -140,7 +143,7 @@ export function ConnectionGrid() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search connections... (Cmd+K for quick connect)"
+            placeholder={`Search connections... (${modLabel}+K for quick connect)`}
             className="pl-9"
           />
         </div>

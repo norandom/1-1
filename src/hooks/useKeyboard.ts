@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
+import { matchKeyboardShortcut } from '../lib/shortcuts';
 
 interface KeyboardShortcuts {
   onNewConnection?: () => void;
@@ -12,34 +13,27 @@ export function useKeyboard({ onNewConnection, onShowShortcuts }: KeyboardShortc
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      const isMod = e.metaKey || e.ctrlKey;
-
-      // Cmd/Ctrl + K = Quick Connect
-      if (isMod && e.key === 'k') {
-        e.preventDefault();
-        toggleQuickConnect();
-        return;
-      }
-
-      // Cmd/Ctrl + N = New Connection
-      if (isMod && e.key === 'n') {
-        e.preventDefault();
-        onNewConnection?.();
-        return;
-      }
-
-      // Ctrl + Shift + P = Performance HUD
-      if (e.ctrlKey && e.shiftKey && e.key === 'P') {
-        e.preventDefault();
-        togglePerformanceHud();
-        return;
-      }
-
-      // Cmd/Ctrl + ? (Cmd+Shift+/) = Shortcut help
-      if (isMod && e.shiftKey && e.key === '?') {
-        e.preventDefault();
-        onShowShortcuts?.();
-        return;
+      // Ctrl and Cmd respond identically (Req 8.5): the matcher treats
+      // metaKey and ctrlKey as the same platform modifier.
+      switch (matchKeyboardShortcut(e)) {
+        case 'quick-connect':
+          e.preventDefault();
+          toggleQuickConnect();
+          return;
+        case 'new-connection':
+          e.preventDefault();
+          onNewConnection?.();
+          return;
+        case 'performance-hud':
+          e.preventDefault();
+          togglePerformanceHud();
+          return;
+        case 'shortcut-help':
+          e.preventDefault();
+          onShowShortcuts?.();
+          return;
+        default:
+          return;
       }
     }
 
