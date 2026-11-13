@@ -144,7 +144,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Tests cover frames and reconnect/cancel; production rejects persisted or command mock flags.
   - _Boundary: Test session boundary_
   - _Requirements: 12.2,12.7,12.10_
-- [ ] 5.4 Add build-gated frame observations
+- [x] 5.4 Add build-gated frame observations
   - Count actual emitted packet kinds; register spy/control commands only in test builds.
   - Done: Mock E2E sees bitmap packets; production build lacks test events/commands even with environment flags.
   - _Boundary: Test instrumentation_

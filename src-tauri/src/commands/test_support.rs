@@ -15,6 +15,7 @@
 use tauri::State;
 
 use crate::rdp::client::SessionCommand;
+use crate::rdp::frame_spy;
 use crate::rdp::session::SessionManager;
 use crate::store::connections::{ConnectionConfig, ConnectionInput, ConnectionStore};
 use crate::store::credentials::CredentialStore;
@@ -99,6 +100,27 @@ pub fn debug_cleanup_test_credentials(
     cred_store.delete_test_credentials(&connection_ids)
 }
 
+/// E2E frame spy (task 5.4, Req 12.4): cumulative counts of actually
+/// emitted packet kinds per session. `None` snapshots every counted
+/// session; a specific id scopes to it. Empty while the spy is inactive or
+/// nothing was recorded yet — the spy itself is activated by the
+/// `frame_spy::FRAME_SPY_ENV` env var inside test-support builds only
+/// (Req 12.10).
+#[tauri::command]
+pub fn debug_frame_spy_snapshot(session_id: Option<String>) -> Vec<frame_spy::FrameSpySnapshot> {
+    match session_id.as_deref() {
+        Some(id) => frame_spy::snapshot(id).into_iter().collect(),
+        None => frame_spy::snapshot_all(),
+    }
+}
+
+/// E2E frame spy reset (task 5.4): clear every session's spy counters so
+/// test phases start from a known tally.
+#[tauri::command]
+pub fn debug_frame_spy_reset() {
+    frame_spy::reset();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +177,74 @@ mod tests {
         assert!(
             seed_mock_connections(&store, 101, None).await.is_err(),
             "runaway seeding is rejected"
+        );
+    }
+
+    // ---- Task 5.4 (Req 12.4/12.10): frame-spy command surface. ----
+
+    /// Removes the variable on scope exit (including panics) so
+    /// shared-process test runs never inherit spy settings.
+    struct EnvVarGuard(&'static str);
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            unsafe { std::env::set_var(key, value) };
+            EnvVarGuard(key)
+        }
+        fn unset(key: &'static str) -> Self {
+            unsafe { std::env::remove_var(key) };
+            EnvVarGuard(key)
+        }
+    }
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(self.0) };
+        }
+    }
+
+    #[test]
+    fn test_frame_spy_snapshot_command_scopes_and_resets() {
+        let _g = EnvVarGuard::set(frame_spy::FRAME_SPY_ENV, "1");
+        frame_spy::reset();
+        frame_spy::record_emission("cmd-a", 1);
+        frame_spy::record_emission("cmd-a", 2);
+        frame_spy::record_emission("cmd-b", 1);
+
+        let all = debug_frame_spy_snapshot(None);
+        assert_eq!(all.len(), 2, "no scope: every counted session");
+        assert_eq!(all[0].session_id, "cmd-a");
+
+        let scoped = debug_frame_spy_snapshot(Some("cmd-a".to_string()));
+        assert_eq!(scoped.len(), 1, "scoped snapshot returns one session");
+        assert_eq!(scoped[0].total_packets, 2);
+        let mut kinds = std::collections::BTreeMap::new();
+        kinds.insert(1u8, 1u64);
+        kinds.insert(2u8, 1u64);
+        assert_eq!(scoped[0].counts_by_kind, kinds);
+
+        assert!(
+            debug_frame_spy_snapshot(Some("missing".to_string())).is_empty(),
+            "unknown sessions yield an empty snapshot, not an error"
+        );
+
+        debug_frame_spy_reset();
+        assert!(
+            debug_frame_spy_snapshot(None).is_empty(),
+            "reset clears every session's counters"
+        );
+    }
+
+    #[test]
+    fn test_frame_spy_commands_inert_when_spy_inactive() {
+        let _g = EnvVarGuard::unset(frame_spy::FRAME_SPY_ENV);
+        frame_spy::reset();
+        assert!(
+            frame_spy::record_emission("cmd-off", 1).is_none(),
+            "inactive spy records nothing"
+        );
+        assert!(
+            debug_frame_spy_snapshot(Some("cmd-off".to_string())).is_empty()
+                && debug_frame_spy_snapshot(None).is_empty(),
+            "snapshot commands report nothing while the spy is inactive"
         );
     }
 }

@@ -11,6 +11,10 @@ use crate::rdp::client::{ConnectionOutcome, SessionCommand, attempt_rdp_connecti
 use crate::rdp::clipboard::SessionClipboardBackend;
 use crate::rdp::display::FrameBuffer;
 use crate::rdp::frame_transport::{encode_full_frame_packet, encode_image_update_packet};
+// Task 5.4 (Req 12.4/12.10): frame-kind spy module, compiled ONLY in
+// test-support builds.
+#[cfg(feature = "test-support")]
+use crate::rdp::frame_spy;
 use crate::renderer::shared_frame::SharedFrame;
 use crate::store::connections::ConnectionConfig;
 
@@ -338,11 +342,27 @@ impl SessionActor {
     }
 
     fn send_frame_packet(&mut self, packet: Vec<u8>) -> Result<(), DisconnectReason> {
+        // Task 5.4 (Req 12.4): the kind byte is captured before the send
+        // consumes the buffer; the counting hook below is compiled out of
+        // production builds entirely.
+        #[cfg(feature = "test-support")]
+        let emitted_kind = packet.first().copied();
         match self
             .frame_channel
             .send(tauri::ipc::InvokeResponseBody::Raw(packet))
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // Task 5.4 (Req 12.4): test-support builds may count the
+                // kinds that actually crossed the frame channel here.
+                // Production builds compile this hook out, so the emission
+                // path and its failure handling are unchanged there
+                // (Req 12.10).
+                #[cfg(feature = "test-support")]
+                if let Some(kind) = emitted_kind {
+                    self.observe_emitted_frame_kind(kind);
+                }
+                Ok(())
+            }
             Err(error) => {
                 log::warn!(
                     "Failed to send frame packet for session {}: {}",
@@ -352,6 +372,29 @@ impl SessionActor {
                 self.last_error = Some(format!("Frame emit failed: {}", error));
                 Err(DisconnectReason::ConnectionLost)
             }
+        }
+    }
+
+    /// Task 5.4 (Req 12.4): frame-kind spy hook, compiled ONLY into
+    /// test-support builds. When the spy env var (see `frame_spy`) activates
+    /// it, each actually-emitted packet kind is counted in the process-wide
+    /// spy registry and the cumulative counts are published as a
+    /// per-session Tauri event so the E2E harness can assert the
+    /// bitmap-only wire policy. Production builds contain neither this hook
+    /// nor the event (Req 12.10); the frame channel send above is untouched
+    /// either way.
+    #[cfg(feature = "test-support")]
+    fn observe_emitted_frame_kind(&self, kind: u8) {
+        let Some(counts) = frame_spy::record_emission(&self.id, kind) else {
+            return; // spy inactive: no recording, no event
+        };
+        let event_name = frame_spy::spy_event_name(&self.id);
+        if let Err(error) = self.events.emit(&event_name, counts) {
+            log::debug!(
+                "Failed to emit frame-spy event for session {}: {}",
+                self.id,
+                error
+            );
         }
     }
 
@@ -2457,6 +2500,84 @@ mod tests {
         }
     }
 
+    /// Task 5.4 (Req 12.10): production builds expose no frame spy. With the
+    /// spy environment flag set, frames still flow through the unchanged
+    /// emission path, no spy events are emitted, and mock admission stays
+    /// rejected. These pin the production absence at behavior level; the
+    /// binary-level counterpart is the task-5.4 rlib byte-scan evidence.
+    #[cfg(not(feature = "test-support"))]
+    mod production_frame_spy_absence {
+        use super::*;
+
+        /// Removes the variable on scope exit (including panics) so
+        /// shared-process test runs never inherit it.
+        struct EnvVarGuard(&'static str);
+        impl EnvVarGuard {
+            fn set(key: &'static str, value: &str) -> Self {
+                unsafe { std::env::set_var(key, value) };
+                EnvVarGuard(key)
+            }
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(self.0) };
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn test_production_with_spy_env_flag_frames_flow_without_spy_events() {
+            let _g = EnvVarGuard::set("DRIFT_TEST_FRAME_SPY", "1");
+            let manager = SessionManager::new();
+            let session = create_scripted(&manager, "prod-spy", true, FrameScript::Ok).await;
+            let mut rx = session.events_rx.clone();
+            let sizes = Arc::clone(&session.frame_sizes);
+
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && !sizes.lock().unwrap().is_empty()
+            })
+            .await;
+
+            // Frames actually crossed the unchanged emission path…
+            assert!(
+                !sizes.lock().unwrap().is_empty(),
+                "frame flow is undisturbed by the env flag"
+            );
+            // …but no spy event of any name was emitted alongside them.
+            let spy_named: Vec<String> = session
+                .events
+                .snapshot()
+                .into_iter()
+                .filter(|(_, event, _)| event.contains("frame-spy"))
+                .map(|(_, event, _)| event)
+                .collect();
+            assert!(
+                spy_named.is_empty(),
+                "production builds emit no frame-spy events even with the env flag set: {spy_named:?}"
+            );
+
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .unwrap();
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+        }
+
+        #[test]
+        fn test_production_rejects_mock_with_spy_env_flag_set() {
+            // Req 12.10: the spy env var must not admit mock sessions either.
+            let _g = EnvVarGuard::set("DRIFT_TEST_FRAME_SPY", "1");
+            assert!(
+                admit_mock_session(true, Some(true)).is_err(),
+                "spy env flag must never admit mock sessions in production"
+            );
+        }
+    }
+
     /// Synthetic-session behavior in test-support builds (Req 12.2): the
     /// admitted session reuses the existing mock loop, Tokio time and actor
     /// state — never dialing the connector seam — and the loss control drives
@@ -2465,6 +2586,7 @@ mod tests {
     mod synthetic_sessions {
         use super::*;
         use crate::rdp::client::ConnectionOutcome;
+        use crate::rdp::frame_spy::FrameSpySnapshot;
         use crate::rdp::frame_transport::PACKET_KIND_FULL_FRAME;
 
         struct SyntheticSession {
@@ -2680,6 +2802,276 @@ mod tests {
                 "loss → cancel drives the shared reconnect state machine"
             );
             let _ = kinds;
+        }
+
+        // ---- Task 5.4 (Req 12.4/12.10): frame-kind spy on the real
+        // emission path. The spy counts packets that actually crossed the
+        // frame channel (the single `send_frame_packet` funnel both loops
+        // send through), exposes cumulative counts as per-session events
+        // and snapshots, and is compiled ONLY into test-support builds.
+
+        /// Removes the spy env var on scope exit (including panics) and
+        /// clears the process-wide spy registry, mirroring the harness env
+        /// guards. `activate()` sets the spy flag; `deactivate()` removes it.
+        struct SpyEnvGuard(bool);
+        impl SpyEnvGuard {
+            fn activate() -> Self {
+                unsafe { std::env::set_var(frame_spy::FRAME_SPY_ENV, "1") };
+                frame_spy::reset();
+                SpyEnvGuard(true)
+            }
+            fn deactivate() -> Self {
+                unsafe { std::env::remove_var(frame_spy::FRAME_SPY_ENV) };
+                frame_spy::reset();
+                SpyEnvGuard(false)
+            }
+        }
+        impl Drop for SpyEnvGuard {
+            fn drop(&mut self) {
+                if self.0 {
+                    unsafe { std::env::remove_var(frame_spy::FRAME_SPY_ENV) };
+                }
+                frame_spy::reset();
+            }
+        }
+
+        /// Recorded spy events for a session: `(event name, payload)`.
+        fn spy_events(id: &str, events: &Arc<RecordedEvents>) -> Vec<(String, serde_json::Value)> {
+            let name = frame_spy::spy_event_name(id);
+            events
+                .snapshot()
+                .into_iter()
+                .filter(|(_, event, _)| *event == name)
+                .map(|(_, event, payload)| (event, payload))
+                .collect()
+        }
+
+        /// Req 12.4: the spy counts exactly the packets that actually
+        /// crossed the frame channel — not what the loop intended — and
+        /// publishes matching cumulative events for the E2E harness.
+        #[tokio::test(start_paused = true)]
+        async fn test_spy_counts_match_actually_emitted_packet_kinds() {
+            let _g = SpyEnvGuard::activate();
+            let manager = SessionManager::new();
+            let session = create_synthetic(&manager, "spy-counts", true).await;
+            let mut rx = session.events_rx.clone();
+            let kinds = Arc::clone(&session.frame_kinds);
+
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && !kinds.lock().unwrap().is_empty()
+            })
+            .await;
+
+            // A resize drives the mock loop through the send funnel again.
+            session
+                .cmd_tx
+                .send(SessionCommand::Resize {
+                    width: 96,
+                    height: 72,
+                })
+                .await
+                .unwrap();
+            wait_for(&session.id, &session.events, &mut rx, |_events| {
+                kinds.lock().unwrap().len() >= 2
+            })
+            .await;
+
+            // Independent observation: kinds that crossed the test channel.
+            let emitted = kinds.lock().unwrap().clone();
+            assert!(emitted.len() >= 2, "frames actually crossed the channel");
+
+            let snapshot = frame_spy::snapshot(&session.id)
+                .expect("active spy records the session that emitted frames");
+            assert_eq!(
+                snapshot.total_packets,
+                emitted.len() as u64,
+                "spy totals equal the actually-emitted packet count"
+            );
+            let mut expected_counts = std::collections::BTreeMap::new();
+            for kind in &emitted {
+                *expected_counts.entry(*kind).or_insert(0u64) += 1;
+            }
+            assert_eq!(
+                snapshot.counts_by_kind, expected_counts,
+                "spy per-kind counts equal the emitted kinds"
+            );
+
+            // The E2E-observable events carry the same cumulative counts.
+            let recorded = spy_events(&session.id, &session.events);
+            assert!(
+                !recorded.is_empty(),
+                "spy events are emitted for the E2E harness"
+            );
+            let last =
+                serde_json::from_value::<FrameSpySnapshot>(recorded.last().unwrap().1.clone())
+                    .unwrap();
+            assert_eq!(last, snapshot, "latest event payload is the snapshot");
+
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .unwrap();
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+        }
+
+        /// Req 12.4 (Req 9 policy): every kind the spy observed is a bitmap
+        /// kind (kind 1/2); nothing else ever appears.
+        #[tokio::test(start_paused = true)]
+        async fn test_spy_reports_only_bitmap_kinds() {
+            let _g = SpyEnvGuard::activate();
+            let manager = SessionManager::new();
+            let session = create_synthetic(&manager, "spy-bitmap", true).await;
+            let mut rx = session.events_rx.clone();
+            let kinds = Arc::clone(&session.frame_kinds);
+
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && !kinds.lock().unwrap().is_empty()
+            })
+            .await;
+
+            session
+                .cmd_tx
+                .send(SessionCommand::Resize {
+                    width: 128,
+                    height: 64,
+                })
+                .await
+                .unwrap();
+            wait_for(&session.id, &session.events, &mut rx, |_events| {
+                kinds.lock().unwrap().len() >= 2
+            })
+            .await;
+
+            let snapshot = frame_spy::snapshot(&session.id).unwrap();
+            assert!(!snapshot.counts_by_kind.is_empty(), "spy observed packets");
+            assert!(
+                snapshot
+                    .counts_by_kind
+                    .keys()
+                    .all(|k| frame_spy::BITMAP_PACKET_KINDS.contains(k)),
+                "only bitmap kinds observed: {:?}",
+                snapshot.counts_by_kind
+            );
+            assert!(snapshot.only_bitmap_kinds);
+
+            for (_, payload) in spy_events(&session.id, &session.events) {
+                let parsed = serde_json::from_value::<FrameSpySnapshot>(payload).unwrap();
+                assert!(
+                    parsed.only_bitmap_kinds,
+                    "every spy event payload is bitmap-only"
+                );
+            }
+
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .unwrap();
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+        }
+
+        /// Task 5.4: loss and cancel stay observable — counts keep
+        /// accumulating across the reconnect loop and remain queryable
+        /// after the actor stops.
+        #[tokio::test(start_paused = true)]
+        async fn test_spy_observable_across_loss_reconnect_and_cancel() {
+            let _g = SpyEnvGuard::activate();
+            let manager = SessionManager::new();
+            let session = create_synthetic(&manager, "spy-loss", true).await;
+            let mut rx = session.events_rx.clone();
+            let kinds = Arc::clone(&session.frame_kinds);
+
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && !kinds.lock().unwrap().is_empty()
+            })
+            .await;
+            let before_loss = frame_spy::snapshot(&session.id).unwrap().total_packets;
+
+            session
+                .cmd_tx
+                .send(SessionCommand::DropConnection)
+                .await
+                .expect("loss control accepted");
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events
+                    .iter()
+                    .any(|(_, v)| status_string(v) == "reconnecting")
+                    && events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && kinds.lock().unwrap().len() as u64 > before_loss
+            })
+            .await;
+
+            let after_reconnect = frame_spy::snapshot(&session.id).unwrap();
+            assert!(
+                after_reconnect.total_packets > before_loss,
+                "reconnected frames keep counting"
+            );
+            assert!(after_reconnect.only_bitmap_kinds);
+
+            // Cancel: session stops; counts remain queryable afterwards.
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .expect("cancel accepted");
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+            let final_snapshot = frame_spy::snapshot(&session.id)
+                .expect("spy counts stay queryable after the actor stopped");
+            assert_eq!(final_snapshot, after_reconnect);
+        }
+
+        /// Req 12.10 (env gate): without the spy env var the spy records
+        /// nothing and emits no events — frames still flow through the
+        /// unchanged emission path.
+        #[tokio::test(start_paused = true)]
+        async fn test_spy_inactive_without_env_flag_frames_still_flow() {
+            let _g = SpyEnvGuard::deactivate();
+            let manager = SessionManager::new();
+            let session = create_synthetic(&manager, "spy-off", true).await;
+            let mut rx = session.events_rx.clone();
+            let kinds = Arc::clone(&session.frame_kinds);
+
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                    && !kinds.lock().unwrap().is_empty()
+            })
+            .await;
+
+            assert!(
+                !kinds.lock().unwrap().is_empty(),
+                "frames flow regardless of the spy"
+            );
+            assert!(
+                frame_spy::snapshot(&session.id).is_none(),
+                "inactive spy records nothing"
+            );
+            assert!(
+                spy_events(&session.id, &session.events).is_empty(),
+                "inactive spy emits no events"
+            );
+
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .unwrap();
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
         }
     }
 }

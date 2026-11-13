@@ -189,6 +189,12 @@ pub fn run() {
             commands::test_support::debug_drop_mock_connection,
             #[cfg(feature = "test-support")]
             commands::test_support::debug_cleanup_test_credentials,
+            // Task 5.4 (Req 12.4/12.10): frame-kind spy commands, gated the
+            // same way — production builds register none of them.
+            #[cfg(feature = "test-support")]
+            commands::test_support::debug_frame_spy_snapshot,
+            #[cfg(feature = "test-support")]
+            commands::test_support::debug_frame_spy_reset,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
