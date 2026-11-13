@@ -1,0 +1,88 @@
+# drift-rdp nextest tier configuration (task 1.2; relocated to the Cargo
+# workspace root by the task 5.1 review fix). Source of truth: design.md
+# "CI ownership and reuse decisions" and the File Structure Plan.
+#
+# cargo-nextest is a CI/developer executable, NOT an application dependency
+# (tasks.md "Crate and tool choices"); it is never added to a Cargo.toml.
+# 0.9.150 is the minimum supported release per the current upstream advisory.
+# This machine-readable pin is enforced by nextest itself (exit code 92 when
+# the installed binary is older) and independently by scripts/Invoke-CI.ps1
+# ($DriftNextestMinVersion), which reports the exact install command.
+nextest-version = { required = "0.9.150" }
+
+# LOCATION (task 5.1 review fix): nextest auto-discovers .config/nextest.toml
+# at the CARGO WORKSPACE ROOT only — src-tauri/ (the repository root is not a
+# workspace). A bare `cargo nextest run` from src-tauri/ therefore loads THIS
+# file. Before the relocation it loaded nothing, and the two real Windows
+# Credential Manager round-trip tests ran unserialized in the default profile
+# (~10% flake under concurrent two-process vault access). The native tier
+# passes the same file explicitly:
+#   pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier rust
+#   (cargo-nextest nextest run --config-file src-tauri/.config/nextest.toml
+#    --profile ci --manifest-path src-tauri/Cargo.toml --no-tests fail)
+
+# Default profile (task 5.1 review fix): a bare `cargo nextest run` (no
+# --profile) uses this profile, and cargo-nextest 0.9.150 supports NO
+# `extends` for it (the key is ignored with a warning — verified), so the
+# os-keyring override is declared EXPLICITLY here as well. This makes the
+# real-vault serialization apply in EVERY invocation mode — bare runs,
+# --profile dev, --profile ci and the native tier. Keep the three override
+# blocks in sync when the filter changes.
+[[profile.default.overrides]]
+filter = 'test(test_store_and_retrieve_password) or test(test_delete_password) or test(test_windows_default_keyring_round_trips_credential_manager) or test(test_windows_native_builder_round_trips_credential_manager)'
+test-group = 'os-keyring'
+
+# Developer profile: local runs report slow tests and leaks but never retry,
+# never terminate slow tests and never write JUnit.
+[profile.dev]
+slow-timeout = { period = "120s" }  # report-only: no terminate-after
+leak-timeout = "2s"                 # report tests that leave threads running
+status-level = "leak"               # surface fail/slow/leak events live
+final-status-level = "slow"         # final summary lists slow tests too
+
+# CI profile (used by scripts/Invoke-CI.ps1 -Tier rust and by container jobs).
+[profile.ci]
+fail-fast = false                   # run the full suite; collect every failure (Req 7.3, 13.3)
+slow-timeout = { period = "60s" }   # report-only: slow tests are flagged, not terminated
+leak-timeout = "2s"                 # leak reporting for tests that leave threads running
+status-level = "leak"               # surface fail/slow/leak events live
+final-status-level = "slow"         # final summary lists failures and slow tests
+
+# `retries` is intentionally ABSENT from every profile: this repository must
+# not hide flaky tests behind automatic retries (task 1.2; a flaky test fails
+# the tier and is fixed, not retried). Fail-on-zero-tests is enforced by the
+# tier command itself via `--no-tests fail`.
+
+# JUnit evidence for the CI profile. Relative paths resolve under
+# <workspace>/target/nextest/<profile>/; scripts/Invoke-CI.ps1 copies the
+# report into the scoped output directory D:\BuildArtifacts\drift-rdp\rust\.
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "drift-rdp-rust-ci"
+
+# --- Resource groups: serialize ONLY tests that share OS-level resources ---
+# The CredentialStore tests that exercise the REAL OS keyring (task 5.1,
+# src-tauri/src/store/credentials.rs) are serialized against each other:
+# the two un-ignored Windows Credential Manager round-trips
+# (test_windows_default_keyring_round_trips_credential_manager,
+# test_windows_native_builder_round_trips_credential_manager — cfg-gated
+# to Windows, where the host vault always exists) plus the two #[ignore]d
+# cross-platform tests (macOS Keychain / Secret Service) that only run via
+# --run-ignored. Each uses an isolated entry, but they share the one OS
+# vault, so they serialize. Every other test in the repository uses no
+# shared OS-level resources (network probes connect to an unbound
+# localhost port) and stays fully parallel — no serialization is invented
+# for them.
+[test-groups]
+os-keyring = { max-threads = 1 }
+
+# The override exists in ALL THREE profiles (task 5.1): bare/default runs,
+# opt-in developer runs (`--profile dev`) and the CI tier serialize the
+# real-keyring tests identically.
+[[profile.ci.overrides]]
+filter = 'test(test_store_and_retrieve_password) or test(test_delete_password) or test(test_windows_default_keyring_round_trips_credential_manager) or test(test_windows_native_builder_round_trips_credential_manager)'
+test-group = 'os-keyring'
+
+[[profile.dev.overrides]]
+filter = 'test(test_store_and_retrieve_password) or test(test_delete_password) or test(test_windows_default_keyring_round_trips_credential_manager) or test(test_windows_native_builder_round_trips_credential_manager)'
+test-group = 'os-keyring'

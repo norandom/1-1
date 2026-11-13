@@ -352,9 +352,9 @@ try {
     Assert-That { -not (Test-DriftNextestVersion -VersionOutput 'nextest not installed').Ok } 'R06 version gate rejects unparseable version output'
     Assert-That { (Get-DriftNextestInstallHint) -match [regex]::Escape("cargo install cargo-nextest --locked --version $DriftNextestMinVersion") } 'R07 install hint contains the exact pinned install command'
 
-    Write-Output '-- unit: .config/nextest.toml (design.md file plan) --'
-    $NextestConfigPath = Join-Path $RepoRoot '.config\nextest.toml'
-    Assert-That { Test-Path -LiteralPath $NextestConfigPath -PathType Leaf } 'R08 repo-root .config/nextest.toml exists'
+    Write-Output '-- unit: src-tauri/.config/nextest.toml (design.md file plan; workspace-root location per the task 5.1 review fix) --'
+    $NextestConfigPath = Join-Path $RepoRoot 'src-tauri\.config\nextest.toml'
+    Assert-That { Test-Path -LiteralPath $NextestConfigPath -PathType Leaf } 'R08 workspace-root src-tauri/.config/nextest.toml exists (auto-discovered by bare cargo nextest run from src-tauri)'
     Assert-That { try { $c = Get-Content -LiteralPath $NextestConfigPath -Raw; ($c -match '\[profile\.ci\]') -and ($c -match '\[profile\.ci\.junit\]') -and ($c -match 'slow-timeout') -and ($c -match 'leak-timeout') } catch { $false } } 'R09 ci profile defines junit plus slow-timeout and leak-timeout reporting'
     Assert-That { try { (Get-Content -LiteralPath $NextestConfigPath -Raw) -notmatch '(?m)^\s*retries\s*=' } catch { $false } } 'R10 config sets no automatic retries'
     Assert-That { try { $c = Get-Content -LiteralPath $NextestConfigPath -Raw; ($c -match 'nextest-version') -and ($c -match [regex]::Escape('required = "0.9.150"')) } catch { $false } } 'R11 config pins a machine-readable minimum nextest version (0.9.150)'
@@ -451,11 +451,11 @@ try {
     Assert-That { $ctPinsRaw -notmatch 'latest' } 'CT02h no floating :latest pins anywhere in ci-versions.json'
 
     Write-Output '-- contract: CT03 nextest pin consistent across the three pin locations --'
-    $ctNextestTomlPath = Join-Path $RepoRoot '.config\nextest.toml'
+    $ctNextestTomlPath = Join-Path $RepoRoot 'src-tauri\.config\nextest.toml'
     $ctNextestToml = ''
     if (Test-Path -LiteralPath $ctNextestTomlPath -PathType Leaf) { $ctNextestToml = Get-Content -LiteralPath $ctNextestTomlPath -Raw }
     Assert-That { $ctPins -and $ctPins.nextest.version -eq '0.9.150' } 'CT03a ci-versions.json pins cargo-nextest 0.9.150'
-    Assert-That { $ctNextestToml -match [regex]::Escape('nextest-version = { required = "0.9.150" }') } 'CT03b .config/nextest.toml requires the same pin'
+    Assert-That { $ctNextestToml -match [regex]::Escape('nextest-version = { required = "0.9.150" }') } 'CT03b src-tauri/.config/nextest.toml requires the same pin'
     Assert-That { $null -ne $DriftNextestMinVersion -and $ctPins -and $ctPins.nextest.version -eq $DriftNextestMinVersion } 'CT03c Invoke-CI.ps1 $DriftNextestMinVersion matches ci-versions.json'
 
     Write-Output '-- contract: CT04 Dagger module entry points (frontend, rust-checks, linux-build, linux-e2e) --'
@@ -1172,6 +1172,73 @@ try {
     Assert-That {
         $ctAppManifest -match '(?m)^ironrdp-egfx\s*=\s*\{[^\r\n]*default-features\s*=\s*false'
     } 'CT16c ironrdp-egfx stays default-features=false so the optional openh264 decoder features stay off (Req 9.1/9.5)'
+
+    # ─── CT17: task 5.1 — Windows integration contract (Req 8.2, 8.4).
+    # Two regression guards with twin gates:
+    #   1. WebView2 bootstrapper mode: the NSIS bundle config must pin
+    #      bundle.windows.webviewInstallMode.type EXPLICITLY to
+    #      downloadBootstrapper (the omitted-key default is not trusted —
+    #      design.md "Risks / Open Items": the installer artifact fails CI
+    #      if the configured mode regresses). Module-side pin here +
+    #      runner-side twin in the windows-native job (CT17d).
+    #   2. keyring windows-native: the app manifest must compile the real
+    #      Windows Credential Manager store; the rust tier pins the
+    #      round-trip behavior (store/credentials.rs task-5.1 tests), this
+    #      pin guards the manifest source of truth on every tier host.
+    # Offline behavior of the pinned mode is documented in CONTRIBUTING.md.
+    $ctTauriConfPath = Join-Path $RepoRoot 'src-tauri\tauri.conf.json'
+    $ctTauriConf = $null
+    try { $ctTauriConf = Get-Content -LiteralPath $ctTauriConfPath -Raw | ConvertFrom-Json } catch { $ctTauriConf = $null }
+    Assert-That { $null -ne $ctTauriConf } 'CT17a src-tauri/tauri.conf.json parses as JSON (task 5.1 bundle contract)'
+    $ctWinInstallMode = $null
+    if ($null -ne $ctTauriConf -and $null -ne $ctTauriConf.bundle -and $null -ne $ctTauriConf.bundle.PSObject.Properties['windows']) {
+        $ctWinInstallMode = $ctTauriConf.bundle.windows.PSObject.Properties['webviewInstallMode'].Value
+    }
+    Assert-That {
+        $null -ne $ctWinInstallMode -and
+        $ctWinInstallMode.type -eq 'downloadBootstrapper'
+    } 'CT17b the NSIS bundle config pins bundle.windows.webviewInstallMode.type explicitly to downloadBootstrapper — removing or changing the pin fails this tier (Req 8.4, design.md Risks/Open Items)'
+    Assert-That {
+        $ctAppManifest -match '(?m)^keyring\s*=\s*\{[^\r\n]*windows-native'
+    } 'CT17c the app manifest compiles keyring WITH the windows-native feature so Windows credentials go to the real Credential Manager, never the in-process mock (Req 8.2, task 5.1)'
+    Assert-That {
+        $ctWinBlock -match [regex]::Escape('webviewInstallMode') -and
+        $ctWinBlock -match [regex]::Escape('downloadBootstrapper')
+    } 'CT17d the windows-native job carries a runner-side twin that re-verifies the pinned WebView2 bootstrapper mode before the installer is published — a regressed mode fails CI (Req 8.4, task 5.1)'
+    $ctContributingPath = Join-Path $RepoRoot 'CONTRIBUTING.md'
+    $ctContributing = ''
+    if (Test-Path -LiteralPath $ctContributingPath -PathType Leaf) { $ctContributing = Get-Content -LiteralPath $ctContributingPath -Raw }
+    Assert-That {
+        $ctContributing -match 'WebView2' -and
+        $ctContributing -match [regex]::Escape('downloadBootstrapper') -and
+        $ctContributing -match [regex]::Escape('offlineInstaller')
+    } 'CT17e CONTRIBUTING.md documents the downloadBootstrapper default and the offline behavior (pre-install the WebView2 Evergreen Runtime or build an offlineInstaller artifact; design.md Risks/Open Items)'
+
+    # ─── CT17 f-h: task 5.1 review remediation — nextest config discovery.
+    # Root cause (review round 1): nextest auto-discovers .config/nextest.toml
+    # at the CARGO WORKSPACE ROOT only (src-tauri/), so the repo-root config
+    # was invisible to bare `cargo nextest run` from src-tauri — the two real
+    # Windows Credential Manager round-trip tests ran UNserialized in the
+    # default profile and intermittently failed under concurrent two-process
+    # vault access (~10%). Fix: the config lives at the workspace root AND the
+    # default profile carries its own explicit os-keyring override
+    # (cargo-nextest 0.9.150 supports NO `extends` for the default profile —
+    # the key is ignored with a warning, verified — so the review's suggested
+    # extends syntax was replaced by the explicit block) so real-vault tests
+    # serialize in every invocation mode: bare, --profile dev, --profile ci,
+    # and the tier.
+    $ctWsNextestPath = Join-Path $RepoRoot 'src-tauri\.config\nextest.toml'
+    Assert-That {
+        Test-Path -LiteralPath $ctWsNextestPath -PathType Leaf
+    } 'CT17f the nextest config lives at the actual Cargo workspace root (src-tauri/.config/nextest.toml) so a bare cargo nextest run from src-tauri auto-discovers profiles and test groups (task 5.1 review fix)'
+    $ctWsNextest = ''
+    if (Test-Path -LiteralPath $ctWsNextestPath -PathType Leaf) { $ctWsNextest = Get-Content -LiteralPath $ctWsNextestPath -Raw }
+    Assert-That {
+        $ctWsNextest -match ('(?s)' + [regex]::Escape('[[profile.default.overrides]]') + '[^\[]*?' + [regex]::Escape("test-group = 'os-keyring'"))
+    } 'CT17g the DEFAULT profile (bare cargo nextest run, no --profile) carries an explicit os-keyring override — 0.9.150 supports no extends for default (verified ignored), so real-vault tests serialize in EVERY invocation mode (task 5.1 review fix)'
+    Assert-That {
+        -not (Test-Path -LiteralPath (Join-Path $RepoRoot '.config\nextest.toml') -PathType Leaf)
+    } 'CT17h no stale repo-root .config/nextest.toml remains — single source of truth at the workspace root (task 5.1 review fix)'
 } finally {
     # Clean up only this test's own resources (Req 12.7): remove the junction
     # reparse point explicitly first so nothing can traverse into the repo.

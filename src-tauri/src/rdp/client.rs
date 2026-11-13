@@ -558,4 +558,45 @@ mod tests {
             "fast-path input must produce a response frame"
         );
     }
+
+    // Req 8.3 (task 5.1): a Windows build must identify itself with Windows
+    // platform capabilities in the Client Information PDU. The cfg-mapped
+    // `platform` field is pinned per build OS, so a regression to
+    // UNSPECIFIED (or the wrong platform) fails the rust tier on every OS.
+    #[test]
+    fn connector_config_advertises_native_platform_capabilities() {
+        use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
+
+        let config = crate::store::connections::ConnectionConfig {
+            id: "drift-task-5-1-platform-pin".to_string(),
+            name: "platform capability pin".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 3389,
+            username: "user".to_string(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_connected_at: None,
+        };
+
+        let connector = build_connector_config(&config, "pw", 1280, 720);
+
+        #[cfg(target_os = "windows")]
+        let expected = MajorPlatformType::WINDOWS;
+        #[cfg(target_os = "macos")]
+        let expected = MajorPlatformType::MACINTOSH;
+        #[cfg(target_os = "linux")]
+        let expected = MajorPlatformType::UNIX;
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        let expected = MajorPlatformType::UNSPECIFIED;
+
+        assert_eq!(
+            connector.platform, expected,
+            "connector must advertise the build OS as its platform capability (Req 8.3)"
+        );
+    }
 }

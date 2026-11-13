@@ -29,7 +29,7 @@
   "nextest": {
     "version": "0.9.150",
     "linuxTarball": "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-unknown-linux-gnu.tar.gz",
-    "note": "cargo-nextest is CI/developer tooling, never an application dependency. Pinned prebuilt release tarball (the get.nexte.st convenience URL resolves to an unpinned floating release, which this repository forbids). Same pin as nextest-version.required in .config/nextest.toml and $DriftNextestMinVersion in scripts/Invoke-CI.ps1."
+    "note": "cargo-nextest is CI/developer tooling, never an application dependency. Pinned prebuilt release tarball (the get.nexte.st convenience URL resolves to an unpinned floating release, which this repository forbids). Same pin as nextest-version.required in src-tauri/.config/nextest.toml and $DriftNextestMinVersion in scripts/Invoke-CI.ps1."
   },
   "tauriLinuxAptPackages": [
     "libwebkit2gtk-4.1-dev",

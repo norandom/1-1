@@ -281,8 +281,11 @@ export class Drift {
   /**
    * Rust portable checks in the pinned Linux rust container with the Tauri
    * system libraries (Req 7.1): fmt, clippy, check, pinned cargo-nextest
-   * (ci profile from .config/nextest.toml, JUnit copied to /test-results) and
-   * doctests via cargo test --doc (nextest does not run doctests; Req 7.1).
+   * (ci profile from src-tauri/.config/nextest.toml — the Cargo workspace
+   * root location the task 5.1 review fix standardized on, so bare runs and
+   * CI resolve the same profiles and test groups; JUnit copied to
+   * /test-results) and doctests via cargo test --doc (nextest does not run
+   * doctests; Req 7.1).
    * Returns the /test-results Directory with the JUnit evidence.
    */
   @func()
@@ -297,7 +300,7 @@ export class Drift {
         "nextest",
         "run",
         "--config-file",
-        ".config/nextest.toml",
+        "src-tauri/.config/nextest.toml",
         "--profile",
         "ci",
         "--manifest-path",

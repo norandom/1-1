@@ -22,12 +22,14 @@
 
   The rust test tier (task 1.2; Requirements 7.1, 7.3, 13.3, 13.4):
     - runs the pinned cargo-nextest ($DriftNextestMinVersion, mirrored by
-      nextest-version.required in .config/nextest.toml) with the CI profile
-      from the repository-root .config/nextest.toml: fail-on-zero-tests
+      nextest-version.required in src-tauri/.config/nextest.toml) with the CI
+      profile from the workspace-root src-tauri/.config/nextest.toml (relocated
+      there by the task 5.1 review fix so bare `cargo nextest run` from
+      src-tauri auto-discovers it too): fail-on-zero-tests
       (--no-tests fail), slow-timeout/leak-timeout reporting, JUnit output,
       and NO automatic retries (no `retries` key anywhere, no --retries flag);
     - serialize only tests that share OS-level resources via the os-keyring
-      test group declared in .config/nextest.toml;
+      test group declared in src-tauri/.config/nextest.toml;
     - keeps cargo test --doc as a separate step, because nextest does not run
       doctests, and propagates doctest failures to the tier exit code;
     - copies JUnit evidence and step logs under D:\BuildArtifacts\drift-rdp\rust
@@ -114,7 +116,8 @@ Set-StrictMode -Version 3.0
 # choices": a supported release, at least 0.9.150 per the current upstream
 # advisory). cargo-nextest is a CI/developer executable, never an application
 # dependency. Keep in sync with nextest-version.required in
-# .config/nextest.toml, which nextest also enforces on its own (exit 92).
+# .config/nextest.toml at the Cargo workspace root (src-tauri/), which
+# nextest also enforces on its own (exit 92).
 $DriftNextestMinVersion = '0.9.150'
 
 function ConvertTo-DriftNormalizedPath {
@@ -527,8 +530,10 @@ function Invoke-RustTest {
         [Console]::Error.WriteLine("working directory: REJECTED — $($cwdCheck.Reason)")
     }
 
-    # 2) pinned nextest configuration (design.md file plan: .config/nextest.toml)
-    $nextestConfigPath = Join-Path $canonicalRoot '.config\nextest.toml'
+    # 2) pinned nextest configuration (design.md file plan; task 5.1 review
+    #    fix: relocated to the Cargo workspace root so nextest discovers it
+    #    for bare runs as well — the tier still passes it explicitly)
+    $nextestConfigPath = Join-Path $canonicalRoot 'src-tauri\.config\nextest.toml'
     if (Test-Path -LiteralPath $nextestConfigPath -PathType Leaf) {
         [Console]::WriteLine("nextest config: $nextestConfigPath (profile '$NextestProfile')")
     } else {

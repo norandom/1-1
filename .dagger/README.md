@@ -41,7 +41,7 @@ itself; GitHub-hosted Linux runners use their Docker engine instead.
 | Entry point     | Pinned image                       | Commands (the tier's actual command list) |
 |-----------------|------------------------------------|-------------------------------------------|
 | `frontend`      | `node:22.23.4-bookworm` (+digest)  | `npm ci` → `npm run lint` → `npx tsc --noEmit` → `npx vitest run --reporter=default --reporter=junit --outputFile.junit=/test-results/vitest-junit.xml` → `npm run build` |
-| `rust-checks`   | `rust:1.98.1-bookworm` (+digest)   | apt Tauri libs (once, cached layer) → `rustup component add rustfmt clippy` → install `cargo-nextest 0.9.150` (pinned tarball) → `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo check` → `cargo-nextest nextest run --config-file .config/nextest.toml --profile ci --no-tests fail` → `cp src-tauri/target/nextest/ci/junit.xml /test-results/rust-junit.xml` → `cargo test --doc` |
+| `rust-checks`   | `rust:1.98.1-bookworm` (+digest)   | apt Tauri libs (once, cached layer) → `rustup component add rustfmt clippy` → install `cargo-nextest 0.9.150` (pinned tarball) → `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo check` → `cargo-nextest nextest run --config-file src-tauri/.config/nextest.toml --profile ci --no-tests fail` → `cp src-tauri/target/nextest/ci/junit.xml /test-results/rust-junit.xml` → `cargo test --doc` |
 | `linux-build`   | `rust:1.98.1-bookworm` + `node:22.23.4-bookworm` | apt Tauri libs + bundle extras (once, cached layer) → merge `/usr/local` from the pinned node image (node+npm, no unpinned installs) → `npm ci` → `npx tauri build --target x86_64-unknown-linux-gnu` (log → `/test-results/linux-build.log`) → verify `bundle/appimage/*.AppImage` + `bundle/deb/*.deb` (missing artifacts throw) |
 | `linux-e2e`     | `rust:1.98.1-bookworm` + `node:22.23.4-bookworm` | shared `linux-build` bundle pipeline (missing bundles throw) → apt cold-launch extras `xvfb x11-utils xdotool imagemagick` (once, cached layer) → `sh scripts/linux/cold-launch.sh`: Xvfb display + isolated `HOME`/`XDG_*` app data (Req 12.7) → launch AppImage `--appimage-extract-and-run` (no FUSE) → first-usable-state proof (Drift window mapped, process alive, painted screenshot) → graceful `WM_DELETE_WINDOW` shutdown → status JSON + screenshots + logs under `/test-results/e2e` |
 | `contract`      | —                                  | prints this contract as JSON |
@@ -179,7 +179,7 @@ run from the canonical repository root `D:\Source\drift-rdp`:
 | Tier       | Single command | Commands |
 |------------|----------------|----------|
 | preflight  | `pwsh -NoProfile -File scripts/Invoke-CI.ps1` | native tool/version + wrapper inspection (tasks 1.1/1.2) |
-| rust       | `pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier rust` | pinned `cargo nextest run` (ci profile, `.config/nextest.toml`) + `cargo test --doc` |
+| rust       | `pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier rust` | pinned `cargo nextest run` (ci profile, `src-tauri/.config/nextest.toml`) + `cargo test --doc` |
 | frontend   | `pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier frontend` | `npm ci` → `npm run lint` → `npx tsc --noEmit` → `npx vitest run` → `npm run build` |
 | dagger     | `pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier dagger -DaggerEntry <frontend\|rust-checks\|linux-build\|linux-e2e\|contract>` | wires the engine runner host from the pin, then invokes the Linux-container entry above |
 
@@ -208,4 +208,4 @@ module load; consistency enforced by `scripts/Invoke-CI.Tests.ps1`).
 | Dagger engine | `registry.dagger.io/engine:v0.21.11` |
 | Node image | `node:22.23.4-bookworm@sha256:7702d8aa4d5910871692af4480eb3ba86f23047a6417a44d857d06c95d060d3f` (repo CI uses Node 22) |
 | Rust image / toolchain | `rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e` / `1.98.1` (target-state MSRV 1.89 is later spec work) |
-| cargo-nextest | `0.9.150` (same pin as `.config/nextest.toml` and `scripts/Invoke-CI.ps1`) |
+| cargo-nextest | `0.9.150` (same pin as `src-tauri/.config/nextest.toml` and `scripts/Invoke-CI.ps1`) |

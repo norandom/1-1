@@ -198,6 +198,15 @@ jobs:
       - name: Build Windows installer (NSIS)
         run: npx tauri build
         shell: pwsh
+      - name: Verify WebView2 bootstrapper mode pinned in bundle config (task 5.1, Req 8.4)
+        run: |
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $mode = $conf.bundle.windows.webviewInstallMode.type
+          if ($mode -ne 'downloadBootstrapper') {
+            throw "WebView2 bootstrapper mode regressed to '$mode' (expected 'downloadBootstrapper') - src-tauri/tauri.conf.json bundle.windows.webviewInstallMode; task 5.1 / design.md Risks and Open Items"
+          }
+          Write-Output "WebView2 bootstrapper mode pinned: $mode"
+        shell: pwsh
       - name: Publish tier failure reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

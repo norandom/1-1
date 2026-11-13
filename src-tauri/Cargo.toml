@@ -30,7 +30,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-keyring = { version = "3", features = ["apple-native", "linux-native"] }
+# keyring platform stores (task 5.1, Req 8.2): windows-native routes
+# Windows credentials to the real Credential Manager; without it keyring
+# falls back to its in-process mock store (nothing persists).
+keyring = { version = "3", features = ["apple-native", "linux-native", "windows-native"] }
 dirs = "5"
 # IronRDP component crates — the task 4.1 resolved set (research.md §4.1),
 # pinned exactly (`=`) like the registry-verified compile probe

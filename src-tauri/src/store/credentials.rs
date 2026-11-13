@@ -61,7 +61,11 @@ mod tests {
     // via `set_default_credential_builder` (keyring's own client-store hook) with a
     // scripted in-memory backend. nextest runs every test in its own process; the
     // extra mutex + restore-to-mock guard keeps plain `cargo test` (shared process)
-    // deterministic as well. No production seam was added for this. ----
+    // deterministic as well. No production seam was added for this.
+    //
+    // Task 5.1 exception (Req 8.2/12.7): on Windows the real Credential Manager
+    // IS available on every tier host, so the two task-5.1 round-trip tests
+    // exercise the real vault through isolated, self-cleaned entries. ----
 
     fn keyring_lock() -> &'static Mutex<()> {
         static LOCK: Mutex<()> = Mutex::new(());
@@ -340,23 +344,80 @@ mod tests {
         }
     }
 
-    // baseline-coverage.md row 6.2: Windows builds compile keyring WITHOUT the
-    // windows-native feature, so keyring falls back to its in-process mock store:
-    // set_password "succeeds", nothing persists, and a fresh Entry always reads
-    // NoEntry. This pins that exact shape deterministically on every platform.
+    // Task 5.1 (Req 8.2): the Windows build compiles keyring WITH the
+    // windows-native feature, so the default credential builder routes to
+    // the real Windows Credential Manager instead of keyring's in-process
+    // mock store. The pre-5.1 baseline pinned the mock fallback here
+    // (baseline-coverage.md row 6.2 classified Windows as the future
+    // delta); this test is that delta landing, inverted to the target
+    // behavior. The entry is isolated and cleaned up (Req 12.7): a unique
+    // task-5-1 connection id, pre-deleted before and deleted after — no
+    // other credential is ever touched.
+    //
+    // nextest (the canonical tier) runs each test in its own process, so
+    // this test exercises keyring's compiled-in platform default — the
+    // exact production path CredentialStore takes (Entry::new with no
+    // test-installed builder).
+    #[cfg(target_os = "windows")]
     #[test]
-    fn test_mock_keyring_shape_matches_windows_fallback() {
+    fn test_windows_default_keyring_round_trips_credential_manager() {
         let _lock = keyring_lock().lock().unwrap();
-        let _guard = BuilderGuard::install(mock::default_credential_builder());
         let store = CredentialStore::new();
+        let id = "drift-task-5-1-win-default-roundtrip";
 
-        store.store_password("char-3-1-mock-shape", "pw").unwrap();
+        // Clean up only this test's own entry (a leftover from an aborted
+        // earlier run), then prove a full store/read/delete/read cycle.
+        store.delete_password(id).unwrap();
         assert_eq!(
-            store.get_password("char-3-1-mock-shape").unwrap(),
+            store.get_password(id).unwrap(),
             None,
-            "mock entries don't persist across Entry::new calls"
+            "pre-cleaned entry must start absent"
         );
-        store.delete_password("char-3-1-mock-shape").unwrap();
+        store.store_password(id, "task-5-1-s3cret!").unwrap();
+        // The mock-store discriminator: CredentialStore creates a fresh
+        // Entry per call, and keyring's in-process mock never persists
+        // across Entry instances, so this assertion fails if the Windows
+        // build regresses to the mock fallback.
+        assert_eq!(
+            store.get_password(id).unwrap(),
+            Some("task-5-1-s3cret!".to_string()),
+            "Windows default keyring must persist across Entry::new calls (real Credential Manager, Req 8.2)"
+        );
+        store.delete_password(id).unwrap();
+        assert_eq!(
+            store.get_password(id).unwrap(),
+            None,
+            "deleted entry reads as None"
+        );
+    }
+
+    // Task 5.1 (Req 8.2), deterministic twin of the default-builder test
+    // above: `keyring::windows` only exists when the windows-native feature
+    // is compiled in, so this test doubles as the compile-time pin for the
+    // Cargo.toml feature (drop the feature and this file no longer builds
+    // on Windows). Installing the windows builder explicitly also keeps the
+    // round trip deterministic in a shared plain `cargo test` process,
+    // where an earlier BuilderGuard drop has restored the mock as the
+    // process default. Same Req 12.7 isolation: unique id, cleaned up
+    // before and after, nothing else touched.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_native_builder_round_trips_credential_manager() {
+        let _lock = keyring_lock().lock().unwrap();
+        let _guard = BuilderGuard::install(keyring::windows::default_credential_builder());
+        let store = CredentialStore::new();
+        let id = "drift-task-5-1-win-explicit-roundtrip";
+
+        store.delete_password(id).unwrap();
+        assert_eq!(store.get_password(id).unwrap(), None);
+        store.store_password(id, "task-5-1-s3cret!").unwrap();
+        assert_eq!(
+            store.get_password(id).unwrap(),
+            Some("task-5-1-s3cret!".to_string()),
+            "windows-native store must persist across Entry::new calls (Req 8.2)"
+        );
+        store.delete_password(id).unwrap();
+        assert_eq!(store.get_password(id).unwrap(), None);
     }
 
     #[test]

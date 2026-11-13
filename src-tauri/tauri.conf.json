@@ -41,6 +41,11 @@
     ],
     "category": "Utility",
     "shortDescription": "Beautiful Remote Desktop Client",
-    "longDescription": "Drift — A stunning, high-performance remote desktop client for Mac & Linux."
+    "longDescription": "Drift — A stunning, high-performance remote desktop client for Mac & Linux.",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
   }
 }

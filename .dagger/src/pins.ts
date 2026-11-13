@@ -131,7 +131,7 @@ export const contract = {
         "cargo fmt --check --manifest-path src-tauri/Cargo.toml",
         "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
         "cargo check --manifest-path src-tauri/Cargo.toml",
-        "cargo-nextest nextest run --config-file .config/nextest.toml --profile ci --manifest-path src-tauri/Cargo.toml --no-tests fail",
+        "cargo-nextest nextest run --config-file src-tauri/.config/nextest.toml --profile ci --manifest-path src-tauri/Cargo.toml --no-tests fail",
         "cp src-tauri/target/nextest/ci/junit.xml /test-results/rust-junit.xml",
         "cargo test --doc --manifest-path src-tauri/Cargo.toml",
       ],

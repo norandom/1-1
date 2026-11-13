@@ -19,6 +19,19 @@ cargo tauri dev
 - macOS: `xcode-select --install`
 - Linux: `sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`
 
+### Windows installer and the WebView2 bootstrapper
+
+The NSIS installer pins `bundle.windows.webviewInstallMode.type` to `downloadBootstrapper`
+explicitly in `src-tauri/tauri.conf.json` (task 5.1, Req 8.4): the installer downloads
+Microsoft's WebView2 Evergreen bootstrapper at install time, keeping the shipped artifact
+small. **Offline behavior:** on a machine without internet the bootstrapper cannot download
+the runtime — pre-install the
+[WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+before running the installer, or build a fully self-contained artifact locally by switching
+the mode to `offlineInstaller` (never commit that switch; the pinned default is a CI
+contract — `scripts/Invoke-CI.Tests.ps1` (CT17) and the `windows-native` workflow job fail
+if the configured mode regresses).
+
 ## Workflow
 
 1. **Fork** the repo and create a branch from `master`
