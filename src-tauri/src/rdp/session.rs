@@ -1442,6 +1442,8 @@ mod tests {
             display_width: Some(64),
             display_height: Some(64),
             mock: false,
+            library_id: String::new(),
+            folder_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_connected_at: None,

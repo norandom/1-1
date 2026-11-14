@@ -151,7 +151,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 12.4,12.10_
 
 - [ ] 6. JSON library storage with minimal new code
-- [ ] 6.1 Model v2 data and tree invariants
+- [x] 6.1 Model v2 data and tree invariants
   - Reuse serde/serde_json, uuid and std HashMap/HashSet. Keep flat entities with parent IDs; no graph crate, database or ORM.
   - Done: Tests validate unique IDs, ownership, ancestor cycles, deep nesting and descendant queries.
   - _Boundary: Library model_
@@ -351,6 +351,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,7.3,8.1,8.2,8.3,8.4,8.5,8.6,12.1,12.6,12.8,12.9,13.1,13.2,13.3,13.4_
 
 ## Implementation Notes
+- 6.1 model layer notes for the store tasks: `LibraryError` is hand-rolled (Display + std::error::Error) though thiserror sits unused in Cargo.toml — either switch to the derive or record the hand-roll decision when 6.3+ adds error types; `LibraryDocument::descendants` returns a typed `UnknownNode` error where design L346 shows a bare Vec on `LibraryStore` — 6.4 must reconcile (map at the store layer or amend design); `#[allow(dead_code)]` on `pub mod library` must be dropped when the first production caller lands (6.3-6.6).
 - Sub-agent verification claims must paste VERBATIM tool output (5.4 round 1: a name-filtered clippy summary hid `(lib) generated 2 warnings` dead-code lines behind the two pre-existing warning texts, producing a false "exactly 2 warnings both configs" claim). Reviewers: always re-run static checks with full output.
 - Pre-existing baseline: `npm run lint` fails at HEAD (7 errors / 2 warnings in `src/**` — ConnectionCard.tsx, SessionCanvas.tsx, ui/{badge,button,tabs,toggle}.tsx, useClipboard.ts); must be fixed before the lint tier can gate CI (found during 1.1 review; not caused by 1.1).
 - design.md File Structure Plan listed `scripts/Invoke-CI.ps1` but not `scripts/Invoke-CI.Tests.ps1`; RESOLVED 2026-11-13 (group-5 docs alignment — test file added to the plan).

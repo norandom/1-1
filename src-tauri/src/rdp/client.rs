@@ -588,6 +588,8 @@ mod tests {
             updated_at: chrono::Utc::now(),
             last_connected_at: None,
             mock: false,
+            library_id: String::new(),
+            folder_id: None,
         };
 
         let connector = build_connector_config(&config, "pw", 1280, 720);

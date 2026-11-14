@@ -36,6 +36,15 @@ pub struct ConnectionConfig {
     /// model keeps this field (design "LibraryStore v2", ConnectionConfigV2).
     #[serde(default)]
     pub mock: bool,
+    /// Task 6.1 (Req 10.1/10.8): owning library in the v2 library document
+    /// (design "LibraryStore v2", ConnectionConfigV2). Empty for v1-era
+    /// records until the migration (task 6.3) assigns a default library;
+    /// `store::library::LibraryDocument::validate` rejects unowned entries.
+    #[serde(default)]
+    pub library_id: String,
+    /// Task 6.1: optional folder placement inside the owning library.
+    #[serde(default)]
+    pub folder_id: Option<String>,
 }
 
 /// Input type for creating/updating connections (no id or timestamps).
@@ -132,6 +141,10 @@ impl ConnectionStore {
             display_width: input.display_width,
             display_height: input.display_height,
             mock: input.mock,
+            // v1 store: no library yet — task 6.3 migration and task 6.6
+            // library-scoped CRUD assign real ownership.
+            library_id: String::new(),
+            folder_id: None,
             created_at: now,
             updated_at: now,
             last_connected_at: None,
