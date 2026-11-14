@@ -3,18 +3,23 @@
 //!
 //! Pure data + validation + query layer: flat entities with parent IDs
 //! (library → folders → connections), no graph crate, database or ORM.
-//! Persistence, recovery and migration are tasks 6.2/6.3; CRUD read models
-//! and `move_node` transactions are 6.4/6.5 — both build on
+//! Persistence uses the task 6.2 atomic writer; v1→v2 migration and
+//! write-blocked recovery (task 6.3) live below the model. CRUD read
+//! models and `move_node` transactions are 6.4/6.5 — all build on
 //! [`LibraryDocument::validate`] so a snapshot is proven legal before it is
 //! persisted or published.
 //!
 //! Credentials never live in this model: keyring entries are keyed by
 //! connection id only (design "Data Models"), so no secret material here.
 
+use crate::store::atomic_write::write_atomic;
 use crate::store::connections::ConnectionConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use uuid::Uuid;
 
 /// Discriminator of the v2 `connections.json` document (design "Logical
@@ -417,6 +422,486 @@ fn check_entity_id<'a>(
         });
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Migration and write-blocked recovery (task 6.3; Req 6.1/6.2/10.10/10.12)
+// ---------------------------------------------------------------------------
+
+/// Name of the library every v1 connection migrates into (Req 10.10: "a
+/// default library", all connections placed at its root).
+pub const DEFAULT_LIBRARY_NAME: &str = "Default Library";
+
+/// Backup suffix from the migration flow (design "Data migration"):
+/// `connections.json` is backed up as `connections.json.v1.bak`.
+pub const V1_BACKUP_SUFFIX: &str = ".v1.bak";
+
+/// Human-facing recovery instructions for the write-blocked state
+/// (Req 10.12); surfaced in the UI by task 8.7 and kept here so every
+/// consumer shows the same text.
+pub const RECOVERY_INSTRUCTIONS: &str = "The connection library could not be \
+    loaded. Keep connections.json and its .v1.bak backup untouched, restore \
+    valid data (for example copy the backup over connections.json), then \
+    reload the library. Changes stay blocked until valid data is reloaded.";
+
+/// Typed failure of loading/migrating `connections.json` or of a mutation
+/// attempted while the store is write-blocked (Req 6.1/6.2/10.10/10.12).
+///
+/// Error-type convention (tasks.md "Implementation Notes", decision due at
+/// 6.3): `LibraryError` is hand-rolled (`Display` + `std::error::Error`)
+/// while thiserror sits unused in Cargo.toml; 6.3 keeps the hand-rolled
+/// style for consistency inside the store layer rather than mixing both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationError {
+    /// The store file exists but cannot be read (permissions, IO).
+    ReadFailed { cause: String },
+    /// The file is not valid JSON, or not valid data of its claimed shape
+    /// (v1 array entries / v2 document fields).
+    MalformedData { cause: String },
+    /// The JSON shape is recognizable but the schema version is
+    /// unsupported — fail closed, never coerce unknown versions.
+    UnsupportedSchema { found: Option<u32> },
+    /// Parsed fine but violates tree invariants (wraps [`LibraryError`]).
+    InvalidData(LibraryError),
+    /// The pre-migration backup could not be created; migration is
+    /// blocked before the v2 commit (design: "backup failure blocks
+    /// migration").
+    BackupCreateFailed { cause: String },
+    /// A backup already exists (never clobbered) but its content is not
+    /// valid v1/v2 data; fail closed instead of proceeding.
+    BackupExistsInvalid { cause: String },
+    /// A backup already exists but cannot be examined (read error).
+    BackupInspectFailed { cause: String },
+    /// Internal count/id parity assertion between legacy input and
+    /// migrated output failed (design: "assert count and id parity").
+    ParityCheckFailed { detail: String },
+    /// The validated document could not be serialized for commit.
+    SerializeFailed { cause: String },
+    /// The atomic v2 commit failed; the prior file and backup are intact
+    /// (task 6.2 writer semantics).
+    CommitFailed { cause: String },
+    /// A mutation was attempted while the store is write-blocked
+    /// (recovery); includes the empty-replacement case (Req 10.12: a
+    /// failed load must never lead to a successful empty-store save).
+    WriteBlocked { reason: String },
+}
+
+impl std::fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReadFailed { cause } => write!(f, "cannot read the library file: {cause}"),
+            Self::MalformedData { cause } => write!(f, "library file is malformed: {cause}"),
+            Self::UnsupportedSchema { found } => match found {
+                Some(found) => write!(
+                    f,
+                    "unsupported library schema version {found} (expected {DOCUMENT_VERSION})"
+                ),
+                None => write!(
+                    f,
+                    "unsupported library schema (no version discriminator; \
+                     expected a v1 array or version {DOCUMENT_VERSION})"
+                ),
+            },
+            Self::InvalidData(err) => {
+                write!(f, "library data violates tree invariants: {err}")
+            }
+            Self::BackupCreateFailed { cause } => {
+                write!(f, "cannot create the migration backup: {cause}")
+            }
+            Self::BackupExistsInvalid { cause } => write!(
+                f,
+                "existing backup is not valid data, refusing to overwrite it: {cause}"
+            ),
+            Self::BackupInspectFailed { cause } => {
+                write!(f, "cannot examine the existing backup: {cause}")
+            }
+            Self::ParityCheckFailed { detail } => {
+                write!(f, "migration parity check failed: {detail}")
+            }
+            Self::SerializeFailed { cause } => {
+                write!(f, "cannot serialize the library document: {cause}")
+            }
+            Self::CommitFailed { cause } => write!(f, "atomic v2 commit failed: {cause}"),
+            Self::WriteBlocked { reason } => write!(
+                f,
+                "store is write-blocked until valid data is reloaded: {reason}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MigrationError {}
+
+/// Result of a successful [`load_or_migrate`] / [`LibraryStore::reload`].
+#[derive(Debug, Clone)]
+pub enum LoadOutcome {
+    /// No store file on disk: a fresh store starts empty (nothing written).
+    Fresh,
+    /// The file already held a valid v2 document (used as-is, no backup).
+    LoadedV2(LibraryDocument),
+    /// A v1 bare array was migrated: the original bytes are preserved at
+    /// `backup_path` and a v2 document was atomically committed.
+    MigratedV2 {
+        document: LibraryDocument,
+        backup_path: PathBuf,
+    },
+}
+
+impl LoadOutcome {
+    /// The document this outcome leaves the store in.
+    pub fn document(&self) -> LibraryDocument {
+        match self {
+            Self::Fresh => LibraryDocument::empty(),
+            Self::LoadedV2(document) => document.clone(),
+            Self::MigratedV2 { document, .. } => document.clone(),
+        }
+    }
+}
+
+/// Wrap a parsed v1 bare-array connection list into a v2 document (design
+/// "Data migration"; Req 10.10): one fresh default library, every legacy
+/// connection preserved field-for-field and placed at the library root
+/// (`folderId: null`). Only `libraryId`/`folderId` are assigned — the
+/// documented migration defaults; ids and all other fields stay untouched,
+/// and credential accounts (keyring, keyed by connection id) are unchanged
+/// by construction.
+pub fn migrate_v1(legacy: Vec<ConnectionConfig>) -> LibraryDocument {
+    let library = Library::new(DEFAULT_LIBRARY_NAME);
+    let connections = legacy
+        .into_iter()
+        .map(|mut connection| {
+            connection.library_id = library.id.clone();
+            connection.folder_id = None;
+            connection
+        })
+        .collect();
+    LibraryDocument::new(vec![library], Vec::new(), connections)
+}
+
+/// Load `path`, migrating a v1 bare array to v2 (design "Data migration"):
+/// detect → wrap → backup → validate → atomic v2 commit. A v2 document is
+/// used as-is. Every failure mode fails closed: the original file (and any
+/// existing backup) is preserved untouched and the caller must enter
+/// write-blocked recovery (see [`LibraryStore`]).
+pub fn load_or_migrate(path: &Path) -> Result<LoadOutcome, MigrationError> {
+    let original = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(LoadOutcome::Fresh),
+        Err(e) => {
+            return Err(MigrationError::ReadFailed {
+                cause: e.to_string(),
+            });
+        }
+    };
+    let root: serde_json::Value =
+        serde_json::from_slice(&original).map_err(|e| MigrationError::MalformedData {
+            cause: e.to_string(),
+        })?;
+    // A numeric "version" discriminates v2 from v1 (design "Logical Data
+    // Model"); unrecognized shapes fail closed below.
+    let found = root
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok());
+    match root {
+        serde_json::Value::Array(_) => migrate_v1_bytes(path, &original, root),
+        serde_json::Value::Object(_) => match found {
+            Some(DOCUMENT_VERSION) => {
+                let document: LibraryDocument =
+                    serde_json::from_value(root).map_err(|e| MigrationError::MalformedData {
+                        cause: e.to_string(),
+                    })?;
+                document.validate().map_err(MigrationError::InvalidData)?;
+                Ok(LoadOutcome::LoadedV2(document))
+            }
+            other => Err(MigrationError::UnsupportedSchema { found: other }),
+        },
+        _ => Err(MigrationError::UnsupportedSchema { found: None }),
+    }
+}
+
+/// v1 branch of the migration flow (design "Data migration"), in flow
+/// order: wrap → backup → validate → save.
+fn migrate_v1_bytes(
+    path: &Path,
+    original: &[u8],
+    root: serde_json::Value,
+) -> Result<LoadOutcome, MigrationError> {
+    let legacy: Vec<ConnectionConfig> =
+        serde_json::from_value(root).map_err(|e| MigrationError::MalformedData {
+            cause: e.to_string(),
+        })?;
+
+    // Wrap into the default library (Req 10.10).
+    let migrated = migrate_v1(legacy.clone());
+
+    // Backup the ORIGINAL bytes before anything else, without clobber: an
+    // existing backup is kept when valid, and an unusable existing backup
+    // fails the whole migration closed — data is never destroyed to make
+    // migration proceed.
+    let backup_path = backup_path_for(path);
+    if backup_path.exists() {
+        let existing =
+            std::fs::read(&backup_path).map_err(|e| MigrationError::BackupInspectFailed {
+                cause: e.to_string(),
+            })?;
+        validate_backup_bytes(&existing)
+            .map_err(|cause| MigrationError::BackupExistsInvalid { cause })?;
+    } else {
+        write_atomic(&backup_path, original).map_err(|e| MigrationError::BackupCreateFailed {
+            cause: e.to_string(),
+        })?;
+    }
+
+    // Validate the wrapped document and assert count/id parity (design:
+    // "assert count and id parity").
+    migrated.validate().map_err(MigrationError::InvalidData)?;
+    assert_v1_parity(&legacy, &migrated)?;
+
+    // Atomic v2 commit; on failure the original v1 file and the backup
+    // stay intact (task 6.2 writer semantics).
+    let json =
+        serde_json::to_string_pretty(&migrated).map_err(|e| MigrationError::SerializeFailed {
+            cause: e.to_string(),
+        })?;
+    write_atomic(path, json.as_bytes()).map_err(|e| MigrationError::CommitFailed {
+        cause: e.to_string(),
+    })?;
+
+    Ok(LoadOutcome::MigratedV2 {
+        document: migrated,
+        backup_path,
+    })
+}
+
+/// Backup path for a store file (design "Data migration"):
+/// `connections.json` → `connections.json.v1.bak`.
+fn backup_path_for(path: &Path) -> PathBuf {
+    match path.file_name() {
+        Some(name) => {
+            let mut suffixed = name.to_os_string();
+            suffixed.push(V1_BACKUP_SUFFIX);
+            path.with_file_name(suffixed)
+        }
+        None => PathBuf::from(V1_BACKUP_SUFFIX),
+    }
+}
+
+/// An existing backup is usable when it parses as v1 legacy data or as an
+/// invariant-valid v2 document — anything else must block migration.
+fn validate_backup_bytes(bytes: &[u8]) -> Result<(), String> {
+    let root: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("not valid JSON: {e}"))?;
+    match root {
+        serde_json::Value::Array(_) => serde_json::from_value::<Vec<ConnectionConfig>>(root)
+            .map(|_| ())
+            .map_err(|e| format!("not a valid v1 connection array: {e}")),
+        serde_json::Value::Object(_) => serde_json::from_value::<LibraryDocument>(root)
+            .map_err(|e| format!("not a valid v2 library document: {e}"))
+            .and_then(|document| {
+                document
+                    .validate()
+                    .map_err(|e| format!("v2 backup violates tree invariants: {e}"))
+            }),
+        _ => Err("unsupported backup shape (expected v1 array or v2 object)".to_string()),
+    }
+}
+
+/// Count and id parity between the legacy input and the migrated output
+/// (design "Data migration": assert both before committing).
+fn assert_v1_parity(
+    legacy: &[ConnectionConfig],
+    migrated: &LibraryDocument,
+) -> Result<(), MigrationError> {
+    if legacy.len() != migrated.connections.len() {
+        return Err(MigrationError::ParityCheckFailed {
+            detail: format!(
+                "connection count changed: {} -> {}",
+                legacy.len(),
+                migrated.connections.len()
+            ),
+        });
+    }
+    let legacy_ids: HashSet<&str> = legacy.iter().map(|c| c.id.as_str()).collect();
+    let migrated_ids: HashSet<&str> = migrated.connections.iter().map(|c| c.id.as_str()).collect();
+    if legacy_ids != migrated_ids {
+        return Err(MigrationError::ParityCheckFailed {
+            detail: "connection id set changed during migration".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// UI-facing projection of the store's mode (Req 10.12; task 8.7 renders
+/// the recovery instructions, this layer only exposes them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreStatus {
+    /// Document loaded (v2 as-is or after v1 migration); mutations allowed.
+    Ready,
+    /// Load or migration failed: the original file and existing backup are
+    /// preserved, every mutation is rejected until a reload succeeds.
+    WriteBlocked {
+        /// Display text of the blocking [`MigrationError`].
+        reason: String,
+        /// Recovery instructions to show until valid data is reloaded.
+        instructions: &'static str,
+    },
+}
+
+/// Internal store mode: a readable snapshot, or write-blocked recovery.
+#[derive(Debug, Clone)]
+enum StoreState {
+    Ready(LibraryDocument),
+    WriteBlocked { cause: MigrationError },
+}
+
+/// Single-owner library store (design "Storage transactions and recovery"):
+/// one `Mutex` serializes every read/write against the store file, which
+/// is the discipline the task 6.2 Windows spike requires (an open
+/// unshared read handle blocks the atomic replace). The backup path is
+/// derived from the store path on demand ([`backup_path_for`]).
+struct StoreInner {
+    path: PathBuf,
+    state: StoreState,
+}
+
+/// Owner of `connections.json`: loads (migrating v1 on first sight),
+/// serves the current snapshot, and gates every mutation behind the
+/// write-blocked recovery state (Req 10.10/10.12).
+///
+/// On any load/migration failure the store opens in
+/// [`StoreStatus::WriteBlocked`]: the on-disk file and backup are left
+/// untouched, [`LibraryStore::save`] rejects every mutation — including
+/// the empty replacement that would wipe unreadable data — and only a
+/// successful [`LibraryStore::reload`] lifts the block.
+pub struct LibraryStore {
+    inner: Mutex<StoreInner>,
+}
+
+impl LibraryStore {
+    /// Open (or restart) the store at `path`, migrating a v1 file per the
+    /// design flow. Never panics and never writes on failure: a failed
+    /// load yields a write-blocked store.
+    pub fn open(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let backup_path = backup_path_for(&path);
+        let state = match load_or_migrate(&path) {
+            Ok(outcome) => {
+                match &outcome {
+                    LoadOutcome::Fresh => {
+                        log::info!(
+                            "Library store: no file at {}, starting empty",
+                            path.display()
+                        );
+                    }
+                    LoadOutcome::LoadedV2(_) => {
+                        log::info!("Library store: loaded v2 document from {}", path.display());
+                    }
+                    LoadOutcome::MigratedV2 { .. } => {
+                        log::info!(
+                            "Library store: migrated {} to v2 (backup at {})",
+                            path.display(),
+                            backup_path.display()
+                        );
+                    }
+                }
+                StoreState::Ready(outcome.document())
+            }
+            Err(cause) => {
+                log::error!(
+                    "Library store: loading {} failed ({cause}); entering write-blocked \
+                     recovery, original file and backup preserved",
+                    path.display()
+                );
+                StoreState::WriteBlocked { cause }
+            }
+        };
+        Self {
+            inner: Mutex::new(StoreInner { path, state }),
+        }
+    }
+
+    /// Current store mode for the UI (recovery state, Req 10.12).
+    pub fn status(&self) -> StoreStatus {
+        match &self
+            .inner
+            .lock()
+            .expect("library store lock poisoned")
+            .state
+        {
+            StoreState::Ready(_) => StoreStatus::Ready,
+            StoreState::WriteBlocked { cause } => StoreStatus::WriteBlocked {
+                reason: cause.to_string(),
+                instructions: RECOVERY_INSTRUCTIONS,
+            },
+        }
+    }
+
+    /// The current document snapshot, or `None` while write-blocked.
+    pub fn document(&self) -> Option<LibraryDocument> {
+        match &self
+            .inner
+            .lock()
+            .expect("library store lock poisoned")
+            .state
+        {
+            StoreState::Ready(document) => Some(document.clone()),
+            StoreState::WriteBlocked { .. } => None,
+        }
+    }
+
+    /// Re-run the load/migration from disk. On success the store becomes
+    /// ready with the (possibly migrated) document; on failure it stays
+    /// write-blocked. This is the only path out of recovery (Req 10.12:
+    /// "until valid data is restored and reloaded").
+    pub fn reload(&self) -> Result<LoadOutcome, MigrationError> {
+        let mut inner = self.inner.lock().expect("library store lock poisoned");
+        match load_or_migrate(&inner.path) {
+            Ok(outcome) => {
+                inner.state = StoreState::Ready(outcome.document());
+                Ok(outcome)
+            }
+            Err(cause) => {
+                inner.state = StoreState::WriteBlocked {
+                    cause: cause.clone(),
+                };
+                Err(cause)
+            }
+        }
+    }
+
+    /// Validate, atomically persist, then publish `document` (design
+    /// "Storage transactions and recovery": persist before publishing).
+    ///
+    /// Rejected while write-blocked — including an empty replacement
+    /// (Req 10.12: a failed load must never lead to a successful
+    /// empty-store save). On commit failure the previous in-memory
+    /// snapshot and on-disk file are retained.
+    pub fn save(&self, document: LibraryDocument) -> Result<(), MigrationError> {
+        let mut inner = self.inner.lock().expect("library store lock poisoned");
+        if let StoreState::WriteBlocked { cause } = &inner.state {
+            return Err(MigrationError::WriteBlocked {
+                reason: cause.to_string(),
+            });
+        }
+        document.validate().map_err(MigrationError::InvalidData)?;
+        let json = serde_json::to_string_pretty(&document).map_err(|e| {
+            MigrationError::SerializeFailed {
+                cause: e.to_string(),
+            }
+        })?;
+        if let Some(parent) = inner.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| MigrationError::CommitFailed {
+                cause: format!("cannot create data directory: {e}"),
+            })?;
+        }
+        write_atomic(&inner.path, json.as_bytes()).map_err(|e| MigrationError::CommitFailed {
+            cause: e.to_string(),
+        })?;
+        // Publish only after the commit succeeded.
+        inner.state = StoreState::Ready(document);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -852,5 +1337,621 @@ mod tests {
                 node: NodeId::connection(&missing)
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    //! Task 6.3 (Req 6.1/6.2/10.10/10.12): v1→v2 migration and
+    //! write-blocked recovery. Versioned serde fixtures drive every case:
+    //! a golden v1 bare array (the pre-2.0 `connections.json` shape) with
+    //! expected v2 output asserted field-for-field, plus fault fixtures
+    //! for malformed data, unsupported schemas, invalid backups and
+    //! interrupted migration. Fault injection is admin-free: pre-created
+    //! invalid/unreadable backups, read-only attributes (Windows), a
+    //! read-only data directory (Unix) and simulated staging residue.
+
+    use super::*;
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// Golden v1 fixture (bare array, camelCase, serde-defaulted optional
+    /// fields): two records so field preservation is proven across one
+    /// fully-populated and one minimal record.
+    const V1_GOLDEN: &str = r##"[
+        {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "name": "Alpha DC",
+            "host": "alpha.invalid",
+            "port": 3389,
+            "username": "admin",
+            "domain": "CORP",
+            "colorAccent": "#ff0000",
+            "tags": ["prod", "dc"],
+            "displayWidth": 2560,
+            "displayHeight": 1440,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T03:04:05Z",
+            "lastConnectedAt": "2026-01-03T06:07:08Z"
+        },
+        {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "name": "Beta APP",
+            "host": "beta.invalid",
+            "port": 33890,
+            "mock": true,
+            "createdAt": "2026-02-01T00:00:00Z",
+            "updatedAt": "2026-02-01T00:00:00Z"
+        }
+    ]"##;
+
+    /// A second, older v1 capture: used as a pre-existing valid backup to
+    /// prove backups are never clobbered.
+    const V1_OLDER_BACKUP: &str = r#"[
+        {
+            "id": "33333333-3333-4333-8333-333333333333",
+            "name": "Old Host",
+            "host": "old.invalid",
+            "port": 3389,
+            "createdAt": "2025-01-01T00:00:00Z",
+            "updatedAt": "2025-01-01T00:00:00Z"
+        }
+    ]"#;
+
+    /// Not JSON at all: the store must fail closed and keep these bytes.
+    const MALFORMED_JSON: &str = "{ not valid json ";
+
+    /// Recognizable object shape but an unsupported schema version.
+    const V3_SCHEMA: &str = r#"{"version":3,"libraries":[],"folders":[],"connections":[]}"#;
+
+    /// Valid JSON, claims v2, but the connection references a library that
+    /// does not exist: a tree-invariant violation at load time.
+    const V2_UNKNOWN_LIBRARY: &str = r#"{"version":2,"libraries":[],"folders":[],"connections":[
+        {"id":"11111111-1111-4111-8111-111111111111","name":"X","host":"x.invalid","port":3389,
+         "createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z",
+         "libraryId":"99999999-9999-4999-8999-999999999999"}
+    ]}"#;
+
+    /// v1 shape with a non-UUID id: migration verifies every legacy ID and
+    /// must fail closed instead of coercing it.
+    const V1_INVALID_ID: &str = r#"[{"id":"legacy","name":"Legacy","host":"legacy.invalid","port":3389,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}]"#;
+
+    fn write_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
+    fn read_file(path: &Path) -> String {
+        String::from_utf8(fs::read(path).unwrap()).unwrap()
+    }
+
+    fn parse_v1(json: &str) -> Vec<ConnectionConfig> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn backup_of(path: &Path) -> PathBuf {
+        super::backup_path_for(path)
+    }
+
+    fn value_of(doc: &LibraryDocument) -> serde_json::Value {
+        serde_json::to_value(doc).unwrap()
+    }
+
+    fn sample_v2_document() -> LibraryDocument {
+        let library = Library::new("Work");
+        let folder = Folder::new(&library.id, None, "Prod");
+        let root_conn = ConnectionConfig {
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+            name: "root-conn".to_string(),
+            host: "root.invalid".to_string(),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: library.id.clone(),
+            folder_id: None,
+            created_at: Library::new("x").created_at,
+            updated_at: Library::new("x").updated_at,
+            last_connected_at: None,
+        };
+        let folder_conn = ConnectionConfig {
+            id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string(),
+            name: "folder-conn".to_string(),
+            host: "folder.invalid".to_string(),
+            ..root_conn.clone()
+        };
+        LibraryDocument::new(vec![library], vec![folder], vec![root_conn, folder_conn])
+    }
+
+    /// Req 10.10 "without data loss": every field of every legacy record
+    /// must survive migration untouched; only libraryId (default library)
+    /// and folderId (root placement) are assigned.
+    fn assert_preserved(
+        original: &ConnectionConfig,
+        migrated: &ConnectionConfig,
+        library_id: &str,
+    ) {
+        assert_eq!(migrated.id, original.id, "id must survive migration");
+        assert_eq!(migrated.name, original.name, "name must survive");
+        assert_eq!(migrated.host, original.host, "host must survive");
+        assert_eq!(migrated.port, original.port, "port must survive");
+        assert_eq!(
+            migrated.username, original.username,
+            "username must survive"
+        );
+        assert_eq!(migrated.domain, original.domain, "domain must survive");
+        assert_eq!(
+            migrated.color_accent, original.color_accent,
+            "colorAccent must survive"
+        );
+        assert_eq!(migrated.tags, original.tags, "tags must survive");
+        assert_eq!(
+            migrated.display_width, original.display_width,
+            "displayWidth must survive"
+        );
+        assert_eq!(
+            migrated.display_height, original.display_height,
+            "displayHeight must survive"
+        );
+        assert_eq!(
+            migrated.created_at, original.created_at,
+            "createdAt must survive"
+        );
+        assert_eq!(
+            migrated.updated_at, original.updated_at,
+            "updatedAt must survive"
+        );
+        assert_eq!(
+            migrated.last_connected_at, original.last_connected_at,
+            "lastConnectedAt must survive"
+        );
+        assert_eq!(migrated.mock, original.mock, "mock must survive");
+        assert_eq!(
+            migrated.library_id, library_id,
+            "migration assigns exactly the default library id"
+        );
+        assert_eq!(
+            migrated.folder_id, None,
+            "v1 connections are placed at the library root"
+        );
+    }
+
+    /// Windows refuses to replace a read-only file: the deterministic,
+    /// admin-free way to fail the v2 commit step itself.
+    #[cfg(windows)]
+    fn set_readonly(path: &Path, on: bool) {
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_readonly(on);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn migrates_golden_v1_fixture_preserving_every_field_and_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, V1_GOLDEN);
+
+        let outcome = load_or_migrate(&path).unwrap();
+
+        let LoadOutcome::MigratedV2 {
+            document,
+            backup_path,
+        } = outcome
+        else {
+            panic!("golden v1 input must migrate to v2, got {outcome:?}");
+        };
+
+        // Expected v2 output: version discriminator, exactly one default
+        // library, no folders, every connection at the library root.
+        document.validate().unwrap();
+        assert_eq!(document.version, DOCUMENT_VERSION);
+        let [library] = &document.libraries[..] else {
+            panic!("expected exactly one default library");
+        };
+        assert_eq!(library.name, DEFAULT_LIBRARY_NAME);
+        assert!(document.folders.is_empty(), "v1 had no folders");
+
+        // Count and id parity (design "Data migration": assert both).
+        let legacy = parse_v1(V1_GOLDEN);
+        assert_eq!(document.connections.len(), legacy.len(), "count parity");
+        let expected_ids: HashSet<&str> = legacy.iter().map(|c| c.id.as_str()).collect();
+        let migrated_ids: HashSet<&str> =
+            document.connections.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(migrated_ids, expected_ids, "id parity");
+
+        for original in &legacy {
+            let migrated = document
+                .connections
+                .iter()
+                .find(|c| c.id == original.id)
+                .expect("connection present by id");
+            assert_preserved(original, migrated, &library.id);
+        }
+
+        // The backup holds the ORIGINAL v1 bytes, byte-for-byte.
+        assert_eq!(backup_path, backup_of(&path));
+        assert_eq!(
+            fs::read(&backup_path).unwrap(),
+            V1_GOLDEN.as_bytes(),
+            "backup must preserve the original v1 bytes"
+        );
+
+        // The committed file is exactly the v2 document.
+        let on_disk: LibraryDocument = serde_json::from_str(&read_file(&path)).unwrap();
+        assert_eq!(value_of(&on_disk), value_of(&document));
+    }
+
+    #[test]
+    fn restart_after_migration_loads_v2_as_is_and_keeps_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, V1_GOLDEN);
+
+        let first = load_or_migrate(&path).unwrap();
+        let migrated_doc = first.document();
+        assert!(matches!(first, LoadOutcome::MigratedV2 { .. }));
+
+        // Restart: the v2 file is used as-is — no second migration, no
+        // backup rewrite, no data change.
+        let second = load_or_migrate(&path).unwrap();
+        assert!(
+            matches!(second, LoadOutcome::LoadedV2(_)),
+            "restart must load the committed v2 file as-is"
+        );
+        assert_eq!(value_of(&second.document()), value_of(&migrated_doc));
+        assert_eq!(
+            fs::read(backup_of(&path)).unwrap(),
+            V1_GOLDEN.as_bytes(),
+            "backup must stay untouched across restart"
+        );
+    }
+
+    #[test]
+    fn missing_file_starts_empty_ready_without_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+
+        let store = LibraryStore::open(&path);
+
+        assert_eq!(store.status(), StoreStatus::Ready);
+        assert_eq!(
+            value_of(&store.document().expect("ready store has a document")),
+            value_of(&LibraryDocument::empty())
+        );
+        assert!(!path.exists(), "open must not create the store file");
+        assert!(!backup_of(&path).exists(), "no backup without migration");
+    }
+
+    #[test]
+    fn malformed_data_fails_closed_preserving_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, MALFORMED_JSON);
+
+        let err = load_or_migrate(&path).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::MalformedData { .. }),
+            "typed error expected, got {err:?}"
+        );
+
+        // Fail closed: original bytes preserved byte-for-byte, no backup,
+        // and the store opens write-blocked (Req 10.12).
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            MALFORMED_JSON.as_bytes(),
+            "malformed original must be preserved byte-for-byte"
+        );
+        assert!(!backup_of(&path).exists(), "no backup without migration");
+        let store = LibraryStore::open(&path);
+        assert!(
+            matches!(store.status(), StoreStatus::WriteBlocked { .. }),
+            "store must open write-blocked on malformed data"
+        );
+    }
+
+    #[test]
+    fn unsupported_schema_fails_closed_for_every_unrecognized_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        for (label, fixture, found) in [
+            ("v3 object", V3_SCHEMA, Some(3)),
+            ("object without version", r#"{"libraries":[]}"#, None),
+            ("scalar root", "42", None),
+        ] {
+            write_file(&path, fixture);
+            let err = load_or_migrate(&path).unwrap_err();
+            assert_eq!(
+                err,
+                MigrationError::UnsupportedSchema { found },
+                "fail closed: {label}"
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                fixture.as_bytes(),
+                "unsupported schema must preserve the original bytes ({label})"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_document_with_invalid_tree_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, V2_UNKNOWN_LIBRARY);
+
+        let err = load_or_migrate(&path).unwrap_err();
+        assert_eq!(
+            err,
+            MigrationError::InvalidData(LibraryError::UnknownLibrary {
+                id: "99999999-9999-4999-8999-999999999999".to_string()
+            }),
+            "tree-invariant violations must surface the typed LibraryError"
+        );
+        assert_eq!(fs::read(&path).unwrap(), V2_UNKNOWN_LIBRARY.as_bytes());
+    }
+
+    #[test]
+    fn v1_record_with_invalid_id_fails_closed_after_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, V1_INVALID_ID);
+
+        let err = load_or_migrate(&path).unwrap_err();
+        assert_eq!(
+            err,
+            MigrationError::InvalidData(LibraryError::InvalidId {
+                kind: "connection",
+                id: "legacy".to_string()
+            }),
+            "migration verifies every legacy ID (design: verify every legacy field and ID)"
+        );
+        // Design flow order is Backup → Validate, so the backup of the
+        // un migrated original exists — and the original is untouched.
+        assert_eq!(fs::read(&path).unwrap(), V1_INVALID_ID.as_bytes());
+        assert_eq!(
+            fs::read(backup_of(&path)).unwrap(),
+            V1_INVALID_ID.as_bytes(),
+            "backup (written before validation) preserves the original"
+        );
+    }
+
+    #[test]
+    fn existing_invalid_backup_blocks_migration_preserving_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, V1_GOLDEN);
+        write_file(&backup_of(&path), "definitely not json");
+
+        let err = load_or_migrate(&path).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::BackupExistsInvalid { .. }),
+            "typed error expected, got {err:?}"
+        );
+        // Fail closed: neither the original nor the suspicious backup was
+        // touched, and no v2 was committed.
+        assert_eq!(fs::read(&path).unwrap(), V1_GOLDEN.as_bytes());
+        assert_eq!(fs::read(backup_of(&path)).unwrap(), b"definitely not json");
+    }
+
+    #[test]
+    fn unreadable_existing_backup_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, V1_GOLDEN);
+        // A directory at the backup path makes examining it fail on every
+        // OS (EISDIR on Unix, access denied on Windows).
+        fs::create_dir(backup_of(&path)).unwrap();
+
+        let err = load_or_migrate(&path).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::BackupInspectFailed { .. }),
+            "typed error expected, got {err:?}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), V1_GOLDEN.as_bytes());
+    }
+
+    #[test]
+    fn existing_valid_backup_is_never_clobbered_and_migration_retries() {
+        // Restart after a migration interrupted between backup and commit:
+        // a valid backup from the earlier attempt already exists while the
+        // store file is still v1. The retry must keep the existing backup
+        // untouched and complete the migration.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, V1_GOLDEN);
+        write_file(&backup_of(&path), V1_OLDER_BACKUP);
+
+        let outcome = load_or_migrate(&path).unwrap();
+
+        assert!(matches!(outcome, LoadOutcome::MigratedV2 { .. }));
+        assert_eq!(
+            fs::read(backup_of(&path)).unwrap(),
+            V1_OLDER_BACKUP.as_bytes(),
+            "an existing valid backup must never be clobbered"
+        );
+        let on_disk: LibraryDocument = serde_json::from_str(&read_file(&path)).unwrap();
+        let golden_ids: HashSet<String> = parse_v1(V1_GOLDEN).into_iter().map(|c| c.id).collect();
+        let disk_ids: HashSet<String> = on_disk.connections.into_iter().map(|c| c.id).collect();
+        assert_eq!(
+            disk_ids, golden_ids,
+            "ids preserved by the retried migration"
+        );
+    }
+
+    /// Unix-only injection: a read-only data directory (chmod, no admin
+    /// rights) fails backup creation; migration must block BEFORE any v2
+    /// commit. Windows lacks an equivalent admin-free create-failure, so
+    /// backup faults there are covered by the invalid/unreadable-backup
+    /// tests above.
+    #[cfg(unix)]
+    #[test]
+    fn backup_creation_failure_blocks_migration_before_commit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, V1_GOLDEN);
+
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let result = load_or_migrate(&path);
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, MigrationError::BackupCreateFailed { .. }),
+            "typed error expected, got {err:?}"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            V1_GOLDEN.as_bytes(),
+            "original v1 must stay intact when the backup cannot be created"
+        );
+        assert!(
+            !backup_of(&path).exists(),
+            "no backup residue after failed creation"
+        );
+    }
+
+    /// Windows-only injection: a read-only store file makes the atomic
+    /// replace step itself fail (ERROR_ACCESS_DENIED, no admin rights).
+    #[cfg(windows)]
+    #[test]
+    fn commit_failure_preserves_original_and_backup_then_retry_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, V1_GOLDEN);
+        set_readonly(&path, true);
+
+        let store = LibraryStore::open(&path);
+        assert!(
+            matches!(store.status(), StoreStatus::WriteBlocked { .. }),
+            "failed commit must open the store write-blocked"
+        );
+        let err = store.reload().unwrap_err();
+        assert!(
+            matches!(err, MigrationError::CommitFailed { .. }),
+            "typed error expected, got {err:?}"
+        );
+
+        set_readonly(&path, false);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            V1_GOLDEN.as_bytes(),
+            "original v1 must survive the failed commit byte-for-byte"
+        );
+        assert_eq!(
+            fs::read(backup_of(&path)).unwrap(),
+            V1_GOLDEN.as_bytes(),
+            "backup must survive the failed commit"
+        );
+
+        // Retry (restart-equivalent): the existing valid backup is kept
+        // and the migration now completes.
+        let outcome = store.reload().unwrap();
+        assert!(matches!(outcome, LoadOutcome::MigratedV2 { .. }));
+        assert_eq!(store.status(), StoreStatus::Ready);
+        let on_disk: LibraryDocument = serde_json::from_str(&read_file(&path)).unwrap();
+        let golden_ids: HashSet<String> = parse_v1(V1_GOLDEN).into_iter().map(|c| c.id).collect();
+        let disk_ids: HashSet<String> = on_disk.connections.into_iter().map(|c| c.id).collect();
+        assert_eq!(disk_ids, golden_ids);
+    }
+
+    #[test]
+    fn write_blocked_recovery_rejects_mutations_and_cannot_save_empty_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        write_file(&path, MALFORMED_JSON);
+
+        let store = LibraryStore::open(&path);
+        let blocked_status = store.status();
+        let StoreStatus::WriteBlocked {
+            reason,
+            instructions,
+        } = &blocked_status
+        else {
+            panic!("store must be write-blocked after a failed load");
+        };
+        assert!(!reason.is_empty(), "blocked status carries the cause");
+        assert!(
+            !instructions.is_empty(),
+            "blocked status carries recovery instructions for the UI (task 8.7)"
+        );
+
+        // THE empty-replacement guard: saving an empty document over the
+        // unreadable original would destroy the only copy of the data.
+        let err = store.save(LibraryDocument::empty()).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::WriteBlocked { .. }),
+            "empty replacement must be rejected in recovery, got {err:?}"
+        );
+        // Every other mutation is blocked too (Req 10.12).
+        let err = store.save(sample_v2_document()).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::WriteBlocked { .. }),
+            "all store mutations must be blocked in recovery"
+        );
+        assert!(
+            store.document().is_none(),
+            "no readable snapshot may be exposed while blocked"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            MALFORMED_JSON.as_bytes(),
+            "nothing may be written while blocked"
+        );
+
+        // Reload keeps blocking while the data is still invalid.
+        assert!(store.reload().is_err());
+        assert_eq!(store.status(), blocked_status);
+
+        // Repair on disk, then reload lifts the block (Req 10.12: blocked
+        // "until valid data is restored and reloaded").
+        let repaired = sample_v2_document();
+        write_file(&path, &serde_json::to_string_pretty(&repaired).unwrap());
+        assert!(matches!(store.reload().unwrap(), LoadOutcome::LoadedV2(_)));
+        assert_eq!(store.status(), StoreStatus::Ready);
+
+        // Mutations work again and round-trip through the file.
+        store.save(repaired.clone()).unwrap();
+        let on_disk: LibraryDocument = serde_json::from_str(&read_file(&path)).unwrap();
+        assert_eq!(value_of(&on_disk), value_of(&repaired));
+    }
+
+    #[test]
+    fn leftover_staging_files_do_not_corrupt_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let doc = sample_v2_document();
+        write_file(&path, &serde_json::to_string_pretty(&doc).unwrap());
+        // Simulate residue from an interrupted staging round (tempfile's
+        // ".tmp" prefix).
+        let residue = dir.path().join(".tmpAbandonedStaging");
+        fs::write(&residue, b"abandoned staging bytes").unwrap();
+
+        let store = LibraryStore::open(&path);
+
+        assert_eq!(store.status(), StoreStatus::Ready);
+        assert_eq!(
+            value_of(&store.document().unwrap()),
+            value_of(&doc),
+            "restart must load the prior data despite staging residue"
+        );
+        assert_eq!(
+            fs::read(&residue).unwrap(),
+            b"abandoned staging bytes",
+            "unknown files are never deleted blindly"
+        );
+
+        // The store remains fully functional alongside the residue.
+        store.save(doc.clone()).unwrap();
+        let on_disk: LibraryDocument = serde_json::from_str(&read_file(&path)).unwrap();
+        assert_eq!(value_of(&on_disk), value_of(&doc));
     }
 }

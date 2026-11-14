@@ -161,7 +161,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Tests preserve prior file on failed replacement, use same-directory staging and retain recoverable error state; if unsupported, return to design before a second crate.
   - _Boundary: Atomic writer_
   - _Requirements: 6.1,10.10,10.12_
-- [ ] 6.3 Implement migration and write-blocked recovery
+- [x] 6.3 Implement migration and write-blocked recovery
   - Reuse versioned serde fixtures; preserve every field and ID; create backup without clobber, fail closed on existing invalid backup or unsupported schema.
   - Done: Fault tests cover backup/commit failure, malformed data, interrupted staging and restart; recovery cannot save an empty replacement.
   - _Boundary: Migration_

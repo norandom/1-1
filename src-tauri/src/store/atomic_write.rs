@@ -17,9 +17,10 @@
 //! cleanly, with `PermissionDenied` and the prior file intact — while
 //! another handle holds the target without `FILE_SHARE_DELETE`. Store
 //! owners must therefore serialize reads and writes against the same file
-//! (design: one store owner and serialized transactions); tasks 6.3/6.4
-//! own that policy. Not yet wired into any store: 6.3 (migration) and 6.4
-//! (CRUD read models) are the first production callers.
+//! (design: one store owner and serialized transactions); the 6.3
+//! migration store (`store::library::LibraryStore`) owns that policy with
+//! a single mutex, and 6.4+ commands go through it. App wiring still
+//! arrives with the 6.4-6.6 integration tasks.
 
 use std::io::{self, Write};
 use std::path::Path;
