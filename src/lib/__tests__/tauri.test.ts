@@ -8,6 +8,7 @@ import {
   getLibraryStatus,
   listDescendants,
   listTree,
+  moveNode,
   reloadLibraryStore,
   renameFolder,
   renameLibrary,
@@ -127,5 +128,38 @@ describe('library wrappers (task 6.4, Req 10.1/10.2/10.3/10.5)', () => {
   it('CRUD wrappers reject instead of swallowing command errors', async () => {
     invokeMock.mockRejectedValueOnce(new Error('store is write-blocked'));
     await expect(createLibrary('Work')).rejects.toThrow('store is write-blocked');
+  });
+});
+
+describe('move wrapper (task 6.5, Req 10.8/10.15)', () => {
+  it('moveNode marshals the node and target kind/id pairs', async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await expect(moveNode('folder', 'folder-1', 'library', 'lib-2')).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('move_node', {
+      kind: 'folder',
+      id: 'folder-1',
+      targetKind: 'library',
+      targetId: 'lib-2',
+    });
+  });
+
+  it('moveNode marshals cross-library connection moves', async () => {
+    invokeMock.mockResolvedValueOnce(null);
+    await moveNode('connection', 'conn-1', 'folder', 'folder-9');
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('move_node', {
+      kind: 'connection',
+      id: 'conn-1',
+      targetKind: 'folder',
+      targetId: 'folder-9',
+    });
+  });
+
+  it('moveNode rejects instead of swallowing command errors (Req 10.15)', async () => {
+    invokeMock.mockRejectedValueOnce(
+      new Error('library operation rejected: folder parent chain is cyclic at folder-1')
+    );
+    await expect(moveNode('folder', 'folder-1', 'folder', 'folder-3')).rejects.toThrow(
+      'folder parent chain is cyclic at folder-1'
+    );
   });
 });

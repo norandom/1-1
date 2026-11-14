@@ -171,7 +171,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Create/rename/read operations round-trip with nested descendants; errors preserve prior snapshot.
   - _Boundary: Library commands integration_
   - _Requirements: 10.1,10.2,10.3,10.5,10.7_
-- [ ] 6.5 Implement atomic cross-library moves
+- [x] 6.5 Implement atomic cross-library moves
   - Validate proposed snapshot then persist/publish; preserve IDs, credentials, settings and active session references.
   - Done: Cycle/missing-target rejection, subtree moves and failed-write rollback pass tests.
   - _Boundary: Tree transactions_
@@ -351,6 +351,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,7.3,8.1,8.2,8.3,8.4,8.5,8.6,12.1,12.6,12.8,12.9,13.1,13.2,13.3,13.4_
 
 ## Implementation Notes
+- 6.5 suggestion carried for 8.4/11.2: add a direct folder→library-root move test (parent→None + subtree library_id rewrite) — branch is shared code already proven via connection→library, but deserves its own case.
 - 6.4 design alignments landed 2026-11-14: design.md now records the typed `descendants` error, the free-fn `migrate_v1` shape, the two recovery read commands, and the transitional `libraries.json` layout. **6.6 obligation**: unify `libraries.json` + v1 `connections.json` — merge v1 connections into the (possibly already user-populated) v2 default library without data loss; promote `LibraryStore::document()/save()` from `#[cfg(test)]` if a whole-document production caller appears.
 - 6.1 model layer notes for the store tasks: `LibraryError` is hand-rolled (Display + std::error::Error) though thiserror sits unused in Cargo.toml — either switch to the derive or record the hand-roll decision when 6.3+ adds error types; `LibraryDocument::descendants` returns a typed `UnknownNode` error where design L346 shows a bare Vec on `LibraryStore` — 6.4 must reconcile (map at the store layer or amend design); `#[allow(dead_code)]` on `pub mod library` must be dropped when the first production caller lands (6.3-6.6).
 - Sub-agent verification claims must paste VERBATIM tool output (5.4 round 1: a name-filtered clippy summary hid `(lib) generated 2 warnings` dead-code lines behind the two pre-existing warning texts, producing a false "exactly 2 warnings both configs" claim). Reviewers: always re-run static checks with full output.

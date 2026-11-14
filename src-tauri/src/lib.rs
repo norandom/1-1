@@ -179,11 +179,12 @@ pub fn run() {
             // Clipboard commands
             commands::clipboard::clipboard_write,
             commands::clipboard::clipboard_read,
-            // Library commands (task 6.4, Req 10.1/10.2/10.3/10.5)
+            // Library commands (tasks 6.4/6.5, Req 10.1/10.2/10.3/10.5/10.8/10.15)
             commands::library::create_library,
             commands::library::rename_library,
             commands::library::create_folder,
             commands::library::rename_folder,
+            commands::library::move_node,
             commands::library::list_tree,
             commands::library::list_descendants,
             commands::library::get_library_status,

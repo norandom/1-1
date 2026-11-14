@@ -1,13 +1,15 @@
-//! Task 6.4 (Req 10.1/10.2/10.3/10.5): thin library/folder CRUD and
-//! read-model commands over [`LibraryStore`]. Every command only marshals
-//! arguments and results — validation, transaction serialization and
-//! persistence live in the store layer (design "Library Commands";
-//! errors surface as `Result<T, String>` matching the existing style).
+//! Task 6.4/6.5 (Req 10.1/10.2/10.3/10.5/10.8/10.15): thin library/folder
+//! CRUD, read-model and tree-move commands over [`LibraryStore`]. Every
+//! command only marshals arguments and results — validation, transaction
+//! serialization and persistence live in the store layer (design "Library
+//! Commands"; errors surface as `Result<T, String>` matching the existing
+//! style).
 //!
-//! Scope boundary: delete/move commands belong to tasks 6.5/7.x (folder
-//! deletion moves descendant connections; library deletion coordinates
-//! session actors), and connection CRUD belongs to 6.6 — the read models
-//! here do return connection summaries for dashboards.
+//! Scope boundary: delete commands belong to tasks 7.x (folder deletion
+//! moves descendant connections; library deletion coordinates session
+//! actors), and connection CRUD belongs to 6.6 — the read models here do
+//! return connection summaries for dashboards. Tree moves (drag/keyboard
+//! UI in group 8) landed with task 6.5 (`move_node`).
 
 use tauri::State;
 
@@ -20,6 +22,19 @@ use crate::store::library::{
 /// command style, design L358).
 fn to_message(error: LibraryStoreError) -> String {
     error.to_string()
+}
+
+/// Marshal IPC `kind` + `id` strings into a typed [`NodeId`]; shared by
+/// the node-addressed commands (`list_descendants`, `move_node`).
+fn parse_node(kind: &str, id: &str) -> Result<NodeId, String> {
+    match kind {
+        "library" => Ok(NodeId::library(id)),
+        "folder" => Ok(NodeId::folder(id)),
+        "connection" => Ok(NodeId::connection(id)),
+        other => Err(format!(
+            "unknown node kind '{other}' (expected library, folder or connection)"
+        )),
+    }
 }
 
 #[tauri::command]
@@ -73,6 +88,26 @@ pub async fn rename_folder(
     Ok(folder)
 }
 
+/// Req 10.8/10.15: atomically move a folder or connection — possibly
+/// across libraries — in one store transaction (design "Library
+/// Commands": `move_node(node, target)`). Thin marshal: validation,
+/// descendant `library_id` rewriting, transaction serialization and
+/// persistence live in [`LibraryStore::move_node`].
+#[tauri::command]
+pub async fn move_node(
+    kind: String,
+    id: String,
+    target_kind: String,
+    target_id: String,
+    store: State<'_, LibraryStore>,
+) -> Result<(), String> {
+    let node = parse_node(&kind, &id)?;
+    let target = parse_node(&target_kind, &target_id)?;
+    store.move_node(node, target).map_err(to_message)?;
+    log::info!("Moved {kind} {id} under {target_kind} {target_id}");
+    Ok(())
+}
+
 /// Read model for the sidebar tree (design `list_tree() -> LibraryTree`).
 #[tauri::command]
 pub async fn list_tree(store: State<'_, LibraryStore>) -> Result<LibraryTree, String> {
@@ -87,16 +122,7 @@ pub async fn list_descendants(
     id: String,
     store: State<'_, LibraryStore>,
 ) -> Result<Vec<ConnectionSummary>, String> {
-    let node = match kind.as_str() {
-        "library" => NodeId::library(id),
-        "folder" => NodeId::folder(id),
-        "connection" => NodeId::connection(id),
-        other => {
-            return Err(format!(
-                "unknown node kind '{other}' (expected library, folder or connection)"
-            ));
-        }
-    };
+    let node = parse_node(&kind, &id)?;
     store.descendants(node).map_err(to_message)
 }
 

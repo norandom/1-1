@@ -182,9 +182,9 @@ export async function updateSettings(settings: Partial<AppSettings>): Promise<Ap
   return await invoke<AppSettings>('update_settings', { settings });
 }
 
-// ── Library tree (task 6.4, Req 10.1/10.2/10.3/10.5) ────────────────
-// Thin typed wrappers over commands::library; CRUD errors reject (the UI
-// must surface failures, Req 10.15) instead of swallowing them.
+// ── Library tree (tasks 6.4/6.5, Req 10.1/10.2/10.3/10.5/10.8/10.15) ─
+// Thin typed wrappers over commands::library; CRUD/move errors reject
+// (the UI must surface failures, Req 10.15) instead of swallowing them.
 
 export async function createLibrary(name: string): Promise<Library> {
   return await invoke<Library>('create_library', { name });
@@ -204,6 +204,15 @@ export async function createFolder(
 
 export async function renameFolder(id: string, name: string): Promise<Folder> {
   return await invoke<Folder>('rename_folder', { id, name });
+}
+
+export async function moveNode(
+  kind: NodeKind,
+  id: string,
+  targetKind: NodeKind,
+  targetId: string
+): Promise<void> {
+  return await invoke<void>('move_node', { kind, id, targetKind, targetId });
 }
 
 export async function listTree(): Promise<LibraryTree> {

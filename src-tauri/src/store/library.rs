@@ -174,6 +174,12 @@ pub enum LibraryError {
         connection_id: String,
         folder_id: String,
     },
+    /// A move addressed a library node as its source: libraries are tree
+    /// roots, not movable subtrees (design "LibraryStore v2").
+    MoveSourceIsLibrary { id: String },
+    /// A move addressed a connection node as its target: only folders and
+    /// libraries can receive nodes.
+    MoveTargetIsConnection { id: String },
 }
 
 impl std::fmt::Display for LibraryError {
@@ -204,6 +210,13 @@ impl std::fmt::Display for LibraryError {
             } => write!(
                 f,
                 "connection {connection_id} claims a different library than its folder {folder_id}"
+            ),
+            Self::MoveSourceIsLibrary { id } => {
+                write!(f, "library {id} cannot be moved (libraries are tree roots)")
+            }
+            Self::MoveTargetIsConnection { id } => write!(
+                f,
+                "connection {id} cannot receive a move (only folders and libraries can)"
             ),
         }
     }
@@ -1051,6 +1064,41 @@ impl LibraryStore {
         })
     }
 
+    // ---- Task 6.5: atomic cross-library moves (Req 10.8/10.15) -------
+
+    /// Req 10.8/10.15 (design "Storage transactions and recovery",
+    /// "LibraryStore v2" and "Library Commands"): atomically move a folder
+    /// or connection — including across libraries — in ONE serialized
+    /// transaction: snapshot → [`apply_move`] → validate → persist →
+    /// publish. On any rejection or failed persist the previous
+    /// in-memory snapshot and on-disk file are retained (Req 10.15).
+    ///
+    /// * folder source: re-parents the folder (a library target means
+    ///   that library's root) and, when crossing libraries, rewrites
+    ///   `library_id` on the folder, every descendant folder and every
+    ///   connection filed inside the subtree, so single-library ancestry
+    ///   keeps holding;
+    /// * connection source: re-files the connection (a library target
+    ///   means its root); only `library_id`/`folder_id` change — ids,
+    ///   credentials (moves never touch the keyring), settings and
+    ///   active-session references are preserved;
+    /// * typed rejections (design L336): library nodes as sources,
+    ///   connection nodes as targets, unknown node/target, and folders
+    ///   moved into their own subtree or onto themselves (cycles).
+    ///
+    /// Signature reconciliation (6.4 precedent, design contract block):
+    /// design lists `&mut self` + `LibraryError`, but the store serializes
+    /// every transaction through its interior lock behind `&self`
+    /// (shared `State` in commands) and a move can also fail `WriteBlocked`
+    /// or `PersistFailed`, which a bare `LibraryError` cannot express —
+    /// the same amendment recorded for `descendants`.
+    pub fn move_node(&self, node: NodeId, target: NodeId) -> Result<(), LibraryStoreError> {
+        self.mutate(|mut next| {
+            apply_move(&mut next, node, target)?;
+            Ok((next, ()))
+        })
+    }
+
     /// Design "Library Commands" `list_tree() -> LibraryTree`: flat
     /// libraries/folders plus dashboard connection summaries (10.1).
     /// Rejected with a typed error while write-blocked (no snapshot).
@@ -1149,6 +1197,122 @@ impl LibraryStore {
         inner.state = StoreState::Ready(document);
         Ok(())
     }
+}
+
+/// Pure tree-move core of [`LibraryStore::move_node`] (task 6.5): apply
+/// the move to the proposed snapshot in place; the surrounding
+/// transaction validates the result before persisting it.
+///
+/// `node` must be a folder or connection (libraries are tree roots);
+/// `target` must be a library (re-file at its root) or a folder (move
+/// into it). Folder moves re-parent the subtree and, when crossing
+/// libraries, rewrite `library_id` on every descendant folder and every
+/// connection filed inside the subtree, so single-library ancestry keeps
+/// holding. Connection moves change only `library_id`/`folder_id` —
+/// ids, settings and timestamps (and the keyring) are untouched.
+fn apply_move(
+    document: &mut LibraryDocument,
+    node: NodeId,
+    target: NodeId,
+) -> Result<(), LibraryError> {
+    if node.kind == NodeKind::Library {
+        return Err(LibraryError::MoveSourceIsLibrary { id: node.id });
+    }
+    if target.kind == NodeKind::Connection {
+        return Err(LibraryError::MoveTargetIsConnection { id: target.id });
+    }
+
+    // Resolve the receiving library before touching anything: a library
+    // target owns the drop point itself, a folder target owns its folder.
+    let target_library_id = match target.kind {
+        NodeKind::Library => document
+            .libraries
+            .iter()
+            .find(|library| library.id == target.id)
+            .map(|library| library.id.clone())
+            .ok_or_else(|| LibraryError::UnknownNode {
+                node: target.clone(),
+            })?,
+        _ => document
+            .folders
+            .iter()
+            .find(|folder| folder.id == target.id)
+            .map(|folder| folder.library_id.clone())
+            .ok_or_else(|| LibraryError::UnknownNode {
+                node: target.clone(),
+            })?,
+    };
+
+    match node.kind {
+        NodeKind::Folder => {
+            if !document.folders.iter().any(|folder| folder.id == node.id) {
+                return Err(LibraryError::UnknownNode { node: node.clone() });
+            }
+            // Subtree of the PRE-MOVE tree (children index + BFS,
+            // iterative so deep nesting cannot overflow): the moved
+            // folder plus every descendant that follows it across
+            // libraries.
+            let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+            for folder in &document.folders {
+                if let Some(parent) = folder.parent_id.as_deref() {
+                    children.entry(parent).or_default().push(folder.id.as_str());
+                }
+            }
+            let mut subtree: HashSet<String> = HashSet::from([node.id.clone()]);
+            let mut queue: VecDeque<String> = VecDeque::from([node.id.clone()]);
+            while let Some(current) = queue.pop_front() {
+                for child in children
+                    .get(current.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                {
+                    if subtree.insert((*child).to_string()) {
+                        queue.push_back((*child).to_string());
+                    }
+                }
+            }
+            // A folder cannot move into its own subtree — this also covers
+            // moving onto itself: either would form a parent cycle
+            // (design "LibraryStore v2" / "Storage transactions").
+            if target.kind == NodeKind::Folder && subtree.contains(&target.id) {
+                return Err(LibraryError::FolderCycle { folder_id: node.id });
+            }
+
+            let new_parent = (target.kind == NodeKind::Folder).then(|| target.id.clone());
+            for folder in &mut document.folders {
+                if folder.id == node.id {
+                    folder.parent_id = new_parent.clone();
+                    folder.library_id = target_library_id.clone();
+                } else if subtree.contains(&folder.id) {
+                    folder.library_id = target_library_id.clone();
+                }
+            }
+            for connection in &mut document.connections {
+                if connection
+                    .folder_id
+                    .as_deref()
+                    .is_some_and(|folder_id| subtree.contains(folder_id))
+                {
+                    connection.library_id = target_library_id.clone();
+                }
+            }
+        }
+        NodeKind::Connection => {
+            let new_folder = (target.kind == NodeKind::Folder).then(|| target.id.clone());
+            let Some(connection) = document
+                .connections
+                .iter_mut()
+                .find(|connection| connection.id == node.id)
+            else {
+                return Err(LibraryError::UnknownNode { node: node.clone() });
+            };
+            connection.library_id = target_library_id;
+            connection.folder_id = new_folder;
+        }
+        // Rejected above: libraries are not valid move sources.
+        NodeKind::Library => unreachable!("library move sources are rejected up front"),
+    }
+    Ok(())
 }
 
 /// Store-layer input validation for entity names, so the IPC commands stay
@@ -2608,5 +2772,529 @@ mod crud_tests {
         // The persisted file agrees with the published snapshot.
         let reopened = store_at(dir.path(), "connections.json");
         assert_eq!(reopened.list_tree().unwrap(), tree);
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    //! Task 6.5 (Req 10.8/10.15): atomic cross-library tree moves through
+    //! [`LibraryStore::move_node`] — one serialized snapshot → change →
+    //! validate → persist → publish transaction (design "Storage
+    //! transactions and recovery"). Valid folder moves re-parent the
+    //! subtree and rewrite every descendant `library_id` when crossing
+    //! libraries; connection moves change only `library_id`/`folder_id`,
+    //! preserving ids, settings and timestamps (credentials live in the
+    //! keyring, which the move path never touches — structural: no
+    //! keyring call exists between `move_node` and `mutate`). Every
+    //! rejection — cycles (own subtree/self), missing node/target,
+    //! library sources, connection targets, write-blocked recovery and
+    //! failed persists — retains the previous in-memory snapshot and
+    //! on-disk file (Req 10.15).
+
+    use super::*;
+    use crate::store::connections::ConnectionConfig;
+    use uuid::Uuid;
+
+    const MALFORMED: &str = "{ not a library document";
+    const MISSING_ID: &str = "00000000-0000-4000-8000-000000000000";
+
+    fn store_at(root: &std::path::Path, file: &str) -> LibraryStore {
+        LibraryStore::open(root.join(file))
+    }
+
+    fn conn(library_id: &str, folder_id: Option<&str>, name: &str) -> ConnectionConfig {
+        let now = Utc::now();
+        ConnectionConfig {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            host: format!("{name}.invalid"),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: library_id.to_string(),
+            folder_id: folder_id.map(str::to_string),
+            created_at: now,
+            updated_at: now,
+            last_connected_at: None,
+        }
+    }
+
+    fn folder_of<'a>(tree: &'a LibraryTree, id: &str) -> &'a Folder {
+        tree.folders
+            .iter()
+            .find(|folder| folder.id == id)
+            .unwrap_or_else(|| panic!("folder {id} missing from tree"))
+    }
+
+    fn connection_of<'a>(tree: &'a LibraryTree, id: &str) -> &'a ConnectionSummary {
+        tree.connections
+            .iter()
+            .find(|connection| connection.id == id)
+            .unwrap_or_else(|| panic!("connection {id} missing from tree"))
+    }
+
+    fn connection_entity(store: &LibraryStore, id: &str) -> ConnectionConfig {
+        store
+            .document()
+            .unwrap()
+            .connections
+            .into_iter()
+            .find(|connection| connection.id == id)
+            .unwrap_or_else(|| panic!("connection {id} missing from snapshot"))
+    }
+
+    /// Windows half of the injection below: the read-only attribute makes
+    /// the replacement step itself fail with ERROR_ACCESS_DENIED (same
+    /// trick as the atomic_write tests).
+    #[cfg(windows)]
+    fn set_readonly(path: &std::path::Path, on: bool) {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_readonly(on);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    /// Deterministic, admin-free commit-failure injection that keeps the
+    /// original file bytes intact: Windows refuses to REPLACE a read-only
+    /// file (ERROR_ACCESS_DENIED); Unix refuses to STAGE inside a
+    /// directory without write permission. Both fail the atomic persist
+    /// after validation, exercising the store's rollback path without
+    /// admin rights or OS-global changes.
+    fn block_persist(path: &std::path::Path) {
+        #[cfg(windows)]
+        {
+            set_readonly(path, true);
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions();
+            std::fs::set_permissions(
+                path.parent().unwrap(),
+                std::fs::Permissions::from_mode(perms.mode() & 0o500),
+            )
+            .unwrap();
+        }
+    }
+
+    /// Restore what [`block_persist`] changed, so tempdir cleanup works.
+    fn unblock_persist(path: &std::path::Path) {
+        #[cfg(windows)]
+        {
+            set_readonly(path, false);
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                path.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn same_library_folder_move_reparents_subtree_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let work = Library::new("Work");
+        let p1 = Folder::new(&work.id, None, "P1");
+        let p2 = Folder::new(&work.id, None, "P2");
+        let nested = Folder::new(&work.id, Some(p1.id.clone()), "Nested");
+        let c_nested = conn(&work.id, Some(&nested.id), "nested-conn");
+        let c_root = conn(&work.id, None, "root-conn");
+        store
+            .save(LibraryDocument::new(
+                vec![work.clone()],
+                vec![p1.clone(), p2.clone(), nested.clone()],
+                vec![c_nested.clone(), c_root.clone()],
+            ))
+            .unwrap();
+
+        store
+            .move_node(NodeId::folder(p1.id.clone()), NodeId::folder(p2.id.clone()))
+            .unwrap();
+
+        let tree = store.list_tree().unwrap();
+        let moved = folder_of(&tree, &p1.id);
+        assert_eq!(moved.parent_id.as_deref(), Some(p2.id.as_str()));
+        assert_eq!(
+            moved.library_id, work.id,
+            "same-library move keeps the library"
+        );
+        let child = folder_of(&tree, &nested.id);
+        assert_eq!(
+            child.parent_id.as_deref(),
+            Some(p1.id.as_str()),
+            "descendant folder keeps its parent inside the moved subtree"
+        );
+        let summary = connection_of(&tree, &c_nested.id);
+        assert_eq!(summary.library_id, work.id);
+        assert_eq!(summary.folder_id.as_deref(), Some(nested.id.as_str()));
+        // Nothing was created or lost: same ids, same counts.
+        assert_eq!(tree.folders.len(), 3);
+        assert_eq!(tree.connections.len(), 2);
+
+        // Persisted atomically: a fresh store over the same file sees the move.
+        let reopened = store_at(dir.path(), "connections.json");
+        assert_eq!(reopened.list_tree().unwrap(), tree);
+    }
+
+    #[test]
+    fn cross_library_folder_move_rewrites_all_descendant_library_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let a = Library::new("A");
+        let b = Library::new("B");
+        // Depth-3 subtree rooted at f1 (f1 > f2 > f3) with connections at
+        // the top and bottom of the subtree, plus library-A-root and
+        // library-B entities that must NOT move.
+        let f1 = Folder::new(&a.id, None, "F1");
+        let f2 = Folder::new(&a.id, Some(f1.id.clone()), "F2");
+        let f3 = Folder::new(&a.id, Some(f2.id.clone()), "F3");
+        let c_f1 = conn(&a.id, Some(&f1.id), "direct-in-f1");
+        let c_f3 = conn(&a.id, Some(&f3.id), "deep-in-f3");
+        let c_root = conn(&a.id, None, "a-root-conn");
+        let target = Folder::new(&b.id, None, "Target");
+        let unrelated = Folder::new(&b.id, None, "Unrelated");
+        let c_other = conn(&b.id, Some(&unrelated.id), "b-conn");
+        store
+            .save(LibraryDocument::new(
+                vec![a.clone(), b.clone()],
+                vec![
+                    f1.clone(),
+                    f2.clone(),
+                    f3.clone(),
+                    target.clone(),
+                    unrelated.clone(),
+                ],
+                vec![c_f1.clone(), c_f3.clone(), c_root.clone(), c_other.clone()],
+            ))
+            .unwrap();
+
+        store
+            .move_node(
+                NodeId::folder(f1.id.clone()),
+                NodeId::folder(target.id.clone()),
+            )
+            .unwrap();
+
+        let tree = store.list_tree().unwrap();
+        // Every descendant folder (depth >= 3) follows into library B with
+        // the subtree shape intact.
+        for folder in [&f1, &f2, &f3] {
+            assert_eq!(
+                folder_of(&tree, &folder.id).library_id,
+                b.id,
+                "subtree folder {} now belongs to library B",
+                folder.name
+            );
+        }
+        assert_eq!(
+            folder_of(&tree, &f1.id).parent_id.as_deref(),
+            Some(target.id.as_str())
+        );
+        assert_eq!(
+            folder_of(&tree, &f2.id).parent_id.as_deref(),
+            Some(f1.id.as_str())
+        );
+        assert_eq!(
+            folder_of(&tree, &f3.id).parent_id.as_deref(),
+            Some(f2.id.as_str())
+        );
+        // Connections inside the subtree change library but keep folder ids.
+        let s_top = connection_of(&tree, &c_f1.id);
+        assert_eq!(s_top.library_id, b.id);
+        assert_eq!(s_top.folder_id.as_deref(), Some(f1.id.as_str()));
+        let s_deep = connection_of(&tree, &c_f3.id);
+        assert_eq!(s_deep.library_id, b.id);
+        assert_eq!(s_deep.folder_id.as_deref(), Some(f3.id.as_str()));
+        // Ancestors-only scoping: library A's root connection and library
+        // B's own entities are untouched.
+        assert_eq!(connection_of(&tree, &c_root.id).library_id, a.id);
+        assert_eq!(connection_of(&tree, &c_root.id).folder_id, None);
+        assert_eq!(connection_of(&tree, &c_other.id).library_id, b.id);
+        assert_eq!(folder_of(&tree, &unrelated.id).library_id, b.id);
+
+        // Single-library ancestry still holds: B's dashboard now serves
+        // the moved connections alongside its own.
+        let mut b_names: Vec<String> = store
+            .descendants(NodeId::library(b.id.clone()))
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.name)
+            .collect();
+        b_names.sort();
+        assert_eq!(b_names.join(","), "b-conn,deep-in-f3,direct-in-f1");
+
+        // The moved document is the one persisted.
+        let reopened = store_at(dir.path(), "connections.json");
+        assert_eq!(reopened.list_tree().unwrap(), tree);
+    }
+
+    #[test]
+    fn cross_library_connection_move_preserves_ids_and_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let a = Library::new("A");
+        let b = Library::new("B");
+        let folder = Folder::new(&a.id, None, "F");
+        let target = Folder::new(&b.id, None, "T");
+        let mut moved = conn(&a.id, Some(&folder.id), "guarded");
+        moved.username = "operator".to_string();
+        moved.domain = "CORP".to_string();
+        moved.port = 3390;
+        moved.tags = vec!["prod".to_string(), "tier-2".to_string()];
+        moved.display_width = Some(2560);
+        moved.display_height = Some(1440);
+        store
+            .save(LibraryDocument::new(
+                vec![a.clone(), b.clone()],
+                vec![folder.clone(), target.clone()],
+                vec![moved.clone()],
+            ))
+            .unwrap();
+
+        store
+            .move_node(
+                NodeId::connection(moved.id.clone()),
+                NodeId::folder(target.id.clone()),
+            )
+            .unwrap();
+
+        // Only libraryId/folderId change: the whole entity (id, name, host,
+        // port, username, domain, tags, display settings, timestamps) is
+        // preserved — settings and active-session references survive
+        // because the connection id does (Req 10.8). Credentials live in
+        // the keyring; the move path never touches them.
+        let after = connection_entity(&store, &moved.id);
+        let mut expected = serde_json::to_value(&moved).unwrap();
+        if let serde_json::Value::Object(map) = &mut expected {
+            map.insert("libraryId".to_string(), serde_json::json!(b.id));
+            map.insert("folderId".to_string(), serde_json::json!(target.id));
+        }
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            expected,
+            "connection entity identical except libraryId/folderId"
+        );
+
+        // Moving onto a library re-files the connection at its root.
+        store
+            .move_node(
+                NodeId::connection(moved.id.clone()),
+                NodeId::library(b.id.clone()),
+            )
+            .unwrap();
+        let at_root = connection_entity(&store, &moved.id);
+        assert_eq!(at_root.library_id, b.id);
+        assert_eq!(at_root.folder_id, None);
+
+        let reopened = store_at(dir.path(), "connections.json");
+        assert_eq!(
+            connection_entity(&reopened, &moved.id).folder_id,
+            None,
+            "root re-filing persisted"
+        );
+    }
+
+    #[test]
+    fn folder_move_into_own_subtree_or_onto_itself_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let store = store_at(dir.path(), "connections.json");
+        let a = Library::new("A");
+        let f1 = Folder::new(&a.id, None, "F1");
+        let f2 = Folder::new(&a.id, Some(f1.id.clone()), "F2");
+        let f3 = Folder::new(&a.id, Some(f2.id.clone()), "F3");
+        let deep = conn(&a.id, Some(&f3.id), "deep");
+        store
+            .save(LibraryDocument::new(
+                vec![a.clone()],
+                vec![f1.clone(), f2.clone(), f3.clone()],
+                vec![deep.clone()],
+            ))
+            .unwrap();
+
+        let before_tree = store.list_tree().unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+
+        // Into its own descendant (three levels down) and onto itself.
+        for target in [NodeId::folder(f3.id.clone()), NodeId::folder(f1.id.clone())] {
+            assert!(
+                matches!(
+                    store.move_node(NodeId::folder(f1.id.clone()), target.clone()),
+                    Err(LibraryStoreError::Invalid(LibraryError::FolderCycle { .. }))
+                ),
+                "moving F1 under {target:?} must be rejected as a cycle"
+            );
+        }
+
+        // Rejections preserved the snapshot (memory) and the file (disk).
+        assert_eq!(store.list_tree().unwrap(), before_tree);
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+    }
+
+    #[test]
+    fn missing_node_or_target_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let store = store_at(dir.path(), "connections.json");
+        let a = Library::new("A");
+        let folder = Folder::new(&a.id, None, "F");
+        let connection = conn(&a.id, Some(&folder.id), "c");
+        store
+            .save(LibraryDocument::new(
+                vec![a.clone()],
+                vec![folder.clone()],
+                vec![connection.clone()],
+            ))
+            .unwrap();
+
+        let before_tree = store.list_tree().unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+
+        let cases = [
+            // Missing source folder / connection.
+            (
+                NodeId::folder(MISSING_ID),
+                NodeId::folder(folder.id.clone()),
+            ),
+            (
+                NodeId::connection(MISSING_ID),
+                NodeId::library(a.id.clone()),
+            ),
+            // Missing folder / library target.
+            (
+                NodeId::folder(folder.id.clone()),
+                NodeId::folder(MISSING_ID),
+            ),
+            (
+                NodeId::connection(connection.id.clone()),
+                NodeId::library(MISSING_ID),
+            ),
+        ];
+        for (node, target) in cases {
+            assert!(
+                matches!(
+                    store.move_node(node.clone(), target.clone()),
+                    Err(LibraryStoreError::Invalid(LibraryError::UnknownNode { .. }))
+                ),
+                "move {node:?} -> {target:?} must reject the unknown node"
+            );
+        }
+
+        assert_eq!(store.list_tree().unwrap(), before_tree);
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+    }
+
+    #[test]
+    fn library_sources_and_connection_targets_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let store = store_at(dir.path(), "connections.json");
+        let a = Library::new("A");
+        let b = Library::new("B");
+        let folder = Folder::new(&a.id, None, "F");
+        let connection = conn(&a.id, Some(&folder.id), "c");
+        store
+            .save(LibraryDocument::new(
+                vec![a.clone(), b.clone()],
+                vec![folder.clone()],
+                vec![connection.clone()],
+            ))
+            .unwrap();
+
+        let before_tree = store.list_tree().unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+
+        // Libraries are tree roots, not movable sources (design L336).
+        assert!(matches!(
+            store.move_node(
+                NodeId::library(a.id.clone()),
+                NodeId::folder(folder.id.clone())
+            ),
+            Err(LibraryStoreError::Invalid(
+                LibraryError::MoveSourceIsLibrary { .. }
+            ))
+        ));
+        // Connections cannot receive moves.
+        assert!(matches!(
+            store.move_node(
+                NodeId::folder(folder.id.clone()),
+                NodeId::connection(connection.id.clone())
+            ),
+            Err(LibraryStoreError::Invalid(
+                LibraryError::MoveTargetIsConnection { .. }
+            ))
+        ));
+
+        assert_eq!(store.list_tree().unwrap(), before_tree);
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+    }
+
+    #[test]
+    fn persist_failure_rolls_back_memory_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let store = store_at(dir.path(), "connections.json");
+        let a = Library::new("A");
+        let b = Library::new("B");
+        let subtree = Folder::new(&a.id, None, "Subtree");
+        let nested = Folder::new(&a.id, Some(subtree.id.clone()), "Nested");
+        let moved_conn = conn(&a.id, Some(&nested.id), "c");
+        let target = Folder::new(&b.id, None, "Target");
+        store
+            .save(LibraryDocument::new(
+                vec![a.clone(), b.clone()],
+                vec![subtree.clone(), nested.clone(), target.clone()],
+                vec![moved_conn.clone()],
+            ))
+            .unwrap();
+
+        let before_tree = store.list_tree().unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+
+        // Force the atomic persist to fail after validation.
+        block_persist(&path);
+        let err = store
+            .move_node(
+                NodeId::folder(subtree.id.clone()),
+                NodeId::folder(target.id.clone()),
+            )
+            .unwrap_err();
+        unblock_persist(&path);
+
+        assert!(
+            matches!(err, LibraryStoreError::PersistFailed { .. }),
+            "got {err:?}"
+        );
+        // Rollback: the previous snapshot is retained in memory AND the
+        // file keeps its exact bytes (Req 10.15 — previous persisted tree).
+        assert_eq!(store.list_tree().unwrap(), before_tree);
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+    }
+
+    #[test]
+    fn write_blocked_store_rejects_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        std::fs::write(&path, MALFORMED).unwrap();
+        let store = LibraryStore::open(&path);
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+
+        assert!(matches!(
+            store.move_node(NodeId::folder(MISSING_ID), NodeId::library(MISSING_ID)),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        // Nothing was written over the invalid file.
+        assert_eq!(std::fs::read(&path).unwrap(), MALFORMED.as_bytes());
     }
 }
