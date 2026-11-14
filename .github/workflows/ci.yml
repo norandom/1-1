@@ -273,6 +273,11 @@ jobs:
   macos-cold-launch-e2e-spike:
     name: "macos-cold-launch-e2e-spike (task 2.4: built-app cold launch + Tauri-service embedded driver)"
     runs-on: macos-15
+    # User decision 2026-11-14 (group-4 hold item 2): steps inside this job
+    # still fail loudly and evidence still uploads via if: always(), but the
+    # job no longer reddens boundary runs while the group-11 E2E driver
+    # amendment (debug-gated tauri-plugin-wdio-webdriver) is pending.
+    continue-on-error: true
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
