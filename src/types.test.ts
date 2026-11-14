@@ -22,6 +22,29 @@ describe('Type definitions', () => {
     expect(config.displayWidth).toBeNull();
   });
 
+  it('ConnectionConfig carries v2 ownership and the inert mock flag (task 6.6)', () => {
+    const config: ConnectionConfig = {
+      id: '2',
+      name: 'Filed',
+      host: 'filed.invalid',
+      port: 3389,
+      username: 'admin',
+      domain: '',
+      colorAccent: null,
+      tags: [],
+      displayWidth: null,
+      displayHeight: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      libraryId: 'lib-1',
+      folderId: 'folder-1',
+      mock: false,
+    };
+    expect(config.libraryId).toBe('lib-1');
+    expect(config.folderId).toBe('folder-1');
+    expect(config.mock).toBe(false);
+  });
+
   it('SessionInfo has required fields', () => {
     const session: SessionInfo = {
       id: 'session-1',

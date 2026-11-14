@@ -7,9 +7,9 @@
 //!
 //! Scope boundary: delete commands belong to tasks 7.x (folder deletion
 //! moves descendant connections; library deletion coordinates session
-//! actors), and connection CRUD belongs to 6.6 — the read models here do
-//! return connection summaries for dashboards. Tree moves (drag/keyboard
-//! UI in group 8) landed with task 6.5 (`move_node`).
+//! actors). Connection CRUD/import/duplication commands landed with task
+//! 6.6 in `commands::connection`, over the same unified store. Tree moves
+//! (drag/keyboard UI in group 8) landed with task 6.5 (`move_node`).
 
 use tauri::State;
 

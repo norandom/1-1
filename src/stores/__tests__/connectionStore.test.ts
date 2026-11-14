@@ -15,6 +15,25 @@ vi.mock('../../lib/tauri', () => ({
     Promise.resolve({ id, ...config, updatedAt: new Date().toISOString() })
   ),
   deleteConnection: vi.fn().mockResolvedValue(undefined),
+  duplicateConnection: vi.fn().mockImplementation(() =>
+    Promise.resolve({
+      id: 'dup-id',
+      name: 'Test Server copy',
+      host: '192.168.1.1',
+      port: 3389,
+      username: 'admin',
+      domain: '',
+      colorAccent: null,
+      tags: [],
+      displayWidth: null,
+      displayHeight: null,
+      libraryId: 'lib-1',
+      folderId: null,
+      mock: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    })
+  ),
 }));
 
 import { useConnectionStore } from '../connectionStore';
@@ -96,6 +115,23 @@ describe('connectionStore', () => {
     await useConnectionStore.getState().deleteConnection('sel-1');
 
     expect(useConnectionStore.getState().selectedId).toBeNull();
+  });
+
+  it('duplicateConnection appends the returned copy (task 6.6, Req 10.19)', async () => {
+    useConnectionStore.setState({
+      connections: [
+        { ...sampleConnection, id: 'src-1', createdAt: '2024-01-01', updatedAt: '2024-01-01' },
+      ],
+    });
+
+    const copy = await useConnectionStore.getState().duplicateConnection('src-1');
+
+    const state = useConnectionStore.getState();
+    expect(state.connections).toHaveLength(2);
+    expect(copy.id).toBe('dup-id');
+    expect(copy.name).toBe('Test Server copy');
+    expect(state.connections.some((c) => c.id === 'dup-id')).toBe(true);
+    expect(vi.mocked(tauri.duplicateConnection)).toHaveBeenCalledExactlyOnceWith('src-1');
   });
 
   it('setSearchQuery updates query', () => {

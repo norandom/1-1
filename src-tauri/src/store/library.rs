@@ -2,7 +2,12 @@
 //! invariants for the Royal TS-style connection tree; task 6.3 adds v1→v2
 //! migration and write-blocked recovery; task 6.4 (Req 10.1/10.2/10.3/
 //! 10.5) adds the CRUD/read facade over the single-owner [`LibraryStore`]
-//! behind the IPC commands in `commands::library`.
+//! behind the IPC commands in `commands::library`; task 6.6 UNIFIES
+//! connection storage onto this store: `connections.json` (v2 document)
+//! is the one store file, the transitional `libraries.json` is merged in
+//! or adopted at open (see [`load_unified`]), and connection
+//! CRUD/import/duplication run through the same single-lock transactions
+//! (the v1 `ConnectionStore` is retired).
 //!
 //! Pure data + validation + query layer: flat entities with parent IDs
 //! (library → folders → connections), no graph crate, database or ORM.
@@ -17,7 +22,7 @@
 //! connection id only (design "Data Models"), so no secret material here.
 
 use crate::store::atomic_write::write_atomic;
-use crate::store::connections::ConnectionConfig;
+use crate::store::connections::{ConnectionConfig, ConnectionInput};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -235,6 +240,10 @@ pub enum LibraryStoreError {
     WriteBlocked { reason: String },
     /// A create/rename input is not a usable name (blank after trim).
     InvalidName { kind: &'static str },
+    /// A connection create/update input failed validation (Req 1.1:
+    /// blank name, blank/over-long host, port 0) or requested a mock
+    /// flag in a production build (Req 12.10).
+    InvalidConnection { reason: String },
     /// The operation violates tree invariants or references an unknown
     /// entity/node (wraps [`LibraryError`]).
     Invalid(LibraryError),
@@ -251,6 +260,9 @@ impl std::fmt::Display for LibraryStoreError {
                 "store is write-blocked until valid data is reloaded: {reason}"
             ),
             Self::InvalidName { kind } => write!(f, "{kind} name cannot be empty"),
+            Self::InvalidConnection { reason } => {
+                write!(f, "connection rejected: {reason}")
+            }
             Self::Invalid(err) => write!(f, "library operation rejected: {err}"),
             Self::PersistFailed { cause } => write!(
                 f,
@@ -604,7 +616,8 @@ impl std::fmt::Display for MigrationError {
 
 impl std::error::Error for MigrationError {}
 
-/// Result of a successful [`load_or_migrate`] / [`LibraryStore::reload`].
+/// Result of a successful [`load_or_migrate`] / [`load_unified`] /
+/// [`LibraryStore::reload`].
 #[derive(Debug, Clone)]
 pub enum LoadOutcome {
     /// No store file on disk: a fresh store starts empty (nothing written).
@@ -612,10 +625,22 @@ pub enum LoadOutcome {
     /// The file already held a valid v2 document (used as-is, no backup).
     LoadedV2(LibraryDocument),
     /// A v1 bare array was migrated: the original bytes are preserved at
-    /// `backup_path` and a v2 document was atomically committed.
+    /// `backup_path` and a v2 document was atomically committed. Task 6.6:
+    /// with a transitional `libraries.json` present this is a MERGE — the
+    /// legacy connections were placed in the existing v2 default library
+    /// and the transitional file stays untouched (strict subset).
     MigratedV2 {
         document: LibraryDocument,
         backup_path: PathBuf,
+    },
+    /// Task 6.6 unification: no store file existed but a valid transitional
+    /// `libraries.json` did — its document was adopted as the unified store
+    /// (atomically committed to the store path). The transitional file at
+    /// `source_path` is left untouched as the preserved original; no v1
+    /// backup is involved (there were no v1 bytes).
+    AdoptedV2 {
+        document: LibraryDocument,
+        source_path: PathBuf,
     },
 }
 
@@ -626,6 +651,7 @@ impl LoadOutcome {
             Self::Fresh => LibraryDocument::empty(),
             Self::LoadedV2(document) => document.clone(),
             Self::MigratedV2 { document, .. } => document.clone(),
+            Self::AdoptedV2 { document, .. } => document.clone(),
         }
     }
 }
@@ -716,10 +742,25 @@ fn migrate_v1_bytes(
     // Wrap into the default library (Req 10.10).
     let migrated = migrate_v1(legacy.clone());
 
-    // Backup the ORIGINAL bytes before anything else, without clobber: an
-    // existing backup is kept when valid, and an unusable existing backup
-    // fails the whole migration closed — data is never destroyed to make
-    // migration proceed.
+    // Backup the ORIGINAL bytes before anything else; then validate the
+    // wrapped document, assert count/id parity, and commit atomically.
+    let backup_path = backup_v1_original(path, original)?;
+    migrated.validate().map_err(MigrationError::InvalidData)?;
+    assert_v1_parity(&legacy, &migrated)?;
+    commit_v2(path, &migrated)?;
+
+    Ok(LoadOutcome::MigratedV2 {
+        document: migrated,
+        backup_path,
+    })
+}
+
+/// Backup tail shared by the 6.3 migration and the 6.6 unification merge
+/// (design "Data migration" / "Storage transactions and recovery"):
+/// preserve the ORIGINAL v1 bytes without clobber — an existing backup is
+/// kept when valid, and an unusable existing backup fails the whole flow
+/// closed. Data is never destroyed to make migration proceed.
+fn backup_v1_original(path: &Path, original: &[u8]) -> Result<PathBuf, MigrationError> {
     let backup_path = backup_path_for(path);
     if backup_path.exists() {
         let existing =
@@ -733,26 +774,223 @@ fn migrate_v1_bytes(
             cause: e.to_string(),
         })?;
     }
+    Ok(backup_path)
+}
 
-    // Validate the wrapped document and assert count/id parity (design:
-    // "assert count and id parity").
-    migrated.validate().map_err(MigrationError::InvalidData)?;
-    assert_v1_parity(&legacy, &migrated)?;
-
-    // Atomic v2 commit; on failure the original v1 file and the backup
-    // stay intact (task 6.2 writer semantics).
+/// Serialize and atomically commit a (caller-validated) v2 document to
+/// `path`; on failure the prior file stays intact (task 6.2 semantics).
+fn commit_v2(path: &Path, document: &LibraryDocument) -> Result<(), MigrationError> {
     let json =
-        serde_json::to_string_pretty(&migrated).map_err(|e| MigrationError::SerializeFailed {
+        serde_json::to_string_pretty(document).map_err(|e| MigrationError::SerializeFailed {
             cause: e.to_string(),
         })?;
     write_atomic(path, json.as_bytes()).map_err(|e| MigrationError::CommitFailed {
         cause: e.to_string(),
-    })?;
-
-    Ok(LoadOutcome::MigratedV2 {
-        document: migrated,
-        backup_path,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Task 6.6 unification: one store file (`connections.json` v2), the
+// transitional `libraries.json` merged in or adopted once (Req 10.10/10.12,
+// tasks.md Implementation Notes obligation)
+// ---------------------------------------------------------------------------
+
+/// The unified-store open/migration flow (task 6.6). `store_path` is THE
+/// connection store file (`connections.json`, v2 document — design
+/// "Logical Data Model", option A′); `transitional_path` is the v2 file a
+/// 6.4/6.5 build persisted while the live `connections.json` was still
+/// v1-owned. Branches, every one data-preserving:
+///
+/// * store file v2 → used as-is; a still-present transitional file is a
+///   post-unification leftover and is deliberately ignored (and never
+///   written) — the store file is authoritative;
+/// * store file v1 → [`migrate_v1`] wrap; when a valid transitional
+///   document exists the legacy connections are MERGED into its default
+///   library ([`merge_v1_into_document`]) instead of overwriting it;
+/// * store file missing → the transitional document is ADOPTED (committed
+///   to the store path, original left untouched); no transitional means a
+///   fresh empty store;
+/// * any malformed/invalid file among the ones consulted fails closed
+///   ([`MigrationError`]) with every byte preserved — the caller enters
+///   write-blocked recovery, and the merge is restart-safe on both sides
+///   of its atomic commit (pre-commit: inputs unchanged, deterministic
+///   retry; post-commit: the store file is v2, so the first branch wins).
+pub fn load_unified(
+    store_path: &Path,
+    transitional_path: &Path,
+) -> Result<LoadOutcome, MigrationError> {
+    let original = match std::fs::read(store_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return adopt_or_fresh(store_path, transitional_path);
+        }
+        Err(e) => {
+            return Err(MigrationError::ReadFailed {
+                cause: e.to_string(),
+            });
+        }
+    };
+    let root: serde_json::Value =
+        serde_json::from_slice(&original).map_err(|e| MigrationError::MalformedData {
+            cause: e.to_string(),
+        })?;
+    let found = root
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok());
+    match root {
+        serde_json::Value::Array(_) => {
+            let legacy: Vec<ConnectionConfig> =
+                serde_json::from_value(root).map_err(|e| MigrationError::MalformedData {
+                    cause: e.to_string(),
+                })?;
+            let base = read_transitional(transitional_path)?;
+            let migrated = match &base {
+                Some(base) => merge_v1_into_document(base.clone(), &legacy)?,
+                None => migrate_v1(legacy.clone()),
+            };
+            let backup_path = backup_v1_original(store_path, &original)?;
+            migrated.validate().map_err(MigrationError::InvalidData)?;
+            match &base {
+                Some(base) => assert_merge_parity(base, &legacy, &migrated)?,
+                None => assert_v1_parity(&legacy, &migrated)?,
+            }
+            commit_v2(store_path, &migrated)?;
+            Ok(LoadOutcome::MigratedV2 {
+                document: migrated,
+                backup_path,
+            })
+        }
+        serde_json::Value::Object(_) => match found {
+            Some(DOCUMENT_VERSION) => {
+                let document: LibraryDocument =
+                    serde_json::from_value(root).map_err(|e| MigrationError::MalformedData {
+                        cause: e.to_string(),
+                    })?;
+                document.validate().map_err(MigrationError::InvalidData)?;
+                // A leftover transitional file is intentionally ignored:
+                // the unified store file is authoritative from here on.
+                Ok(LoadOutcome::LoadedV2(document))
+            }
+            other => Err(MigrationError::UnsupportedSchema { found: other }),
+        },
+        _ => Err(MigrationError::UnsupportedSchema { found: None }),
+    }
+}
+
+/// Read and validate the transitional `libraries.json` (task 6.6).
+/// Missing → `None`; anything unreadable/malformed/invalid fails closed.
+fn read_transitional(path: &Path) -> Result<Option<LibraryDocument>, MigrationError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(MigrationError::ReadFailed {
+                cause: format!("cannot read the transitional libraries.json: {e}"),
+            });
+        }
+    };
+    let document: LibraryDocument =
+        serde_json::from_slice(&bytes).map_err(|e| MigrationError::MalformedData {
+            cause: format!("transitional libraries.json is not a v2 document: {e}"),
+        })?;
+    document.validate().map_err(MigrationError::InvalidData)?;
+    Ok(Some(document))
+}
+
+/// Merge v1 legacy connections INTO an existing (possibly user-populated)
+/// v2 document (tasks.md 6.6 obligation): every legacy connection lands in
+/// the default library's root ([`default_library_in`]), field-for-field
+/// untouched apart from the documented ownership defaults. An id that
+/// already exists in the base fails closed — re-iding would orphan the
+/// keyring entry keyed by that connection id.
+fn merge_v1_into_document(
+    mut base: LibraryDocument,
+    legacy: &[ConnectionConfig],
+) -> Result<LibraryDocument, MigrationError> {
+    let existing_ids: HashSet<&str> = base.connections.iter().map(|c| c.id.as_str()).collect();
+    if let Some(clash) = legacy.iter().find(|c| existing_ids.contains(c.id.as_str())) {
+        return Err(MigrationError::ParityCheckFailed {
+            detail: format!(
+                "legacy connection id {} already exists in the v2 document",
+                clash.id
+            ),
+        });
+    }
+    let default_library_id = default_library_in(&mut base);
+    let mut merged = legacy.to_vec();
+    for connection in &mut merged {
+        connection.library_id = default_library_id.clone();
+        connection.folder_id = None;
+    }
+    base.connections.extend(merged);
+    Ok(base)
+}
+
+/// Resolve the document's default library — the merge target for v1
+/// connections (Req 10.10) and the destination of unspecified creates:
+/// a library NAMED `Default Library` wins, else the first library
+/// (creation order), else a fresh `Default Library` is created.
+fn default_library_in(document: &mut LibraryDocument) -> String {
+    if let Some(existing) = document
+        .libraries
+        .iter()
+        .find(|library| library.name == DEFAULT_LIBRARY_NAME)
+    {
+        return existing.id.clone();
+    }
+    if let Some(first) = document.libraries.first() {
+        return first.id.clone();
+    }
+    let library = Library::new(DEFAULT_LIBRARY_NAME);
+    let id = library.id.clone();
+    document.libraries.push(library);
+    id
+}
+
+/// Merge parity (design "assert count and id parity", extended to the
+/// union): every legacy connection survives and nothing else is dropped.
+fn assert_merge_parity(
+    base: &LibraryDocument,
+    legacy: &[ConnectionConfig],
+    merged: &LibraryDocument,
+) -> Result<(), MigrationError> {
+    let expected = base.connections.len() + legacy.len();
+    if merged.connections.len() != expected {
+        return Err(MigrationError::ParityCheckFailed {
+            detail: format!(
+                "merge changed the connection count: {expected} expected, {} found",
+                merged.connections.len()
+            ),
+        });
+    }
+    let legacy_ids: HashSet<&str> = legacy.iter().map(|c| c.id.as_str()).collect();
+    let merged_ids: HashSet<&str> = merged.connections.iter().map(|c| c.id.as_str()).collect();
+    if !legacy_ids.is_subset(&merged_ids) {
+        return Err(MigrationError::ParityCheckFailed {
+            detail: "legacy connection id set did not survive the merge".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// No store file yet: adopt a valid transitional document (commit it to
+/// the store path; the transitional original stays untouched), or start
+/// fresh when neither file exists.
+fn adopt_or_fresh(
+    store_path: &Path,
+    transitional_path: &Path,
+) -> Result<LoadOutcome, MigrationError> {
+    match read_transitional(transitional_path)? {
+        Some(document) => {
+            commit_v2(store_path, &document)?;
+            Ok(LoadOutcome::AdoptedV2 {
+                document,
+                source_path: transitional_path.to_path_buf(),
+            })
+        }
+        None => Ok(LoadOutcome::Fresh),
+    }
 }
 
 /// Backup path for a store file (design "Data migration"):
@@ -845,14 +1083,21 @@ enum StoreState {
 /// derived from the store path on demand ([`backup_path_for`]).
 struct StoreInner {
     path: PathBuf,
+    /// Task 6.6: the transitional `libraries.json` consulted once by
+    /// [`load_unified`] (merge/adopt) while the store opens or reloads;
+    /// `None` for single-file stores ([`LibraryStore::open`]).
+    transitional_path: Option<PathBuf>,
     state: StoreState,
 }
 
-/// Owner of the v2 library document (transitional `libraries.json` until
-/// 6.6 unifies it with the v1-owned `connections.json`): loads (migrating
-/// v1 on first sight), serves the current snapshot, and gates every
-/// mutation behind the
-/// write-blocked recovery state (Req 10.10/10.12).
+/// Owner of the unified v2 connection library document (task 6.6): the
+/// store file IS `connections.json` (design "Logical Data Model", option
+/// A′). [`LibraryStore::open_unified`] additionally consults the
+/// transitional `libraries.json` a 6.4/6.5 build may have left behind and
+/// merges/adopts it once without data loss ([`load_unified`]). The store
+/// loads (migrating v1 on first sight), serves the current snapshot, and
+/// gates every mutation behind the write-blocked recovery state
+/// (Req 10.10/10.12).
 /// On any load/migration failure the store opens in
 /// [`StoreStatus::WriteBlocked`]: the on-disk file and backup are left
 /// untouched, every mutation is rejected — including the empty replacement
@@ -863,12 +1108,31 @@ pub struct LibraryStore {
 }
 
 impl LibraryStore {
-    /// Open (or restart) the store at `path`, migrating a v1 file per the
-    /// design flow. Never panics and never writes on failure: a failed
-    /// load yields a write-blocked store.
+    /// Open (or restart) a single-file store at `path`, migrating a v1
+    /// file per the design flow. Never panics and never writes on
+    /// failure: a failed load yields a write-blocked store.
+    ///
+    /// Test-facing (task 6.6, same policy as [`LibraryStore::document`]/
+    /// [`LibraryStore::save`]): production opens the UNIFIED store
+    /// ([`LibraryStore::open_unified`] in `lib.rs`); the single-file
+    /// variant remains for the 6.3–6.5 store test suites.
+    #[cfg(test)]
     pub fn open(path: impl Into<PathBuf>) -> Self {
+        Self::open_with(path, None)
+    }
+
+    /// Open (or restart) the UNIFIED store (task 6.6): `path` is the
+    /// `connections.json` store file and `transitional_path` the legacy
+    /// `libraries.json` (see [`load_unified`] for the merge/adopt/fresh
+    /// semantics). Like [`LibraryStore::open`], never panics and never
+    /// writes on failure.
+    pub fn open_unified(path: impl Into<PathBuf>, transitional_path: impl Into<PathBuf>) -> Self {
+        Self::open_with(path, Some(transitional_path.into()))
+    }
+
+    fn open_with(path: impl Into<PathBuf>, transitional_path: Option<PathBuf>) -> Self {
         let path = path.into();
-        let state = match load_or_migrate(&path) {
+        let state = match Self::load_for(&path, &transitional_path) {
             Ok(outcome) => {
                 match &outcome {
                     LoadOutcome::Fresh => {
@@ -887,6 +1151,13 @@ impl LibraryStore {
                             backup_path.display()
                         );
                     }
+                    LoadOutcome::AdoptedV2 { source_path, .. } => {
+                        log::info!(
+                            "Library store: adopted transitional {} into {} (original untouched)",
+                            source_path.display(),
+                            path.display()
+                        );
+                    }
                 }
                 StoreState::Ready(outcome.document())
             }
@@ -900,7 +1171,23 @@ impl LibraryStore {
             }
         };
         Self {
-            inner: Mutex::new(StoreInner { path, state }),
+            inner: Mutex::new(StoreInner {
+                path,
+                transitional_path,
+                state,
+            }),
+        }
+    }
+
+    /// Run the load/migration flow for the configured paths: the unified
+    /// loader when a transitional file participates, else the 6.3 flow.
+    fn load_for(
+        path: &Path,
+        transitional_path: &Option<PathBuf>,
+    ) -> Result<LoadOutcome, MigrationError> {
+        match transitional_path {
+            Some(transitional_path) => load_unified(path, transitional_path),
+            None => load_or_migrate(path),
         }
     }
 
@@ -939,13 +1226,14 @@ impl LibraryStore {
         }
     }
 
-    /// Re-run the load/migration from disk. On success the store becomes
-    /// ready with the (possibly migrated) document; on failure it stays
-    /// write-blocked. This is the only path out of recovery (Req 10.12:
-    /// "until valid data is restored and reloaded").
+    /// Re-run the load/migration from disk (the unified flow when a
+    /// transitional path is configured). On success the store becomes
+    /// ready with the (possibly migrated/merged) document; on failure it
+    /// stays write-blocked. This is the only path out of recovery
+    /// (Req 10.12: "until valid data is restored and reloaded").
     pub fn reload(&self) -> Result<LoadOutcome, MigrationError> {
         let mut inner = self.inner.lock().expect("library store lock poisoned");
-        match load_or_migrate(&inner.path) {
+        match Self::load_for(&inner.path, &inner.transitional_path) {
             Ok(outcome) => {
                 inner.state = StoreState::Ready(outcome.document());
                 Ok(outcome)
@@ -1096,6 +1384,187 @@ impl LibraryStore {
         self.mutate(|mut next| {
             apply_move(&mut next, node, target)?;
             Ok((next, ()))
+        })
+    }
+
+    // ---- Task 6.6: connection CRUD, reads, duplication (Req 1.1-1.5,
+    // 10.7, 10.19, 12.10) — the retired v1 ConnectionStore behavior
+    // unified onto the single-lock transaction core. Commands in
+    // `commands::connection` stay thin marshalers; keyring work stays at
+    // the command layer because credentials never enter the document.
+
+    /// Req 1.1/1.2: create a connection in one serialized transaction.
+    /// Input validation (name/host/port + mock policy) happens BEFORE the
+    /// transaction; the destination resolves from the payload's ownership
+    /// fields — explicit `library_id`, else the `folder_id`'s library,
+    /// else the store's default library (created lazily) — and unknown or
+    /// cross-library placements are typed rejections from the
+    /// transaction's validation step. The payload password is never
+    /// persisted (the command layer routes it to the keyring).
+    pub fn create_connection(
+        &self,
+        input: ConnectionInput,
+    ) -> Result<ConnectionConfig, LibraryStoreError> {
+        validate_connection_input(&input)?;
+        let mock = resolve_mock_flag(input.mock)?;
+        self.mutate(|mut next| {
+            let library_id = if !input.library_id.is_empty() {
+                input.library_id.clone()
+            } else if let Some(folder_id) = input.folder_id.as_deref() {
+                next.folders
+                    .iter()
+                    .find(|folder| folder.id == folder_id)
+                    .ok_or_else(|| LibraryError::UnknownFolder {
+                        id: folder_id.to_string(),
+                    })?
+                    .library_id
+                    .clone()
+            } else {
+                default_library_in(&mut next)
+            };
+            if !next
+                .libraries
+                .iter()
+                .any(|library| library.id == library_id)
+            {
+                return Err(LibraryError::UnknownLibrary { id: library_id }.into());
+            }
+            let now = Utc::now();
+            let config = ConnectionConfig {
+                id: Uuid::new_v4().to_string(),
+                name: input.name,
+                host: input.host,
+                port: input.port,
+                username: input.username,
+                domain: input.domain,
+                color_accent: input.color_accent,
+                tags: input.tags,
+                display_width: input.display_width,
+                display_height: input.display_height,
+                mock,
+                library_id,
+                folder_id: input.folder_id,
+                created_at: now,
+                updated_at: now,
+                last_connected_at: None,
+            };
+            next.connections.push(config.clone());
+            Ok((next, config))
+        })
+    }
+
+    /// Req 1.1: update a connection's editable fields (full replacement
+    /// of the input-covered fields, v1 semantics). Identity, ownership
+    /// (`library_id`/`folder_id` — re-filing is [`LibraryStore::move_node`])
+    /// and history (`created_at`, `last_connected_at`) are preserved;
+    /// `Ok(None)` mirrors the v1 contract for unknown ids. The payload
+    /// password is ignored here (the command layer routes it to the
+    /// keyring; the file stays secret-free either way).
+    pub fn update_connection(
+        &self,
+        id: &str,
+        input: ConnectionInput,
+    ) -> Result<Option<ConnectionConfig>, LibraryStoreError> {
+        validate_connection_input(&input)?;
+        self.mutate(|mut next| {
+            let Some(existing) = next.connections.iter_mut().find(|c| c.id == id) else {
+                return Ok((next, None));
+            };
+            existing.name = input.name;
+            existing.host = input.host;
+            existing.port = input.port;
+            existing.username = input.username;
+            existing.domain = input.domain;
+            existing.color_accent = input.color_accent;
+            existing.tags = input.tags;
+            existing.display_width = input.display_width;
+            existing.display_height = input.display_height;
+            existing.mock = merge_update_mock_flag(existing.mock, input.mock);
+            existing.updated_at = Utc::now();
+            let updated = existing.clone();
+            Ok((next, Some(updated)))
+        })
+    }
+
+    /// Req 1.5 (store-level semantics): remove the connection from the
+    /// library. Best-effort keyring deletion stays at the command layer.
+    pub fn delete_connection(&self, id: &str) -> Result<bool, LibraryStoreError> {
+        self.mutate(|mut next| {
+            let before = next.connections.len();
+            next.connections.retain(|connection| connection.id != id);
+            let removed = before != next.connections.len();
+            Ok((next, removed))
+        })
+    }
+
+    /// Stamp `last_connected_at` after a successful connect (v1 behavior:
+    /// a missing id is a silent no-op).
+    pub fn update_last_connected(&self, id: &str) -> Result<(), LibraryStoreError> {
+        self.mutate(|mut next| {
+            if let Some(connection) = next.connections.iter_mut().find(|c| c.id == id) {
+                connection.last_connected_at = Some(Utc::now());
+            }
+            Ok((next, ()))
+        })
+    }
+
+    /// Req 10.19 (design "Destructive actions and identity"): duplicate a
+    /// connection — copy NON-SECRET fields into the SAME folder with a
+    /// fresh UUID v4, a deterministic available name ("Name copy",
+    /// "Name copy 2", … among the destination scope's siblings) and fresh
+    /// timestamps/history. The keyring is never touched: the store model
+    /// holds no secret material and the command layer performs no
+    /// credential call on this path, so the duplicate requires password
+    /// re-entry by construction.
+    pub fn duplicate_connection(&self, id: &str) -> Result<ConnectionConfig, LibraryStoreError> {
+        self.mutate(|mut next| {
+            let source = next
+                .connections
+                .iter()
+                .find(|connection| connection.id == id)
+                .ok_or_else(|| LibraryError::UnknownNode {
+                    node: NodeId::connection(id),
+                })?
+                .clone();
+            let name = available_copy_name(
+                &source.name,
+                &next.connections,
+                &source.library_id,
+                source.folder_id.as_deref(),
+            );
+            let now = Utc::now();
+            let duplicate = ConnectionConfig {
+                id: Uuid::new_v4().to_string(),
+                name,
+                mock: duplicate_mock_flag(source.mock),
+                created_at: now,
+                updated_at: now,
+                last_connected_at: None,
+                ..source
+            };
+            next.connections.push(duplicate.clone());
+            Ok((next, duplicate))
+        })
+    }
+
+    /// Fetch one connection (v1 `get` contract, plus the v2 typed
+    /// write-blocked read error).
+    pub fn get_connection(&self, id: &str) -> Result<Option<ConnectionConfig>, LibraryStoreError> {
+        self.read(|document| {
+            Ok(document
+                .connections
+                .iter()
+                .find(|connection| connection.id == id)
+                .cloned())
+        })
+    }
+
+    /// Every connection, name-sorted (v1 `list` contract).
+    pub fn list_connections(&self) -> Result<Vec<ConnectionConfig>, LibraryStoreError> {
+        self.read(|document| {
+            let mut list = document.connections.clone();
+            list.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(list)
         })
     }
 
@@ -1322,6 +1791,114 @@ fn check_name(kind: &'static str, name: &str) -> Result<(), LibraryStoreError> {
         return Err(LibraryStoreError::InvalidName { kind });
     }
     Ok(())
+}
+
+/// Store-layer validation for connection create/update payloads (task 6.6,
+/// Req 1.1): the v1 command-layer rules (host required, ≤253 chars, port
+/// 1-65535) moved behind the IPC boundary — now enforced on UPDATE too,
+/// flipping baseline defect B3-1 — plus a non-blank name. Username stays
+/// UI-validated (baseline row 1.1 classification: backend parity kept).
+fn validate_connection_input(input: &ConnectionInput) -> Result<(), LibraryStoreError> {
+    if input.name.trim().is_empty() {
+        return Err(LibraryStoreError::InvalidConnection {
+            reason: "connection name cannot be empty".to_string(),
+        });
+    }
+    if input.host.trim().is_empty() {
+        return Err(LibraryStoreError::InvalidConnection {
+            reason: "Host cannot be empty".to_string(),
+        });
+    }
+    if input.host.len() > 253 {
+        return Err(LibraryStoreError::InvalidConnection {
+            reason: "Host exceeds maximum length of 253 characters".to_string(),
+        });
+    }
+    if input.port == 0 {
+        return Err(LibraryStoreError::InvalidConnection {
+            reason: "Port must be in range 1-65535".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Mock policy for NEW records (Req 12.10): `false` passes through;
+/// `true` is admitted ONLY in test-support builds (harness seeding). In
+/// production the allow-path is not compiled in — mirroring
+/// `rdp::session::admit_mock_session` — so no production write path can
+/// set the flag, regardless of the payload.
+fn resolve_mock_flag(requested: bool) -> Result<bool, LibraryStoreError> {
+    if !requested {
+        return Ok(false);
+    }
+    #[cfg(feature = "test-support")]
+    {
+        // Test-support build: synthetic saved connections are seedable.
+        Ok(true)
+    }
+    #[cfg(not(feature = "test-support"))]
+    {
+        // Production build: reject the write before any transaction runs.
+        Err(LibraryStoreError::InvalidConnection {
+            reason: "mock connections can only be created in test-support builds; this \
+                     production build rejects the request"
+                .to_string(),
+        })
+    }
+}
+
+/// Mock policy for UPDATE (Req 12.10): test-support builds keep the v1
+/// replace semantics (the payload flag applies); production builds never
+/// rewrite the persisted flag through update — persisted mock data stays
+/// data-only (inert at the connect boundary) until it is deleted.
+fn merge_update_mock_flag(existing: bool, requested: bool) -> bool {
+    if cfg!(feature = "test-support") {
+        requested
+    } else {
+        existing
+    }
+}
+
+/// Mock policy for DUPLICATE (Req 12.10): test-support builds copy the
+/// source flag; production builds never mint a NEW mock record, so a
+/// duplicate of legacy mock data lands as inert non-mock data.
+fn duplicate_mock_flag(source: bool) -> bool {
+    if cfg!(feature = "test-support") {
+        source
+    } else {
+        false
+    }
+}
+
+/// Deterministic available duplicate name (design "Destructive actions and
+/// identity", Req 10.19): "Name copy", then "Name copy 2", "Name copy 3",
+/// … — the first candidate not taken among the destination scope's
+/// siblings (same library AND same folder as the source).
+fn available_copy_name(
+    base: &str,
+    connections: &[ConnectionConfig],
+    library_id: &str,
+    folder_id: Option<&str>,
+) -> String {
+    let taken: HashSet<&str> = connections
+        .iter()
+        .filter(|connection| {
+            connection.library_id == library_id && connection.folder_id.as_deref() == folder_id
+        })
+        .map(|connection| connection.name.as_str())
+        .collect();
+    let first = format!("{base} copy");
+    if !taken.contains(first.as_str()) {
+        return first;
+    }
+    let mut suffix = 2u32;
+    loop {
+        let candidate = format!("{base} copy {suffix}");
+        if !taken.contains(candidate.as_str()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 /// Fold a commit-path [`MigrationError`] into the CRUD error surface.
@@ -3296,5 +3873,1083 @@ mod move_tests {
         ));
         // Nothing was written over the invalid file.
         assert_eq!(std::fs::read(&path).unwrap(), MALFORMED.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod unification_tests {
+    //! Task 6.6 (Req 10.10/10.12 + tasks.md Implementation Notes obligation):
+    //! unify the transitional `libraries.json` (v2, tasks 6.4/6.5) with the
+    //! live v1 `connections.json` onto ONE v2 `connections.json` store file
+    //! (design "Logical Data Model", option A′). Every branch must preserve
+    //! data: v1 connections merge INTO the existing v2 default library, the
+    //! transitional file is never destroyed, and every failure fails closed
+    //! into write-blocked recovery.
+
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    const V1_TWO_CONNECTIONS: &str = r##"[
+        {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "name": "Alpha DC",
+            "host": "alpha.invalid",
+            "port": 3389,
+            "username": "admin",
+            "domain": "CORP",
+            "colorAccent": "#ff0000",
+            "tags": ["prod", "dc"],
+            "displayWidth": 2560,
+            "displayHeight": 1440,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T03:04:05Z",
+            "lastConnectedAt": "2026-01-03T06:07:08Z"
+        },
+        {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "name": "Beta APP",
+            "host": "beta.invalid",
+            "port": 33890,
+            "mock": true,
+            "createdAt": "2026-02-01T00:00:00Z",
+            "updatedAt": "2026-02-01T00:00:00Z"
+        }
+    ]"##;
+
+    const V1_COLLIDING: &str = r#"[{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Clash","host":"clash.invalid","port":3389,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}]"#;
+
+    const MALFORMED_JSON: &str = "{ not valid json ";
+
+    /// A transitional `libraries.json` a 6.4/6.5 build could have written:
+    /// one user library with a folder and one root connection.
+    fn transitional_document() -> LibraryDocument {
+        let library = Library::new("Work");
+        let folder = Folder::new(&library.id, None, "Prod");
+        let existing = ConnectionConfig {
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+            name: "V2 native".to_string(),
+            host: "v2-native.invalid".to_string(),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: library.id.clone(),
+            folder_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_connected_at: None,
+        };
+        LibraryDocument::new(vec![library], vec![folder], vec![existing])
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
+    fn open_unified_at(dir: &Path) -> LibraryStore {
+        LibraryStore::open_unified(dir.join("connections.json"), dir.join("libraries.json"))
+    }
+
+    #[test]
+    fn fresh_install_with_neither_file_starts_ready_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_unified_at(dir.path());
+        assert_eq!(store.status(), StoreStatus::Ready);
+        assert!(!dir.path().join("connections.json").exists());
+        assert!(!dir.path().join("libraries.json").exists());
+        assert!(store.list_connections().unwrap().is_empty());
+
+        // Ready for CRUD: the first mutation persists the v2 document and
+        // lazily creates the default library (fresh stores have none).
+        let created = store
+            .create_connection(input("First", "first.invalid"))
+            .unwrap();
+        assert!(dir.path().join("connections.json").exists());
+        let tree = store.list_tree().unwrap();
+        assert_eq!(tree.libraries.len(), 1);
+        assert_eq!(created.library_id, tree.libraries[0].id);
+        assert_eq!(created.folder_id, None);
+    }
+
+    #[test]
+    fn v1_only_migrates_into_default_library_with_field_and_id_parity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        write_file(&store_path, V1_TWO_CONNECTIONS);
+
+        let store = open_unified_at(dir.path());
+        assert_eq!(store.status(), StoreStatus::Ready);
+
+        let tree = store.list_tree().unwrap();
+        assert_eq!(tree.libraries.len(), 1);
+        assert_eq!(tree.libraries[0].name, DEFAULT_LIBRARY_NAME);
+        assert_eq!(tree.connections.len(), 2);
+
+        let alpha = store
+            .get_connection("11111111-1111-4111-8111-111111111111")
+            .unwrap()
+            .expect("legacy id preserved");
+        assert_eq!(alpha.name, "Alpha DC");
+        assert_eq!(alpha.host, "alpha.invalid");
+        assert_eq!(alpha.port, 3389);
+        assert_eq!(alpha.username, "admin");
+        assert_eq!(alpha.domain, "CORP");
+        assert_eq!(alpha.color_accent, Some("#ff0000".to_string()));
+        assert_eq!(alpha.tags, vec!["prod".to_string(), "dc".to_string()]);
+        assert_eq!(alpha.display_width, Some(2560));
+        assert_eq!(alpha.display_height, Some(1440));
+        assert!(alpha.last_connected_at.is_some());
+        assert_eq!(alpha.library_id, tree.libraries[0].id);
+        assert_eq!(alpha.folder_id, None, "legacy connections land at the root");
+
+        // Backup semantics are the 6.3 flow: original v1 bytes preserved.
+        assert_eq!(
+            fs::read_to_string(dir.path().join("connections.json.v1.bak")).unwrap(),
+            V1_TWO_CONNECTIONS
+        );
+    }
+
+    #[test]
+    fn v1_plus_populated_transitional_merges_without_data_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        let transitional_path = dir.path().join("libraries.json");
+        write_file(&store_path, V1_TWO_CONNECTIONS);
+        let base = transitional_document();
+        let base_library_id = base.libraries[0].id.clone();
+        let base_folder_id = base.folders[0].id.clone();
+        write_file(
+            &transitional_path,
+            &serde_json::to_string_pretty(&base).unwrap(),
+        );
+
+        let store = open_unified_at(dir.path());
+        assert_eq!(store.status(), StoreStatus::Ready);
+
+        // Both populations survive; ids stay unique.
+        let tree = store.list_tree().unwrap();
+        assert_eq!(tree.libraries.len(), 1, "user library kept");
+        assert_eq!(tree.libraries[0].id, base_library_id);
+        assert_eq!(tree.folders.len(), 1, "user folder kept");
+        assert_eq!(tree.folders[0].id, base_folder_id);
+        let mut ids: Vec<&str> = tree.connections.iter().map(|c| c.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+            ]
+        );
+
+        // v1 connections merged into the (first, since unnamed) default
+        // library root; the v2-native connection keeps its placement.
+        let alpha = store
+            .get_connection("11111111-1111-4111-8111-111111111111")
+            .unwrap()
+            .unwrap();
+        assert_eq!(alpha.library_id, base_library_id);
+        assert_eq!(alpha.folder_id, None);
+        let native = store
+            .get_connection("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .unwrap();
+        assert_eq!(native.library_id, base_library_id);
+
+        // The v1 bytes are backed up; the transitional file is untouched.
+        assert_eq!(
+            fs::read_to_string(dir.path().join("connections.json.v1.bak")).unwrap(),
+            V1_TWO_CONNECTIONS
+        );
+        let merged_json = fs::read_to_string(&store_path).unwrap();
+        assert!(merged_json.contains("\"version\": 2"));
+
+        // Restart is deterministic: the now-v2 store file is authoritative
+        // and the leftover transitional file no longer duplicates anything.
+        let reopened = open_unified_at(dir.path());
+        assert_eq!(reopened.status(), StoreStatus::Ready);
+        assert_eq!(reopened.list_tree().unwrap(), tree);
+    }
+
+    #[test]
+    fn merge_prefers_a_library_named_default_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        let transitional_path = dir.path().join("libraries.json");
+        write_file(&store_path, V1_TWO_CONNECTIONS);
+
+        let named = Library::new(DEFAULT_LIBRARY_NAME);
+        let other = Library::new("Work");
+        let named_id = named.id.clone();
+        let doc = LibraryDocument::new(vec![other, named], Vec::new(), Vec::new());
+        write_file(
+            &transitional_path,
+            &serde_json::to_string_pretty(&doc).unwrap(),
+        );
+
+        let store = open_unified_at(dir.path());
+        let alpha = store
+            .get_connection("11111111-1111-4111-8111-111111111111")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            alpha.library_id, named_id,
+            "a library named Default Library wins over library order"
+        );
+    }
+
+    #[test]
+    fn merge_with_an_empty_transitional_creates_the_default_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        let transitional_path = dir.path().join("libraries.json");
+        write_file(&store_path, V1_TWO_CONNECTIONS);
+        write_file(
+            &transitional_path,
+            r#"{"version":2,"libraries":[],"folders":[],"connections":[]}"#,
+        );
+
+        let store = open_unified_at(dir.path());
+        assert_eq!(store.status(), StoreStatus::Ready);
+        let tree = store.list_tree().unwrap();
+        assert_eq!(tree.libraries.len(), 1);
+        assert_eq!(tree.libraries[0].name, DEFAULT_LIBRARY_NAME);
+        assert_eq!(tree.connections.len(), 2);
+    }
+
+    #[test]
+    fn missing_store_file_with_populated_transitional_adopts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let transitional_path = dir.path().join("libraries.json");
+        let base = transitional_document();
+        let expected_tree = LibraryTree {
+            libraries: base.libraries.clone(),
+            folders: base.folders.clone(),
+            connections: base.connections.iter().map(summary_of).collect(),
+        };
+        write_file(
+            &transitional_path,
+            &serde_json::to_string_pretty(&base).unwrap(),
+        );
+
+        let store = open_unified_at(dir.path());
+        assert_eq!(store.status(), StoreStatus::Ready);
+        assert_eq!(store.list_tree().unwrap(), expected_tree);
+
+        // Adoption writes the unified v2 store file; the transitional file
+        // stays untouched as the preserved original (least destructive).
+        let store_json = fs::read_to_string(dir.path().join("connections.json")).unwrap();
+        assert!(store_json.contains("\"version\": 2"));
+        assert_eq!(
+            fs::read_to_string(&transitional_path).unwrap(),
+            serde_json::to_string_pretty(&base).unwrap()
+        );
+
+        // Restart: the store file now exists as v2 and stays authoritative.
+        let reopened = open_unified_at(dir.path());
+        assert_eq!(reopened.status(), StoreStatus::Ready);
+        assert_eq!(reopened.list_tree().unwrap(), expected_tree);
+    }
+
+    #[test]
+    fn existing_v2_store_file_is_authoritative_over_a_leftover_transitional() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        let transitional_path = dir.path().join("libraries.json");
+        let unified = transitional_document();
+        write_file(
+            &store_path,
+            &serde_json::to_string_pretty(&unified).unwrap(),
+        );
+        // A stale transitional file (post-unification leftover) holding an
+        // entity the unified store does not know: never re-merged, never
+        // destroyed; the v2 store file wins.
+        let stale = LibraryDocument::new(vec![Library::new("Stale")], Vec::new(), Vec::new());
+        write_file(
+            &transitional_path,
+            &serde_json::to_string_pretty(&stale).unwrap(),
+        );
+        let before = fs::read_to_string(&transitional_path).unwrap();
+
+        let store = open_unified_at(dir.path());
+        assert_eq!(store.status(), StoreStatus::Ready);
+        let tree = store.list_tree().unwrap();
+        assert_eq!(tree.libraries.len(), 1);
+        assert_eq!(tree.libraries[0].id, unified.libraries[0].id);
+        assert_eq!(
+            fs::read_to_string(&transitional_path).unwrap(),
+            before,
+            "leftover transitional file untouched"
+        );
+    }
+
+    #[test]
+    fn malformed_store_file_fails_closed_into_write_blocked_even_with_transitional() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        let transitional_path = dir.path().join("libraries.json");
+        write_file(&store_path, MALFORMED_JSON);
+        write_file(
+            &transitional_path,
+            &serde_json::to_string_pretty(&transitional_document()).unwrap(),
+        );
+
+        let store = open_unified_at(dir.path());
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+        // Nothing was written anywhere; the corrupt bytes are intact.
+        assert_eq!(fs::read_to_string(&store_path).unwrap(), MALFORMED_JSON);
+        assert!(!dir.path().join("connections.json.v1.bak").exists());
+        // Every connection mutation is rejected (Req 10.12).
+        assert!(matches!(
+            store.create_connection(input("Blocked", "blocked.invalid")),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+    }
+
+    #[test]
+    fn v1_invalid_id_with_transitional_fails_closed_after_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        let transitional_path = dir.path().join("libraries.json");
+        let invalid_v1 = r#"[{"id":"legacy","name":"Legacy","host":"legacy.invalid","port":3389,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}]"#;
+        write_file(&store_path, invalid_v1);
+        write_file(
+            &transitional_path,
+            &serde_json::to_string_pretty(&transitional_document()).unwrap(),
+        );
+
+        let store = open_unified_at(dir.path());
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+        // Fail-closed AFTER the no-clobber backup, before any store write.
+        assert_eq!(
+            fs::read_to_string(dir.path().join("connections.json.v1.bak")).unwrap(),
+            invalid_v1
+        );
+        assert_eq!(
+            fs::read_to_string(&store_path).unwrap(),
+            invalid_v1,
+            "store file untouched"
+        );
+    }
+
+    #[test]
+    fn id_collision_between_v1_and_transitional_fails_closed_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        let transitional_path = dir.path().join("libraries.json");
+        write_file(&store_path, V1_COLLIDING);
+        write_file(
+            &transitional_path,
+            &serde_json::to_string_pretty(&transitional_document()).unwrap(),
+        );
+
+        let store = open_unified_at(dir.path());
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+        assert_eq!(
+            fs::read_to_string(&store_path).unwrap(),
+            V1_COLLIDING,
+            "no clobbering write on collision"
+        );
+        assert!(
+            !dir.path().join("connections.json.v1.bak").exists(),
+            "collision is detected before the backup/commit flow"
+        );
+    }
+
+    #[test]
+    fn malformed_transitional_fails_closed_preserving_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        let transitional_path = dir.path().join("libraries.json");
+        write_file(&store_path, V1_TWO_CONNECTIONS);
+        write_file(&transitional_path, MALFORMED_JSON);
+
+        let store = open_unified_at(dir.path());
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+        assert_eq!(fs::read_to_string(&store_path).unwrap(), V1_TWO_CONNECTIONS);
+        assert_eq!(
+            fs::read_to_string(&transitional_path).unwrap(),
+            MALFORMED_JSON
+        );
+        assert!(!dir.path().join("connections.json.v1.bak").exists());
+    }
+
+    #[test]
+    fn interrupted_unification_is_restart_safe_on_both_sides_of_the_commit() {
+        // Post-commit interruption: the merged v2 store file exists while
+        // the transitional file is still in place (nothing else ran yet).
+        // Restart must not re-merge or duplicate.
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("connections.json");
+        let transitional_path = dir.path().join("libraries.json");
+        write_file(&store_path, V1_TWO_CONNECTIONS);
+        write_file(
+            &transitional_path,
+            &serde_json::to_string_pretty(&transitional_document()).unwrap(),
+        );
+        {
+            let store = open_unified_at(dir.path());
+            assert_eq!(store.status(), StoreStatus::Ready);
+        } // "crash" after the commit
+        let reopened = open_unified_at(dir.path());
+        assert_eq!(reopened.status(), StoreStatus::Ready);
+        assert_eq!(reopened.list_connections().unwrap().len(), 3);
+
+        // Pre-commit interruption: nothing was written, so a later open
+        // performs the (deterministic) merge exactly once.
+        let dir2 = tempfile::tempdir().unwrap();
+        let store_path2 = dir2.path().join("connections.json");
+        let transitional_path2 = dir2.path().join("libraries.json");
+        write_file(&store_path2, V1_TWO_CONNECTIONS);
+        write_file(
+            &transitional_path2,
+            &serde_json::to_string_pretty(&transitional_document()).unwrap(),
+        );
+        let store2 = open_unified_at(dir2.path());
+        assert_eq!(store2.status(), StoreStatus::Ready);
+        assert_eq!(store2.list_connections().unwrap().len(), 3);
+    }
+
+    /// Test-only helper building a fully-defaulted input around name/host.
+    fn input(name: &str, host: &str) -> ConnectionInput {
+        ConnectionInput {
+            name: name.to_string(),
+            host: host.to_string(),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: String::new(),
+            folder_id: None,
+            password: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod connection_crud_tests {
+    //! Task 6.6 (Req 1.1–1.5, 10.7, 10.19): connection CRUD, imports and
+    //! duplication over the unified v2 store — the ported v1 ConnectionStore
+    //! behavior (validation, round-trips, secret-free persistence, delete)
+    //! plus v2 ownership (library/folder) and duplicate semantics (fresh
+    //! id/name, same folder, never a copied keyring entry).
+
+    use super::*;
+    use std::fs;
+
+    const MALFORMED: &str = "{ not a v2 document";
+
+    pub(super) fn sample(name: &str, host: &str) -> ConnectionInput {
+        ConnectionInput {
+            name: name.to_string(),
+            host: host.to_string(),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: String::new(),
+            folder_id: None,
+            password: None,
+        }
+    }
+
+    fn store_at(root: &std::path::Path) -> LibraryStore {
+        LibraryStore::open_unified(root.join("connections.json"), root.join("libraries.json"))
+    }
+
+    #[test]
+    fn create_and_list_round_trips_name_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        store
+            .create_connection(sample("Zulu", "zulu.invalid"))
+            .unwrap();
+        store
+            .create_connection(sample("Alpha", "alpha.invalid"))
+            .unwrap();
+        let list = store.list_connections().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "Alpha", "list() stays name-sorted");
+        assert_eq!(list[1].name, "Zulu");
+    }
+
+    #[test]
+    fn create_and_get_round_trips_every_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let mut input = sample("MyConn", "myhost.invalid");
+        input.port = 3390;
+        input.username = "admin".into();
+        input.domain = "DOM".into();
+        input.color_accent = Some("#ff8800".into());
+        input.tags = vec!["tag1".into()];
+        input.display_width = Some(1920);
+        input.display_height = Some(1080);
+
+        let created = store.create_connection(input).unwrap();
+        let fetched = store.get_connection(&created.id).unwrap().unwrap();
+        assert_eq!(fetched.name, "MyConn");
+        assert_eq!(fetched.host, "myhost.invalid");
+        assert_eq!(fetched.port, 3390);
+        assert_eq!(fetched.username, "admin");
+        assert_eq!(fetched.domain, "DOM");
+        assert_eq!(fetched.color_accent, Some("#ff8800".to_string()));
+        assert_eq!(fetched.tags, vec!["tag1".to_string()]);
+        assert_eq!(fetched.display_width, Some(1920));
+        assert_eq!(fetched.display_height, Some(1080));
+        assert_eq!(fetched, created);
+        assert!(!fetched.mock, "production inputs persist mock=false");
+    }
+
+    #[test]
+    fn create_validates_name_host_and_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+
+        let blank_name = ConnectionInput {
+            name: "  ".into(),
+            ..sample("x", "host.invalid")
+        };
+        assert!(matches!(
+            store.create_connection(blank_name),
+            Err(LibraryStoreError::InvalidConnection { .. })
+        ));
+
+        let blank_host = sample("NoHost", "   ");
+        assert!(matches!(
+            store.create_connection(blank_host),
+            Err(LibraryStoreError::InvalidConnection { .. })
+        ));
+
+        let overlong = sample("LongHost", &"h".repeat(254));
+        assert!(matches!(
+            store.create_connection(overlong),
+            Err(LibraryStoreError::InvalidConnection { .. })
+        ));
+
+        let zero_port = ConnectionInput {
+            port: 0,
+            ..sample("ZeroPort", "zero.invalid")
+        };
+        assert!(matches!(
+            store.create_connection(zero_port),
+            Err(LibraryStoreError::InvalidConnection { .. })
+        ));
+
+        // Rejections leave nothing persisted.
+        assert!(!dir.path().join("connections.json").exists());
+        assert!(store.list_connections().unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_assigns_library_and_folder_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let library = store.create_library("Work").unwrap();
+        let folder = store.create_folder(&library.id, None, "Prod").unwrap();
+
+        let rooted = ConnectionInput {
+            library_id: library.id.clone(),
+            ..sample("Root", "root.invalid")
+        };
+        let created_root = store.create_connection(rooted).unwrap();
+        assert_eq!(created_root.library_id, library.id);
+        assert_eq!(created_root.folder_id, None);
+
+        let filed = ConnectionInput {
+            library_id: library.id.clone(),
+            folder_id: Some(folder.id.clone()),
+            ..sample("Filed", "filed.invalid")
+        };
+        let created_filed = store.create_connection(filed).unwrap();
+        assert_eq!(created_filed.folder_id.as_deref(), Some(folder.id.as_str()));
+
+        // A folder-only destination resolves the folder's library.
+        let folder_only = ConnectionInput {
+            folder_id: Some(folder.id.clone()),
+            ..sample("FolderOnly", "folder-only.invalid")
+        };
+        let created_fo = store.create_connection(folder_only).unwrap();
+        assert_eq!(created_fo.library_id, library.id);
+        assert_eq!(created_fo.folder_id.as_deref(), Some(folder.id.as_str()));
+
+        // Unknown library / folder and cross-library placements are typed
+        // rejections that persist nothing.
+        let unknown_library = ConnectionInput {
+            library_id: "99999999-9999-4999-8999-999999999999".into(),
+            ..sample("Ghost", "ghost.invalid")
+        };
+        assert!(matches!(
+            store.create_connection(unknown_library),
+            Err(LibraryStoreError::Invalid(
+                LibraryError::UnknownLibrary { .. }
+            ))
+        ));
+        let other = store.create_library("Other").unwrap();
+        let cross = ConnectionInput {
+            library_id: other.id.clone(),
+            folder_id: Some(folder.id.clone()),
+            ..sample("Cross", "cross.invalid")
+        };
+        assert!(matches!(
+            store.create_connection(cross),
+            Err(LibraryStoreError::Invalid(
+                LibraryError::ConnectionLibraryMismatch { .. }
+            ))
+        ));
+        assert_eq!(store.list_connections().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn update_replaces_editable_fields_and_preserves_identity_and_placement() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let library = store.create_library("Work").unwrap();
+        let folder = store.create_folder(&library.id, None, "Prod").unwrap();
+        let created = store
+            .create_connection(ConnectionInput {
+                library_id: library.id.clone(),
+                folder_id: Some(folder.id.clone()),
+                ..sample("Old", "old.invalid")
+            })
+            .unwrap();
+        store.update_last_connected(&created.id).unwrap();
+
+        let mut update = sample("New", "new-host.invalid");
+        update.port = 3390;
+        update.username = "newuser".into();
+        let updated = store
+            .update_connection(&created.id, update)
+            .unwrap()
+            .expect("connection exists");
+        assert_eq!(updated.name, "New");
+        assert_eq!(updated.host, "new-host.invalid");
+        assert_eq!(updated.port, 3390);
+        assert_eq!(updated.username, "newuser");
+        // Identity, ownership and history are preserved: re-filing goes
+        // through move_node (task 6.5), not update.
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.created_at, created.created_at);
+        assert_eq!(updated.library_id, library.id);
+        assert_eq!(updated.folder_id.as_deref(), Some(folder.id.as_str()));
+        assert!(updated.last_connected_at.is_some());
+
+        // Ownership fields in the update payload are ignored, not applied.
+        let move_attempt = ConnectionInput {
+            library_id: "99999999-9999-4999-8999-999999999999".into(),
+            folder_id: None,
+            ..sample("Still New", "new-host.invalid")
+        };
+        let again = store
+            .update_connection(&created.id, move_attempt)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.library_id, library.id);
+        assert_eq!(again.folder_id.as_deref(), Some(folder.id.as_str()));
+    }
+
+    /// Regression for baseline defect B3-1: the v1 update seam accepted
+    /// empty name/host. Req 1.1 requires create AND edit validation, and
+    /// the v2 store now rejects the submission (flips the pinned defect).
+    #[test]
+    fn update_rejects_blank_name_and_host_regression_b3_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let created = store
+            .create_connection(sample("Valid", "valid.invalid"))
+            .unwrap();
+
+        let blank = sample("", "");
+        assert!(matches!(
+            store.update_connection(&created.id, blank),
+            Err(LibraryStoreError::InvalidConnection { .. })
+        ));
+        let unchanged = store.get_connection(&created.id).unwrap().unwrap();
+        assert_eq!(unchanged.name, "Valid");
+        assert_eq!(unchanged.host, "valid.invalid");
+    }
+
+    #[test]
+    fn update_of_missing_id_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        assert_eq!(
+            store
+                .update_connection(
+                    "00000000-0000-4000-8000-000000000000",
+                    sample("X", "x.invalid")
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn delete_removes_the_connection_and_rewrites_the_store_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let keep = store
+            .create_connection(sample("Keep", "keep.invalid"))
+            .unwrap();
+        let drop_conn = store
+            .create_connection(sample("Drop", "drop.invalid"))
+            .unwrap();
+
+        assert!(store.delete_connection(&drop_conn.id).unwrap());
+        assert!(
+            !store.delete_connection(&drop_conn.id).unwrap(),
+            "second delete: already gone"
+        );
+
+        let raw = fs::read_to_string(dir.path().join("connections.json")).unwrap();
+        assert!(!raw.contains(&drop_conn.id), "deleted id leaves the file");
+        let reopened = store_at(dir.path());
+        assert!(reopened.get_connection(&keep.id).unwrap().is_some());
+        assert!(reopened.get_connection(&drop_conn.id).unwrap().is_none());
+        assert_eq!(reopened.list_connections().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn crud_round_trip_preserves_fields_across_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let mut rich = sample("Rich", "rich.invalid");
+        rich.port = 3390;
+        rich.username = "admin".into();
+        rich.domain = "CORP".into();
+        rich.color_accent = Some("#ff8800".into());
+        rich.tags = vec!["prod".into(), "rdp".into()];
+        rich.display_width = Some(2560);
+        rich.display_height = Some(1440);
+        let created = store.create_connection(rich).unwrap();
+        store.update_last_connected(&created.id).unwrap();
+
+        let reopened = store_at(dir.path());
+        let reloaded = reopened.get_connection(&created.id).unwrap().unwrap();
+        assert_eq!(reloaded.id, created.id);
+        assert_eq!(reloaded.name, "Rich");
+        assert_eq!(reloaded.host, "rich.invalid");
+        assert_eq!(reloaded.port, 3390);
+        assert_eq!(reloaded.username, "admin");
+        assert_eq!(reloaded.domain, "CORP");
+        assert_eq!(reloaded.color_accent, Some("#ff8800".to_string()));
+        assert_eq!(reloaded.tags, vec!["prod".to_string(), "rdp".to_string()]);
+        assert_eq!(reloaded.display_width, Some(2560));
+        assert_eq!(reloaded.display_height, Some(1440));
+        assert_eq!(reloaded.created_at, created.created_at);
+        assert!(reloaded.last_connected_at.is_some());
+        // v2 ownership survives the reload too.
+        assert_eq!(reloaded.library_id, created.library_id);
+    }
+
+    #[test]
+    fn created_store_file_is_a_v2_document_without_any_password_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let mut input = sample("SecretHolder", "vault.invalid");
+        input.password = Some("Sup3rSecret-Vault!".into());
+        let created = store.create_connection(input).unwrap();
+
+        let raw = fs::read_to_string(dir.path().join("connections.json")).unwrap();
+        assert!(
+            !raw.contains("Sup3rSecret-Vault!"),
+            "password value must never reach the store file (Req 1.2/6.1)"
+        );
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["version"], 2, "unified store file is v2");
+        let connections = value["connections"].as_array().unwrap();
+        assert_eq!(connections.len(), 1);
+        assert!(connections[0].get("password").is_none());
+        assert_eq!(connections[0]["id"].as_str(), Some(created.id.as_str()));
+    }
+
+    /// Store seam of baseline defect B3-2: a password submitted on update
+    /// never reaches the file. COVERAGE GAP (recorded per the round-1
+    /// review): the keyring half of the fix — `update_connection` now
+    /// calls `CredentialStore::store_password` after the commit — is
+    /// unpinnable at unit level (command layer, no app harness; no numbered
+    /// gap id exists yet) and stays covered by the commands convention +
+    /// 12.x E2E. Recorded for the controller's baseline-coverage sweep.
+    #[test]
+    fn update_with_password_keeps_store_file_secret_free_defect_b3_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let created = store
+            .create_connection(sample("Editable", "edit.invalid"))
+            .unwrap();
+        let mut updated = sample("Editable", "edit2.invalid");
+        updated.password = Some("EditedSecret-2026!".into());
+        store
+            .update_connection(&created.id, updated)
+            .unwrap()
+            .unwrap();
+
+        let raw = fs::read_to_string(dir.path().join("connections.json")).unwrap();
+        assert!(!raw.contains("EditedSecret-2026!"));
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value["connections"][0].get("password").is_none());
+    }
+
+    #[test]
+    fn duplicate_copies_non_secret_fields_with_fresh_id_and_available_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let library = store.create_library("Work").unwrap();
+        let folder = store.create_folder(&library.id, None, "Prod").unwrap();
+        let mut input = ConnectionInput {
+            library_id: library.id.clone(),
+            folder_id: Some(folder.id.clone()),
+            ..sample("Web", "web.invalid")
+        };
+        input.username = "svc".into();
+        input.color_accent = Some("#00ff00".into());
+        input.tags = vec!["prod".into()];
+        input.display_width = Some(1920);
+        let source = store.create_connection(input).unwrap();
+        store.update_last_connected(&source.id).unwrap();
+
+        let first = store.duplicate_connection(&source.id).unwrap();
+        assert_ne!(first.id, source.id, "fresh UUID (Req 10.19)");
+        assert_eq!(first.name, "Web copy");
+        assert_eq!(first.host, "web.invalid");
+        assert_eq!(first.port, source.port);
+        assert_eq!(first.username, "svc");
+        assert_eq!(first.color_accent, Some("#00ff00".to_string()));
+        assert_eq!(first.tags, vec!["prod".to_string()]);
+        assert_eq!(first.display_width, Some(1920));
+        assert_eq!(first.library_id, library.id, "same library");
+        assert_eq!(
+            first.folder_id.as_deref(),
+            Some(folder.id.as_str()),
+            "duplicate lands in the same folder (Req 10.19)"
+        );
+        assert!(first.last_connected_at.is_none(), "history is not copied");
+        assert!(first.created_at >= source.created_at, "fresh timestamps");
+
+        // Deterministic name sequence: "Web copy" taken → "Web copy 2".
+        let second = store.duplicate_connection(&source.id).unwrap();
+        assert_eq!(second.name, "Web copy 2");
+        let third = store.duplicate_connection(&source.id).unwrap();
+        assert_eq!(third.name, "Web copy 3");
+
+        // Name availability is scoped to the destination folder: a same
+        // name in another scope does not extend the sequence.
+        let other_folder = store.create_folder(&library.id, None, "QA").unwrap();
+        store
+            .move_node(
+                NodeId::connection(second.id.clone()),
+                NodeId::folder(other_folder.id.clone()),
+            )
+            .unwrap();
+        let fourth = store.duplicate_connection(&source.id).unwrap();
+        assert_eq!(
+            fourth.name, "Web copy 2",
+            "scope is the source folder's siblings"
+        );
+
+        // Never a copied credential: the store model holds no secret and
+        // the persisted duplicate carries no password key.
+        let raw = fs::read_to_string(dir.path().join("connections.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let duplicates: Vec<&serde_json::Value> = value["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["id"].as_str() == Some(first.id.as_str()))
+            .collect();
+        assert_eq!(duplicates.len(), 1);
+        assert!(duplicates[0].get("password").is_none());
+
+        assert_eq!(store.list_connections().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn duplicate_of_unknown_id_is_a_typed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        assert!(matches!(
+            store.duplicate_connection("00000000-0000-4000-8000-000000000000"),
+            Err(LibraryStoreError::Invalid(LibraryError::UnknownNode { .. }))
+        ));
+    }
+
+    #[test]
+    fn write_blocked_store_rejects_every_connection_mutation_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        fs::write(&path, MALFORMED).unwrap();
+        let store = store_at(dir.path());
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+
+        assert!(matches!(
+            store.create_connection(sample("A", "a.invalid")),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        assert!(matches!(
+            store.update_connection("x", sample("B", "b.invalid")),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        assert!(matches!(
+            store.delete_connection("x"),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        assert!(matches!(
+            store.duplicate_connection("x"),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        assert!(matches!(
+            store.update_last_connected("x"),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        assert!(matches!(
+            store.get_connection("x"),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        assert!(matches!(
+            store.list_connections(),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), MALFORMED.as_bytes());
+    }
+}
+
+/// Production-build mock policy (Req 12.10): no production write path may
+/// set `mock` — create/import/duplicate requests carrying a mock flag are
+/// rejected, update preserves the persisted flag only, and a duplicate of
+/// legacy mock data lands as inert non-mock data.
+#[cfg(test)]
+#[cfg(not(feature = "test-support"))]
+mod production_mock_inertness_tests {
+    use super::connection_crud_tests::sample;
+
+    use super::*;
+
+    /// Open a unified store at a temp dir (same layout as the CRUD tests).
+    fn store_at(root: &std::path::Path) -> LibraryStore {
+        LibraryStore::open_unified(root.join("connections.json"), root.join("libraries.json"))
+    }
+
+    /// Seed one persisted (possibly mock-flagged) connection as a
+    /// test-support build could have written it.
+    fn seed_legacy_mock(dir: &std::path::Path, id: &str, mock: bool) -> LibraryStore {
+        let store = store_at(dir);
+        let library = Library::new("Work");
+        let mut legacy = ConnectionConfig {
+            id: id.to_string(),
+            name: "Legacy".to_string(),
+            host: "legacy.invalid".to_string(),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: library.id.clone(),
+            folder_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_connected_at: None,
+        };
+        legacy.mock = mock;
+        store
+            .save(LibraryDocument::new(
+                vec![library],
+                Vec::new(),
+                vec![legacy],
+            ))
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn create_rejects_a_mock_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let mut input = sample("Mock", "mock.invalid");
+        input.mock = true;
+        let err = store
+            .create_connection(input)
+            .expect_err("production must reject mock creation requests");
+        assert!(err.to_string().to_lowercase().contains("mock"));
+    }
+
+    #[test]
+    fn update_preserves_a_persisted_mock_flag_without_applying_the_payload_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed_legacy_mock(dir.path(), "11111111-1111-4111-8111-111111111111", true);
+
+        let mut update = sample("Renamed", "renamed.invalid");
+        update.mock = false;
+        let updated = store
+            .update_connection("11111111-1111-4111-8111-111111111111", update)
+            .unwrap()
+            .unwrap();
+        assert!(
+            updated.mock,
+            "update never rewrites the persisted flag in production (data stays data-only)"
+        );
+    }
+
+    #[test]
+    fn duplicate_of_legacy_mock_data_lands_inert() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed_legacy_mock(dir.path(), "11111111-1111-4111-8111-111111111111", true);
+
+        let duplicate = store
+            .duplicate_connection("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        assert!(
+            !duplicate.mock,
+            "no production write path sets mock — the duplicate is inert data"
+        );
+    }
+}
+
+/// Test-support-build mock policy (Req 12.2/12.10): seeding synthetic saved
+/// connections through the v2 store persists the mock flag (data-only; the
+/// connect boundary stays the gate compiled in rdp::session).
+#[cfg(test)]
+#[cfg(feature = "test-support")]
+mod test_support_mock_flag_tests {
+    use super::connection_crud_tests::sample;
+
+    use super::*;
+
+    #[test]
+    fn create_persists_the_mock_flag_for_harness_seeding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LibraryStore::open_unified(
+            dir.path().join("connections.json"),
+            dir.path().join("libraries.json"),
+        );
+        let mut input = sample("E2E Mock 1", "drift-e2e-mock.invalid");
+        input.mock = true;
+        let created = store.create_connection(input).unwrap();
+        assert!(created.mock);
+
+        let reopened = LibraryStore::open_unified(
+            dir.path().join("connections.json"),
+            dir.path().join("libraries.json"),
+        );
+        assert!(reopened.get_connection(&created.id).unwrap().unwrap().mock);
     }
 }

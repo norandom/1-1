@@ -1,53 +1,68 @@
+//! Task 6.6 (Req 1.1–1.5, 10.19, 12.10): connection commands over the
+//! unified v2 [`LibraryStore`] (the v1 `ConnectionStore` is retired).
+//! Commands stay thin marshalers: validation, ownership resolution,
+//! transaction serialization and persistence live in the store layer
+//! (`store::library`); only the keyring side effects (store password on
+//! create/update, best-effort delete) live here, because credentials
+//! never enter the document model (design "Data Models").
+
 use tauri::State;
 
-use crate::store::connections::{ConnectionConfig, ConnectionInput, ConnectionStore};
+use crate::store::connections::{ConnectionConfig, ConnectionInput};
 use crate::store::credentials::CredentialStore;
+use crate::store::library::{LibraryStore, LibraryStoreError};
+
+/// Surface a typed store error as the command-layer string (existing
+/// command style, mirroring `commands::library`).
+fn to_message(error: LibraryStoreError) -> String {
+    error.to_string()
+}
+
+/// Store a submitted password in the OS credential store (Req 1.2), never
+/// in the connection file: absent/empty passwords leave the keyring alone.
+fn store_password_if_provided(
+    cred_store: &CredentialStore,
+    id: &str,
+    password: Option<&str>,
+) -> Result<(), String> {
+    if let Some(pw) = password
+        && !pw.is_empty()
+    {
+        cred_store.store_password(id, pw)?;
+    }
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn list_connections(
-    store: State<'_, ConnectionStore>,
+    store: State<'_, LibraryStore>,
 ) -> Result<Vec<ConnectionConfig>, String> {
-    Ok(store.list().await)
+    store.list_connections().map_err(to_message)
 }
 
 #[tauri::command]
 pub async fn get_connection(
     id: String,
-    store: State<'_, ConnectionStore>,
+    store: State<'_, LibraryStore>,
 ) -> Result<ConnectionConfig, String> {
     store
-        .get(&id)
-        .await
+        .get_connection(&id)
+        .map_err(to_message)?
         .ok_or_else(|| format!("Connection '{}' not found", id))
 }
 
 #[tauri::command]
 pub async fn create_connection(
     config: ConnectionInput,
-    store: State<'_, ConnectionStore>,
+    store: State<'_, LibraryStore>,
     cred_store: State<'_, CredentialStore>,
 ) -> Result<ConnectionConfig, String> {
-    // Validate host
-    if config.host.trim().is_empty() {
-        return Err("Host cannot be empty".to_string());
-    }
-    if config.host.len() > 253 {
-        return Err("Host exceeds maximum length of 253 characters".to_string());
-    }
-    // Validate port
-    if config.port == 0 {
-        return Err("Port must be in range 1-65535".to_string());
-    }
-
     let password = config.password.clone();
-    let conn = store.create(config).await?;
+    let conn = store.create_connection(config).map_err(to_message)?;
 
-    // Store password in keychain if provided
-    if let Some(ref pw) = password
-        && !pw.is_empty()
-    {
-        cred_store.store_password(&conn.id, pw)?;
-    }
+    // Store password in the OS credential store if provided (Req 1.2);
+    // the store file never contains it.
+    store_password_if_provided(&cred_store, &conn.id, password.as_deref())?;
 
     log::info!("Created connection: {} ({})", conn.name, conn.id);
     Ok(conn)
@@ -57,36 +72,72 @@ pub async fn create_connection(
 pub async fn update_connection(
     id: String,
     config: ConnectionInput,
-    store: State<'_, ConnectionStore>,
+    store: State<'_, LibraryStore>,
+    cred_store: State<'_, CredentialStore>,
 ) -> Result<ConnectionConfig, String> {
-    store
-        .update(&id, config)
-        .await?
-        .ok_or_else(|| format!("Connection '{}' not found", id))
+    let password = config.password.clone();
+    let updated = store
+        .update_connection(&id, config)
+        .map_err(to_message)?
+        .ok_or_else(|| format!("Connection '{}' not found", id))?;
+
+    // Regression for baseline defect B3-2: a submitted password used to be
+    // silently dropped; it now reaches the keyring AFTER the store
+    // transaction committed (mirroring create; unchanged passwords arrive
+    // as absent/empty and leave the entry alone).
+    store_password_if_provided(&cred_store, &id, password.as_deref())?;
+
+    Ok(updated)
 }
 
 #[tauri::command]
 pub async fn delete_connection(
     id: String,
-    store: State<'_, ConnectionStore>,
+    store: State<'_, LibraryStore>,
     cred_store: State<'_, CredentialStore>,
 ) -> Result<bool, String> {
-    let removed = store.delete(&id).await?;
+    let removed = store.delete_connection(&id).map_err(to_message)?;
     if removed {
-        // Best-effort delete password from keychain
+        // Best-effort delete password from keychain (Req 1.5)
         let _ = cred_store.delete_password(&id);
         log::info!("Deleted connection: {}", id);
     }
     Ok(removed)
 }
 
+/// Req 10.19 (design "Destructive actions and identity"): duplicate a
+/// connection — non-secret settings into the same folder, fresh id and
+/// deterministic available name, assigned by the store transaction. The
+/// keyring is never copied or shared: this command takes no credential
+/// store at all, so the duplicate requires password re-entry.
+#[tauri::command]
+pub async fn duplicate_connection(
+    id: String,
+    store: State<'_, LibraryStore>,
+) -> Result<ConnectionConfig, String> {
+    let duplicate = store.duplicate_connection(&id).map_err(to_message)?;
+    log::info!(
+        "Duplicated connection {} as {} ({})",
+        id,
+        duplicate.name,
+        duplicate.id
+    );
+    Ok(duplicate)
+}
+
 #[tauri::command]
 pub async fn import_rdp_file(
     path: String,
-    store: State<'_, ConnectionStore>,
+    library_id: Option<String>,
+    folder_id: Option<String>,
+    store: State<'_, LibraryStore>,
 ) -> Result<ConnectionConfig, String> {
-    let input = crate::store::connections::parse_rdp_file(&path)?;
-    let conn = store.create(input).await?;
+    let mut input = crate::store::connections::parse_rdp_file(&path)?;
+    input.library_id = library_id.unwrap_or_default();
+    input.folder_id = folder_id;
+    // Imports are always non-mock (Req 12.10): the parser hardcodes
+    // mock:false; nothing here can override it.
+    let conn = store.create_connection(input).map_err(to_message)?;
     log::info!(
         "Imported connection from RDP file: {} ({})",
         conn.name,
@@ -96,24 +147,18 @@ pub async fn import_rdp_file(
 }
 
 #[tauri::command]
-pub async fn import_ssh_config(store: State<'_, ConnectionStore>) -> Result<usize, String> {
+pub async fn import_ssh_config(
+    library_id: Option<String>,
+    folder_id: Option<String>,
+    store: State<'_, LibraryStore>,
+) -> Result<usize, String> {
     let hosts = crate::utils::ssh_config::parse_ssh_config()?;
     let mut count = 0;
     for host in hosts {
-        let input = ConnectionInput {
-            name: host.name.clone(),
-            host: host.hostname,
-            port: 3389,
-            username: host.user.unwrap_or_default(),
-            domain: String::new(),
-            color_accent: None,
-            tags: vec!["ssh-import".to_string()],
-            display_width: None,
-            display_height: None,
-            mock: false,
-            password: None,
-        };
-        store.create(input).await?;
+        let mut input = crate::store::connections::ssh_host_to_connection_input(&host);
+        input.library_id = library_id.clone().unwrap_or_default();
+        input.folder_id = folder_id.clone();
+        store.create_connection(input).map_err(to_message)?;
         count += 1;
     }
     log::info!("Imported {} connections from SSH config", count);

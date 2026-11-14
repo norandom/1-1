@@ -150,7 +150,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Boundary: Test instrumentation_
   - _Requirements: 12.4,12.10_
 
-- [ ] 6. JSON library storage with minimal new code
+- [x] 6. JSON library storage with minimal new code
 - [x] 6.1 Model v2 data and tree invariants
   - Reuse serde/serde_json, uuid and std HashMap/HashSet. Keep flat entities with parent IDs; no graph crate, database or ORM.
   - Done: Tests validate unique IDs, ownership, ancestor cycles, deep nesting and descendant queries.
@@ -176,7 +176,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Cycle/missing-target rejection, subtree moves and failed-write rollback pass tests.
   - _Boundary: Tree transactions_
   - _Requirements: 10.8,10.15_
-- [ ] 6.6 Integrate connection CRUD and duplication
+- [x] 6.6 Integrate connection CRUD and duplication
   - Adapt existing validation/import/probes; allocate fresh duplicate ID/name without keyring copying. Keep mock data inert in production.
   - Done: Existing CRUD/import tests pass in v2; duplicate has no copied password and correct folder.
   - _Boundary: Connection store integration_
@@ -351,6 +351,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,7.3,8.1,8.2,8.3,8.4,8.5,8.6,12.1,12.6,12.8,12.9,13.1,13.2,13.3,13.4_
 
 ## Implementation Notes
+- Controller sweep owed (before 11.12 audit): baseline-coverage.md rows need updating for 6.6 — B3-1/B3-2/B3-3 FIXED (regression tests in library.rs connection_crud_tests), B3-4 OBSOLETED (fail-closed v2 store), row 1.3/B3-5 pin intact (restored verbatim); B3-2 keyring-half remains convention+E2E covered (see test doc at library.rs ~L4683).
 - 6.5 suggestion carried for 8.4/11.2: add a direct folder→library-root move test (parent→None + subtree library_id rewrite) — branch is shared code already proven via connection→library, but deserves its own case.
 - 6.4 design alignments landed 2026-11-14: design.md now records the typed `descendants` error, the free-fn `migrate_v1` shape, the two recovery read commands, and the transitional `libraries.json` layout. **6.6 obligation**: unify `libraries.json` + v1 `connections.json` — merge v1 connections into the (possibly already user-populated) v2 default library without data loss; promote `LibraryStore::document()/save()` from `#[cfg(test)]` if a whole-document production caller appears.
 - 6.1 model layer notes for the store tasks: `LibraryError` is hand-rolled (Display + std::error::Error) though thiserror sits unused in Cargo.toml — either switch to the derive or record the hand-roll decision when 6.3+ adds error types; `LibraryDocument::descendants` returns a typed `UnknownNode` error where design L346 shows a bare Vec on `LibraryStore` — 6.4 must reconcile (map at the store layer or amend design); `#[allow(dead_code)]` on `pub mod library` must be dropped when the first production caller lands (6.3-6.6).

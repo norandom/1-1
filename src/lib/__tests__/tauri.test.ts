@@ -5,7 +5,10 @@ import type { ConnectionSummary, Folder, Library, LibraryTree } from '../../type
 import {
   createFolder,
   createLibrary,
+  duplicateConnection,
   getLibraryStatus,
+  importRdpFile,
+  importSshConfig,
   listDescendants,
   listTree,
   moveNode,
@@ -161,5 +164,53 @@ describe('move wrapper (task 6.5, Req 10.8/10.15)', () => {
     await expect(moveNode('folder', 'folder-1', 'folder', 'folder-3')).rejects.toThrow(
       'folder parent chain is cyclic at folder-1'
     );
+  });
+});
+
+describe('connection wrappers (task 6.6, Req 1.1-1.5/10.19)', () => {
+  it('duplicateConnection marshals the id and returns the copy', async () => {
+    const copy = { id: 'dup-1', name: 'Web copy' };
+    invokeMock.mockResolvedValueOnce(copy);
+
+    await expect(duplicateConnection('conn-1')).resolves.toEqual(copy);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('duplicate_connection', { id: 'conn-1' });
+  });
+
+  it('duplicateConnection rejects instead of swallowing command errors', async () => {
+    invokeMock.mockRejectedValueOnce(new Error('store is write-blocked'));
+    await expect(duplicateConnection('conn-1')).rejects.toThrow('store is write-blocked');
+  });
+
+  it('importRdpFile marshals the path and the optional destination', async () => {
+    const imported = { id: 'imp-1', name: 'host.invalid (imported)' };
+    invokeMock.mockResolvedValueOnce(imported);
+
+    await expect(
+      importRdpFile('C:/tmp/host.rdp', 'lib-1', 'folder-1')
+    ).resolves.toEqual(imported);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('import_rdp_file', {
+      path: 'C:/tmp/host.rdp',
+      libraryId: 'lib-1',
+      folderId: 'folder-1',
+    });
+  });
+
+  it('importRdpFile defaults the destination when none is given', async () => {
+    invokeMock.mockResolvedValueOnce(null);
+    await importRdpFile('C:/tmp/host.rdp');
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('import_rdp_file', {
+      path: 'C:/tmp/host.rdp',
+      libraryId: null,
+      folderId: null,
+    });
+  });
+
+  it('importSshConfig marshals the optional destination', async () => {
+    invokeMock.mockResolvedValueOnce(3);
+    await expect(importSshConfig('lib-1', null)).resolves.toBe(3);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('import_ssh_config', {
+      libraryId: 'lib-1',
+      folderId: null,
+    });
   });
 });

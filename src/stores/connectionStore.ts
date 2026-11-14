@@ -19,6 +19,7 @@ interface ConnectionState {
   ) => Promise<ConnectionConfig>;
   updateConnection: (id: string, config: Partial<ConnectionConfig>) => Promise<void>;
   deleteConnection: (id: string) => Promise<void>;
+  duplicateConnection: (id: string) => Promise<ConnectionConfig>;
 }
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
@@ -62,6 +63,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       connections: get().connections.filter((c) => c.id !== id),
       selectedId: get().selectedId === id ? null : get().selectedId,
     });
+  },
+
+  // Task 6.6 (Req 10.19): append the backend-made copy (fresh id, copy
+  // name, same folder, no copied credential — password re-entry needed).
+  duplicateConnection: async (id) => {
+    const copy = await tauri.duplicateConnection(id);
+    set({ connections: [...get().connections, copy] });
+    return copy;
   },
 
 }));

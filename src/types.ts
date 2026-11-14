@@ -1,3 +1,8 @@
+// Task 6.6 (Req 10.1/10.19): `libraryId`/`folderId`/`mock` mirror the v2
+// Rust `ConnectionConfig` serde shape. They are optional here because this
+// interface doubles as the create/update payload base (the Rust
+// `ConnectionInput` serde-defaults them), so v1-era callers stay valid;
+// every READ from the backend always includes all three.
 export interface ConnectionConfig {
   id: string;
   name: string;
@@ -13,6 +18,9 @@ export interface ConnectionConfig {
   createdAt: string;
   updatedAt: string;
   lastConnectedAt?: string;
+  libraryId?: string;
+  folderId?: string | null;
+  mock?: boolean;
 }
 
 export type SessionStatus =

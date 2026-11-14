@@ -7,8 +7,8 @@ use tauri::{
 use crate::rdp::client::SessionCommand;
 use crate::rdp::session::{MAX_SESSIONS, SessionInfo, SessionManager, admit_mock_session};
 use crate::renderer::shared_frame::SharedFrame;
-use crate::store::connections::ConnectionStore;
 use crate::store::credentials::CredentialStore;
+use crate::store::library::LibraryStore;
 use crate::store::settings::SettingsStore;
 
 #[allow(clippy::too_many_arguments)]
@@ -20,7 +20,8 @@ pub async fn connect(
     // or `false` is a normal real connection request.
     mock: Option<bool>,
     app: AppHandle,
-    conn_store: State<'_, ConnectionStore>,
+    // Task 6.6: the unified v2 library store is THE connection store.
+    conn_store: State<'_, LibraryStore>,
     cred_store: State<'_, CredentialStore>,
     session_mgr: State<'_, SessionManager>,
     settings_store: State<'_, SettingsStore>,
@@ -37,8 +38,8 @@ pub async fn connect(
 
     // Look up the connection config
     let config = conn_store
-        .get(&connection_id)
-        .await
+        .get_connection(&connection_id)
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Connection '{}' not found", connection_id))?;
 
     // Task 5.3 mock-session admission at the command boundary: production
@@ -85,7 +86,9 @@ pub async fn connect(
         .await?;
 
     // Update last_connected_at on the connection
-    conn_store.update_last_connected(&connection_id).await?;
+    conn_store
+        .update_last_connected(&connection_id)
+        .map_err(|e| e.to_string())?;
 
     Ok(session_id)
 }

@@ -52,6 +52,12 @@ export async function deleteConnection(id: string): Promise<void> {
   await invoke('delete_connection', { id });
 }
 
+/// Req 10.19: duplicate a connection (non-secret settings, same folder,
+/// fresh id + deterministic copy name; never a copied credential).
+export async function duplicateConnection(id: string): Promise<ConnectionConfig> {
+  return await invoke<ConnectionConfig>('duplicate_connection', { id });
+}
+
 export async function testConnection(host: string, port: number = 3389): Promise<boolean> {
   try {
     return await invoke<boolean>('test_connection', { host, port });
@@ -141,10 +147,28 @@ export async function getConnectionPassword(id: string): Promise<string | null> 
   }
 }
 
-// ── SSH Config Import ────────────────────────────────────────────────
+// ── Imports (task 6.6: library/folder destination, always non-mock) ──
 
-export async function importSshConfig(): Promise<number> {
-  return await invoke<number>('import_ssh_config');
+export async function importRdpFile(
+  path: string,
+  libraryId?: string,
+  folderId?: string | null
+): Promise<ConnectionConfig> {
+  return await invoke<ConnectionConfig>('import_rdp_file', {
+    path,
+    libraryId: libraryId ?? null,
+    folderId: folderId ?? null,
+  });
+}
+
+export async function importSshConfig(
+  libraryId?: string,
+  folderId?: string | null
+): Promise<number> {
+  return await invoke<number>('import_ssh_config', {
+    libraryId: libraryId ?? null,
+    folderId: folderId ?? null,
+  });
 }
 
 // ── Clipboard ────────────────────────────────────────────────────────

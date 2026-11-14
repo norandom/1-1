@@ -15,7 +15,6 @@ use tauri::{Manager, RunEvent, WindowEvent};
 use rdp::session::SessionManager;
 use renderer::gpu::GpuRenderer;
 use renderer::shared_frame::SharedFrame;
-use store::connections::ConnectionStore;
 use store::library::LibraryStore;
 use store::settings::SettingsStore;
 
@@ -61,17 +60,17 @@ pub fn run() {
             log::info!("App data directory: {:?}", data_dir);
 
             // Initialize stores
-            let connection_store = ConnectionStore::new(data_dir.clone());
-            // Task 6.4 (Req 10.1/10.2/10.3/10.5): v2 library store —
-            // libraries, folders, tree queries and write-blocked recovery.
-            // Judgment call: it owns `libraries.json`, NOT
-            // connections.json, because the live connections.json stays
-            // v1-owned by ConnectionStore until the 6.6 integration;
-            // pointing the v2 store at connections.json now would migrate
-            // live user data ahead of that task. Same single-file v2
-            // document shape as design "Logical Data Model" (option A');
-            // 6.6 owns the unification.
-            let library_store = LibraryStore::open(data_dir.join("libraries.json"));
+            // Task 6.6 (Req 10.10/10.12 + design "Logical Data Model"
+            // option A′): the v2 LibraryStore is THE connection store —
+            // one `connections.json` v2 document behind one lock. The
+            // transitional `libraries.json` a 6.4/6.5 build may have left
+            // behind is merged (v1 connections into the existing default
+            // library) or adopted once at open, fail-closed into
+            // write-blocked recovery; the v1 ConnectionStore is retired.
+            let library_store = LibraryStore::open_unified(
+                data_dir.join("connections.json"),
+                data_dir.join("libraries.json"),
+            );
             let settings_store = SettingsStore::new(data_dir);
             let session_manager = SessionManager::new();
             // Task 5.3 (Req 12.7): test-support builds may redirect
@@ -91,7 +90,6 @@ pub fn run() {
             let shared_frame = SharedFrame::new(1920, 1080);
 
             // Register managed state
-            app.manage(connection_store);
             app.manage(library_store);
             app.manage(settings_store);
             app.manage(session_manager);
@@ -165,12 +163,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // Connection commands
+            // Connection commands (task 6.6: unified v2 store)
             commands::connection::list_connections,
             commands::connection::get_connection,
             commands::connection::create_connection,
             commands::connection::update_connection,
             commands::connection::delete_connection,
+            commands::connection::duplicate_connection,
             commands::connection::import_rdp_file,
             commands::connection::test_connection,
             commands::connection::get_connection_password,

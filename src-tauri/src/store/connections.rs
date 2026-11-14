@@ -1,12 +1,17 @@
+//! Connection data model shared by the v1 legacy format and the unified
+//! v2 library document (task 6.6): the persisted [`ConnectionConfig`], the
+//! CRUD/import wire payload [`ConnectionInput`] (serde-defaulted ownership
+//! fields), and the import parsers/mappers (`.rdp` files, SSH configs).
+//!
+//! The v1 `ConnectionStore` (bare-array `connections.json` owner) was
+//! RETIRED by task 6.6: `store::library::LibraryStore` is now the single
+//! owner of `connections.json` (v2 document) and serves all connection
+//! CRUD through its single-lock transaction core (see `store::library`).
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionConfig {
     pub id: String,
@@ -31,9 +36,10 @@ pub struct ConnectionConfig {
     pub last_connected_at: Option<DateTime<Utc>>,
     /// Task 5.3 (Req 12.2/12.10): marks a synthetic (mock) saved connection.
     /// Data only — production builds reject mock-session requests at the
-    /// connect boundary (`rdp::session::admit_mock_session`); test-support
-    /// builds execute it as a no-network synthetic session. The v2 library
-    /// model keeps this field (design "LibraryStore v2", ConnectionConfigV2).
+    /// connect boundary (`rdp::session::admit_mock_session`) and reject
+    /// mock-flagged CREATE requests at the store boundary (task 6.6); no
+    /// production write path sets it. Test-support builds seed and persist
+    /// it for the harness.
     #[serde(default)]
     pub mock: bool,
     /// Task 6.1 (Req 10.1/10.8): owning library in the v2 library document
@@ -68,8 +74,18 @@ pub struct ConnectionInput {
     #[serde(default)]
     pub display_height: Option<u32>,
     /// Task 5.3: persisted mock flag (see `ConnectionConfig::mock`).
+    /// Rejected on create in production builds (Req 12.10).
     #[serde(default)]
     pub mock: bool,
+    /// Task 6.6 (design "Data Contracts & Integration"): CRUD payloads gain
+    /// library/folder ownership. Empty `library_id` routes the connection
+    /// to the store's default library; a `folder_id` without a library
+    /// resolves the folder's own library. Ownership is assigned on CREATE
+    /// only — updates preserve placement (moves go through `move_node`).
+    #[serde(default)]
+    pub library_id: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
 }
@@ -78,148 +94,26 @@ fn default_port() -> u16 {
     3389
 }
 
-pub struct ConnectionStore {
-    connections: Arc<Mutex<HashMap<String, ConnectionConfig>>>,
-    file_path: PathBuf,
-}
-
-impl ConnectionStore {
-    pub fn new(data_dir: PathBuf) -> Self {
-        let file_path = data_dir.join("connections.json");
-        let connections = if file_path.exists() {
-            match std::fs::read_to_string(&file_path) {
-                Ok(data) => match serde_json::from_str::<Vec<ConnectionConfig>>(&data) {
-                    Ok(list) => {
-                        let map: HashMap<String, ConnectionConfig> =
-                            list.into_iter().map(|c| (c.id.clone(), c)).collect();
-                        log::info!("Loaded {} connections from disk", map.len());
-                        map
-                    }
-                    Err(e) => {
-                        log::error!("Failed to parse connections file: {}", e);
-                        HashMap::new()
-                    }
-                },
-                Err(e) => {
-                    log::error!("Failed to read connections file: {}", e);
-                    HashMap::new()
-                }
-            }
-        } else {
-            HashMap::new()
-        };
-
-        Self {
-            connections: Arc::new(Mutex::new(connections)),
-            file_path,
-        }
-    }
-
-    pub async fn list(&self) -> Vec<ConnectionConfig> {
-        let conns = self.connections.lock().await;
-        let mut list: Vec<ConnectionConfig> = conns.values().cloned().collect();
-        list.sort_by(|a, b| a.name.cmp(&b.name));
-        list
-    }
-
-    pub async fn get(&self, id: &str) -> Option<ConnectionConfig> {
-        let conns = self.connections.lock().await;
-        conns.get(id).cloned()
-    }
-
-    pub async fn create(&self, input: ConnectionInput) -> Result<ConnectionConfig, String> {
-        let now = Utc::now();
-        let config = ConnectionConfig {
-            id: Uuid::new_v4().to_string(),
-            name: input.name,
-            host: input.host,
-            port: input.port,
-            username: input.username,
-            domain: input.domain,
-            color_accent: input.color_accent,
-            tags: input.tags,
-            display_width: input.display_width,
-            display_height: input.display_height,
-            mock: input.mock,
-            // v1 store: no library yet — task 6.3 migration and task 6.6
-            // library-scoped CRUD assign real ownership.
-            library_id: String::new(),
-            folder_id: None,
-            created_at: now,
-            updated_at: now,
-            last_connected_at: None,
-        };
-
-        let mut conns = self.connections.lock().await;
-        conns.insert(config.id.clone(), config.clone());
-        drop(conns);
-        self.save().await?;
-        Ok(config)
-    }
-
-    pub async fn update(
-        &self,
-        id: &str,
-        input: ConnectionInput,
-    ) -> Result<Option<ConnectionConfig>, String> {
-        let mut conns = self.connections.lock().await;
-        if let Some(existing) = conns.get_mut(id) {
-            existing.name = input.name;
-            existing.host = input.host;
-            existing.port = input.port;
-            existing.username = input.username;
-            existing.domain = input.domain;
-            existing.color_accent = input.color_accent;
-            existing.tags = input.tags;
-            existing.display_width = input.display_width;
-            existing.display_height = input.display_height;
-            existing.mock = input.mock;
-            existing.updated_at = Utc::now();
-            let updated = existing.clone();
-            drop(conns);
-            self.save().await?;
-            Ok(Some(updated))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub async fn delete(&self, id: &str) -> Result<bool, String> {
-        let mut conns = self.connections.lock().await;
-        let removed = conns.remove(id).is_some();
-        drop(conns);
-        if removed {
-            self.save().await?;
-        }
-        Ok(removed)
-    }
-
-    pub async fn update_last_connected(&self, id: &str) -> Result<(), String> {
-        let mut conns = self.connections.lock().await;
-        if let Some(conn) = conns.get_mut(id) {
-            conn.last_connected_at = Some(Utc::now());
-            drop(conns);
-            self.save().await?;
-        }
-        Ok(())
-    }
-
-    async fn save(&self) -> Result<(), String> {
-        let conns = self.connections.lock().await;
-        let list: Vec<&ConnectionConfig> = conns.values().collect();
-        let data = serde_json::to_string_pretty(&list)
-            .map_err(|e| format!("Failed to serialize connections: {}", e))?;
-        drop(conns);
-
-        if let Some(parent) = self.file_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("Failed to create data directory: {}", e))?;
-        }
-        tokio::fs::write(&self.file_path, data)
-            .await
-            .map_err(|e| format!("Failed to save connections: {}", e))?;
-        Ok(())
+/// Map a parsed SSH-config host entry into a connection input (Req 1.3):
+/// host, PORT (where available — regression for baseline defect B3-3,
+/// which hardcoded 3389 and discarded the parsed Port), username, the
+/// `ssh-import` tag, and a hard-coded non-mock flag (Req 12.10: imports
+/// never create synthetic connections).
+pub fn ssh_host_to_connection_input(host: &crate::utils::ssh_config::SshHost) -> ConnectionInput {
+    ConnectionInput {
+        name: host.name.clone(),
+        host: host.hostname.clone(),
+        port: host.port.unwrap_or(3389),
+        username: host.user.clone().unwrap_or_default(),
+        domain: String::new(),
+        color_accent: None,
+        tags: vec!["ssh-import".to_string()],
+        display_width: None,
+        display_height: None,
+        mock: false,
+        library_id: String::new(),
+        folder_id: None,
+        password: None,
     }
 }
 
@@ -292,6 +186,8 @@ pub fn parse_rdp_file(path: &str) -> Result<ConnectionInput, String> {
         display_width: width,
         display_height: height,
         mock: false,
+        library_id: String::new(),
+        folder_id: None,
         password: None,
     })
 }
@@ -320,6 +216,11 @@ mod tests {
         assert_eq!(result.port, 3389);
         assert_eq!(result.username, "admin");
         assert_eq!(result.domain, "CORP");
+        // Task 6.6: .rdp imports default to the store's default-library
+        // destination and are always non-mock (Req 1.3/12.10).
+        assert_eq!(result.library_id, "");
+        assert_eq!(result.folder_id, None);
+        assert!(!result.mock);
     }
 
     #[test]
@@ -357,322 +258,6 @@ mod tests {
         assert_eq!(result.display_height, Some(1080));
     }
 
-    #[tokio::test]
-    async fn test_create_and_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        let input = ConnectionInput {
-            name: "Test".into(),
-            host: "host1".into(),
-            port: 3389,
-            username: "user".into(),
-            domain: String::new(),
-            color_accent: None,
-            tags: vec![],
-            display_width: None,
-            display_height: None,
-            mock: false,
-            password: None,
-        };
-        store.create(input).await.unwrap();
-        let list = store.list().await;
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name, "Test");
-    }
-
-    #[tokio::test]
-    async fn test_create_and_get() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        let input = ConnectionInput {
-            name: "MyConn".into(),
-            host: "myhost".into(),
-            port: 3390,
-            username: "admin".into(),
-            domain: "DOM".into(),
-            color_accent: None,
-            tags: vec!["tag1".into()],
-            display_width: Some(1920),
-            display_height: Some(1080),
-            mock: false,
-            password: None,
-        };
-        let created = store.create(input).await.unwrap();
-        let fetched = store.get(&created.id).await.unwrap();
-        assert_eq!(fetched.name, "MyConn");
-        assert_eq!(fetched.host, "myhost");
-        assert_eq!(fetched.port, 3390);
-        assert_eq!(fetched.username, "admin");
-        assert_eq!(fetched.domain, "DOM");
-        assert_eq!(fetched.display_width, Some(1920));
-    }
-
-    #[tokio::test]
-    async fn test_update_connection() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        let input = ConnectionInput {
-            name: "Old".into(),
-            host: "old-host".into(),
-            port: 3389,
-            username: String::new(),
-            domain: String::new(),
-            color_accent: None,
-            tags: vec![],
-            display_width: None,
-            display_height: None,
-            mock: false,
-            password: None,
-        };
-        let created = store.create(input).await.unwrap();
-        let update_input = ConnectionInput {
-            name: "New".into(),
-            host: "new-host".into(),
-            port: 3390,
-            username: "newuser".into(),
-            domain: String::new(),
-            color_accent: None,
-            tags: vec![],
-            display_width: None,
-            display_height: None,
-            mock: false,
-            password: None,
-        };
-        let updated = store
-            .update(&created.id, update_input)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(updated.name, "New");
-        assert_eq!(updated.host, "new-host");
-        assert_eq!(updated.port, 3390);
-        assert_eq!(updated.username, "newuser");
-    }
-
-    #[tokio::test]
-    async fn test_delete_connection() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        let input = ConnectionInput {
-            name: "ToDelete".into(),
-            host: "host".into(),
-            port: 3389,
-            username: String::new(),
-            domain: String::new(),
-            color_accent: None,
-            tags: vec![],
-            display_width: None,
-            display_height: None,
-            mock: false,
-            password: None,
-        };
-        let created = store.create(input).await.unwrap();
-        let deleted = store.delete(&created.id).await.unwrap();
-        assert!(deleted);
-        let list = store.list().await;
-        assert!(list.is_empty());
-    }
-
-    // ---- Task 3.1 characterization tests (persistence baseline, Req 1.2/1.5/6.1).
-    // These pin CURRENT old-stack behavior for the baseline-coverage.md rows; they
-    // do not approve it. Defect-marked tests reference their baseline row. ----
-
-    fn sample_input(name: &str, host: &str) -> ConnectionInput {
-        ConnectionInput {
-            name: name.into(),
-            host: host.into(),
-            port: 3389,
-            username: String::new(),
-            domain: String::new(),
-            color_accent: None,
-            tags: vec![],
-            display_width: None,
-            display_height: None,
-            mock: false,
-            password: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_crud_round_trip_preserves_fields_across_reload() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("connections.json");
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        let mut rich = sample_input("Rich", "rich.example.com");
-        rich.port = 3390;
-        rich.username = "admin".into();
-        rich.domain = "CORP".into();
-        rich.color_accent = Some("#ff8800".into());
-        rich.tags = vec!["prod".into(), "rdp".into()];
-        rich.display_width = Some(2560);
-        rich.display_height = Some(1440);
-        let created = store.create(rich).await.unwrap();
-        store.update_last_connected(&created.id).await.unwrap();
-        store
-            .create(sample_input("Alpha", "alpha.example.com"))
-            .await
-            .unwrap(); // list is name-sorted
-
-        // Reopen from the same data dir: every field must survive the JSON round trip.
-        drop(store);
-        assert!(file_path.exists(), "connections.json must be written");
-        let reopened = ConnectionStore::new(dir.path().to_path_buf());
-        let reloaded = reopened.get(&created.id).await.unwrap();
-        assert_eq!(reloaded.id, created.id);
-        assert_eq!(reloaded.name, "Rich");
-        assert_eq!(reloaded.host, "rich.example.com");
-        assert_eq!(reloaded.port, 3390);
-        assert_eq!(reloaded.username, "admin");
-        assert_eq!(reloaded.domain, "CORP");
-        assert_eq!(reloaded.color_accent, Some("#ff8800".to_string()));
-        assert_eq!(reloaded.tags, vec!["prod".to_string(), "rdp".to_string()]);
-        assert_eq!(reloaded.display_width, Some(2560));
-        assert_eq!(reloaded.display_height, Some(1440));
-        assert_eq!(reloaded.created_at, created.created_at);
-        assert_eq!(reloaded.updated_at, created.updated_at);
-        assert!(reloaded.last_connected_at.is_some());
-
-        let list = reopened.list().await;
-        assert_eq!(list.len(), 2);
-        assert_eq!(
-            list[0].name, "Alpha",
-            "list() sorts by name (current behavior)"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_created_file_is_json_array_without_password_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("connections.json");
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        let mut input = sample_input("SecretHolder", "vault.example.com");
-        input.password = Some("Sup3rSecret-Vault!".into());
-        let created = store.create(input).await.unwrap();
-
-        let raw = std::fs::read_to_string(&file_path).unwrap();
-        assert!(
-            !raw.contains("Sup3rSecret-Vault!"),
-            "password value must never reach connections.json (Req 1.2/6.1)"
-        );
-        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        let array = value
-            .as_array()
-            .expect("connections.json is a v1 JSON array (current schema)");
-        assert_eq!(array.len(), 1);
-        assert!(
-            array[0].get("password").is_none(),
-            "persisted objects carry no password key"
-        );
-        assert_eq!(array[0]["id"].as_str(), Some(created.id.as_str()));
-        assert_eq!(array[0]["host"].as_str(), Some("vault.example.com"));
-    }
-
-    // DEFECT B3-2 (baseline-coverage.md row 1.2): the update path silently drops the
-    // submitted password (commands/connection.rs update_connection never touches the
-    // CredentialStore). Pinned at the store seam: the file stays secret-free either way.
-    #[tokio::test]
-    async fn test_update_with_password_keeps_file_secret_free_defect_b3_2() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("connections.json");
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        let created = store
-            .create(sample_input("Editable", "edit.example.com"))
-            .await
-            .unwrap();
-        let mut updated = sample_input("Editable", "edit2.example.com");
-        updated.password = Some("EditedSecret-2026!".into());
-        store.update(&created.id, updated).await.unwrap().unwrap();
-
-        let raw = std::fs::read_to_string(&file_path).unwrap();
-        assert!(!raw.contains("EditedSecret-2026!"));
-        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert!(value[0].get("password").is_none());
-    }
-
-    // DEFECT B3-1 (baseline-coverage.md row 1.1): the store update seam applies no
-    // validation, so update_connection persists empty name/host (backend side). The
-    // UI form validates, but nothing behind the IPC boundary does. Fix belongs to a
-    // later group; this test documents the current acceptance, not the desired one.
-    #[tokio::test]
-    async fn test_update_accepts_empty_name_and_host_defect_b3_1() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        let created = store
-            .create(sample_input("Valid", "valid.example.com"))
-            .await
-            .unwrap();
-        let result = store
-            .update(&created.id, sample_input("", ""))
-            .await
-            .unwrap();
-        let updated = result.expect("current behavior: update accepts empty name+host");
-        assert_eq!(updated.name, "");
-        assert_eq!(updated.host, "");
-        // ...and the invalid values persist to disk.
-        let reopened = ConnectionStore::new(dir.path().to_path_buf());
-        let reloaded = reopened.get(&created.id).await.unwrap();
-        assert_eq!(reloaded.name, "");
-        assert_eq!(reloaded.host, "");
-    }
-
-    // DEFECT B3-4 (baseline-coverage.md row 6.1): a malformed connections.json loads
-    // as an empty store (no error surfaced) and the NEXT save silently replaces the
-    // file — user data loss. Write-blocked recovery is planned work (task 6.3); this
-    // pins the current hazard without approving it.
-    #[tokio::test]
-    async fn test_corrupt_connections_file_replaced_by_next_save_defect_b3_4() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("connections.json");
-        std::fs::write(&file_path, "{ not valid json !!").unwrap();
-
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        assert!(
-            store.list().await.is_empty(),
-            "current behavior: corrupt file loads as an empty store"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&file_path).unwrap(),
-            "{ not valid json !!",
-            "load alone does not rewrite the file"
-        );
-
-        store
-            .create(sample_input("AfterCorrupt", "fresh.example.com"))
-            .await
-            .unwrap();
-        let raw = std::fs::read_to_string(&file_path).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&raw)
-            .expect("current behavior: next save replaces the corrupt file (data loss)");
-        assert_eq!(value.as_array().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_delete_rewrites_file_without_deleted_connection() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("connections.json");
-        let store = ConnectionStore::new(dir.path().to_path_buf());
-        let keep = store
-            .create(sample_input("Keep", "keep.example.com"))
-            .await
-            .unwrap();
-        let drop_conn = store
-            .create(sample_input("Drop", "drop.example.com"))
-            .await
-            .unwrap();
-        assert!(store.delete(&drop_conn.id).await.unwrap());
-        assert!(
-            !store.delete(&drop_conn.id).await.unwrap(),
-            "second delete: already gone"
-        );
-
-        let raw = std::fs::read_to_string(&file_path).unwrap();
-        assert!(!raw.contains(&drop_conn.id), "deleted id leaves the file");
-        let reopened = ConnectionStore::new(dir.path().to_path_buf());
-        assert!(reopened.get(&keep.id).await.is_some());
-        assert!(reopened.get(&drop_conn.id).await.is_none());
-        assert_eq!(reopened.list().await.len(), 1);
-    }
-
     // DEFECT B3-5 (baseline-coverage.md row 1.3): IPv6 literals in `full address`
     // are mangled — rsplit_once(':') treats the last colon-group separator as a
     // host:port split, yielding host "fe80:" and port 1.
@@ -684,61 +269,81 @@ mod tests {
         assert_eq!(result.port, 1, "current (defective) port parse");
     }
 
-    // ---- Task 5.3: persisted mock flag (Req 12.2/12.10).
-    //
-    // The `mock` field marks a saved connection as a synthetic (mock) session
-    // target. It is data only: production builds reject mock-session requests
-    // at the connect boundary (see rdp::session::admit_mock_session); the
-    // field exists so test-support builds — and later the v2 library model —
-    // can persist it (design "LibraryStore v2", ConnectionConfigV2.mock).
+    // The task 3.1/5.3 ConnectionStore CRUD/persistence tests were PORTED
+    // to the unified v2 store (task 6.6): see `store::library` modules
+    // `connection_crud_tests` (round-trips, validation incl. the flipped
+    // B3-1 regression, secret-free file, delete, duplicate),
+    // `unification_tests` (the fail-closed replacement for defect B3-4's
+    // corrupt-file characterization) and the cfg-gated mock-policy modules
+    // (the v1 mock round-trip, split per build). The .rdp parser tests
+    // above stay: the parser itself is unchanged (incl. the pinned B3-5,
+    // restored verbatim — baseline-coverage.md row 1.3 evidence).
 
-    /// The mock flag round-trips through save/reload and update; legacy files
-    /// without the key load with mock=false (serde default).
-    #[tokio::test]
-    async fn test_mock_flag_round_trips_and_legacy_files_default_false() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ConnectionStore::new(dir.path().to_path_buf());
+    // ---- Task 6.6 (Req 1.3): v2 CRUD payload ownership + import mapping ---
 
-        let mut input = sample_input("mock flag", "mock-connection.invalid");
-        input.mock = true;
-        let created = store.create(input).await.unwrap();
-        assert!(created.mock, "created connection carries the mock flag");
+    #[test]
+    fn test_connection_input_defaults_ownership_when_fields_are_absent() {
+        // The wire payload (create/update) accepts v1-era bodies without
+        // libraryId/folderId: serde defaults route them to the default
+        // library destination (design "Data Contracts & Integration").
+        let input: ConnectionInput =
+            serde_json::from_str(r#"{"name":"Legacy Body","host":"legacy.invalid","port":3389}"#)
+                .unwrap();
+        assert_eq!(input.library_id, "");
+        assert_eq!(input.folder_id, None);
 
-        // Reload from disk: the flag is persisted, not just in-memory.
-        let reloaded = ConnectionStore::new(dir.path().to_path_buf());
-        assert!(
-            reloaded.get(&created.id).await.unwrap().mock,
-            "persisted mock flag survives reload"
-        );
+        let round: ConnectionInput =
+            serde_json::from_str(&serde_json::to_string(&input).unwrap()).unwrap();
+        assert_eq!(round.library_id, "");
+        assert_eq!(round.folder_id, None);
+    }
 
-        // Update is a full replacement: clearing the flag persists too.
-        let cleared = sample_input("mock flag", "mock-connection.invalid");
-        let updated = store
-            .update(&created.id, cleared)
-            .await
-            .unwrap()
-            .expect("connection exists");
-        assert!(!updated.mock, "update replaces the mock flag");
-        assert!(
-            !ConnectionStore::new(dir.path().to_path_buf())
-                .get(&created.id)
-                .await
-                .unwrap()
-                .mock,
-            "cleared mock flag persists"
-        );
-
-        // A legacy file without the key still loads, defaulting to false.
-        let legacy_dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            legacy_dir.path().join("connections.json"),
-            r#"[{"id":"legacy","name":"Legacy","host":"legacy.invalid","port":3389,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}]"#,
+    #[test]
+    fn test_connection_input_carries_library_and_folder_ownership() {
+        let input: ConnectionInput = serde_json::from_str(
+            r#"{"name":"Filed","host":"filed.invalid","port":3390,
+                "libraryId":"11111111-1111-4111-8111-111111111111",
+                "folderId":"22222222-2222-4222-8222-222222222222"}"#,
         )
         .unwrap();
-        let legacy = ConnectionStore::new(legacy_dir.path().to_path_buf());
-        assert!(
-            !legacy.get("legacy").await.unwrap().mock,
-            "legacy files default mock=false"
+        assert_eq!(input.library_id, "11111111-1111-4111-8111-111111111111");
+        assert_eq!(
+            input.folder_id.as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
         );
+    }
+
+    /// Regression for baseline defect B3-3: the SSH import command used to
+    /// hardcode port 3389 and discard the parsed `Port`. The mapping helper
+    /// now carries the parsed port (defaulting to 3389) and keeps imports
+    /// non-mock (Req 1.3, 12.10).
+    #[test]
+    fn test_ssh_host_to_connection_input_uses_the_parsed_port_regression_b3_3() {
+        use crate::utils::ssh_config::SshHost;
+
+        let with_port = SshHost {
+            name: "db".into(),
+            hostname: "db.example.com".into(),
+            port: Some(2222),
+            user: Some("ops".into()),
+        };
+        let input = ssh_host_to_connection_input(&with_port);
+        assert_eq!(input.name, "db");
+        assert_eq!(input.host, "db.example.com");
+        assert_eq!(input.port, 2222, "parsed SSH Port is not discarded");
+        assert_eq!(input.username, "ops");
+        assert!(!input.mock, "imports are always non-mock");
+        assert_eq!(input.tags, vec!["ssh-import".to_string()]);
+        assert_eq!(input.password, None);
+
+        let without_port = SshHost {
+            name: "plain".into(),
+            hostname: "plain.example.com".into(),
+            port: None,
+            user: None,
+        };
+        let default_input = ssh_host_to_connection_input(&without_port);
+        assert_eq!(default_input.port, 3389);
+        assert_eq!(default_input.username, "");
     }
 }

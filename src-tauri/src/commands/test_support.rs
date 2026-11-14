@@ -17,14 +17,18 @@ use tauri::State;
 use crate::rdp::client::SessionCommand;
 use crate::rdp::frame_spy;
 use crate::rdp::session::SessionManager;
-use crate::store::connections::{ConnectionConfig, ConnectionInput, ConnectionStore};
+use crate::store::connections::{ConnectionConfig, ConnectionInput};
 use crate::store::credentials::CredentialStore;
+use crate::store::library::LibraryStore;
 
 /// Seed `count` synthetic saved connections named `{prefix} 1..=count`,
 /// persisted through `store`. Reserved `.invalid` hosts keep the fixtures
 /// off the network even if a future bug routed one to the real connector.
+/// Task 6.6: seeding goes through the unified v2 library store — the
+/// mock flag is admitted only because this whole module is compiled in
+/// test-support builds alone (Req 12.2/12.10).
 pub async fn seed_mock_connections(
-    store: &ConnectionStore,
+    store: &LibraryStore,
     count: u32,
     name_prefix: Option<&str>,
 ) -> Result<Vec<ConnectionConfig>, String> {
@@ -50,9 +54,11 @@ pub async fn seed_mock_connections(
             display_width: Some(64),
             display_height: Some(64),
             mock: true,
+            library_id: String::new(),
+            folder_id: None,
             password: None,
         };
-        seeded.push(store.create(input).await?);
+        seeded.push(store.create_connection(input).map_err(|e| e.to_string())?);
     }
     log::info!("Seeded {} synthetic mock connections", seeded.len());
     Ok(seeded)
@@ -63,7 +69,7 @@ pub async fn seed_mock_connections(
 pub async fn debug_seed_mock_connections(
     count: Option<u32>,
     name_prefix: Option<String>,
-    conn_store: State<'_, ConnectionStore>,
+    conn_store: State<'_, LibraryStore>,
 ) -> Result<Vec<ConnectionConfig>, String> {
     seed_mock_connections(&conn_store, count.unwrap_or(1), name_prefix.as_deref()).await
 }
@@ -125,10 +131,15 @@ pub fn debug_frame_spy_reset() {
 mod tests {
     use super::*;
 
+    /// Unified store at the harness-style layout (task 6.6).
+    fn store_at(root: &std::path::Path) -> LibraryStore {
+        LibraryStore::open_unified(root.join("connections.json"), root.join("libraries.json"))
+    }
+
     #[tokio::test]
     async fn test_seed_persists_synthetic_mock_saved_connections() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ConnectionStore::new(dir.path().to_path_buf());
+        let store = store_at(dir.path());
 
         let seeded = seed_mock_connections(&store, 2, Some("E2E")).await.unwrap();
         assert_eq!(seeded.len(), 2);
@@ -148,10 +159,10 @@ mod tests {
         assert_eq!(ids.len(), 2, "fresh unique ids");
 
         // Persisted for the harness's isolated namespace (file-only, no network).
-        let reloaded = ConnectionStore::new(dir.path().to_path_buf());
+        let reloaded = store_at(dir.path());
         for conn in &seeded {
             assert!(
-                reloaded.get(&conn.id).await.is_some(),
+                reloaded.get_connection(&conn.id).unwrap().is_some(),
                 "seeded connection {} persisted",
                 conn.id
             );
@@ -161,7 +172,7 @@ mod tests {
     #[tokio::test]
     async fn test_seed_defaults_prefix_and_rejects_runaway_counts() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ConnectionStore::new(dir.path().to_path_buf());
+        let store = store_at(dir.path());
 
         let one = seed_mock_connections(&store, 1, None).await.unwrap();
         assert!(
