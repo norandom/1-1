@@ -1,13 +1,17 @@
 //! Task 6.1 (Req 10.1/10.5/10.8): v2 library document model and tree
-//! invariants for the Royal TS-style connection tree.
+//! invariants for the Royal TS-style connection tree; task 6.3 adds v1→v2
+//! migration and write-blocked recovery; task 6.4 (Req 10.1/10.2/10.3/
+//! 10.5) adds the CRUD/read facade over the single-owner [`LibraryStore`]
+//! behind the IPC commands in `commands::library`.
 //!
 //! Pure data + validation + query layer: flat entities with parent IDs
 //! (library → folders → connections), no graph crate, database or ORM.
-//! Persistence uses the task 6.2 atomic writer; v1→v2 migration and
-//! write-blocked recovery (task 6.3) live below the model. CRUD read
-//! models and `move_node` transactions are 6.4/6.5 — all build on
-//! [`LibraryDocument::validate`] so a snapshot is proven legal before it is
-//! persisted or published.
+//! Persistence uses the task 6.2 atomic writer; every mutation is one
+//! serialized transaction (snapshot → change → validate → persist →
+//! publish under a single lock), so a failed mutation leaves the prior
+//! snapshot and file untouched. `move_node` transactions are 6.5 — they
+//! build on [`LibraryDocument::validate`] so a snapshot is proven legal
+//! before it is persisted or published.
 //!
 //! Credentials never live in this model: keyring entries are keyed by
 //! connection id only (design "Data Models"), so no secret material here.
@@ -88,6 +92,17 @@ pub struct ConnectionSummary {
     pub host: String,
     pub library_id: String,
     pub folder_id: Option<String>,
+}
+
+/// Read model of [`LibraryStore::list_tree`] (design "Library Commands"):
+/// the whole tree as flat entity lists plus dashboard connection
+/// summaries, ready for the sidebar tree and folder dashboards (10.1/10.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryTree {
+    pub libraries: Vec<Library>,
+    pub folders: Vec<Folder>,
+    pub connections: Vec<ConnectionSummary>,
 }
 
 /// Kinds of addressable tree nodes (mirrors the TS `NodeId` union).
@@ -195,6 +210,50 @@ impl std::fmt::Display for LibraryError {
 }
 
 impl std::error::Error for LibraryError {}
+
+/// Typed failures of the task 6.4 CRUD/read facade on [`LibraryStore`].
+/// Hand-rolled (`Display` + `std::error::Error`) per the recorded
+/// store-layer error convention (tasks.md Implementation Notes, 6.1/6.3
+/// decision: thiserror stays unused, error types stay hand-rolled).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryStoreError {
+    /// The store is in write-blocked recovery (Req 10.12): every mutation
+    /// and snapshot read is rejected until a successful reload.
+    WriteBlocked { reason: String },
+    /// A create/rename input is not a usable name (blank after trim).
+    InvalidName { kind: &'static str },
+    /// The operation violates tree invariants or references an unknown
+    /// entity/node (wraps [`LibraryError`]).
+    Invalid(LibraryError),
+    /// Validation passed but persisting the new snapshot failed; the
+    /// previous in-memory snapshot and on-disk file are retained.
+    PersistFailed { cause: String },
+}
+
+impl std::fmt::Display for LibraryStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WriteBlocked { reason } => write!(
+                f,
+                "store is write-blocked until valid data is reloaded: {reason}"
+            ),
+            Self::InvalidName { kind } => write!(f, "{kind} name cannot be empty"),
+            Self::Invalid(err) => write!(f, "library operation rejected: {err}"),
+            Self::PersistFailed { cause } => write!(
+                f,
+                "library operation failed to persist (prior snapshot retained): {cause}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LibraryStoreError {}
+
+impl From<LibraryError> for LibraryStoreError {
+    fn from(err: LibraryError) -> Self {
+        Self::Invalid(err)
+    }
+}
 
 /// In-memory shape of `connections.json` v2 (design "Logical Data Model"):
 /// flat entity lists where nesting and ownership are parent-id references.
@@ -565,6 +624,15 @@ impl LoadOutcome {
 /// documented migration defaults; ids and all other fields stay untouched,
 /// and credential accounts (keyring, keyed by connection id) are unchanged
 /// by construction.
+///
+/// Task 6.4 reconciliation (tasks.md 6.1 Implementation Note): design L348
+/// sketches this as a method on the store facade
+/// (`LibraryStore::migrate_v1`). The free function stays deliberately: it
+/// is the pure data transform applied inside the load path
+/// ([`load_or_migrate`] → [`LibraryStore::open`]/[`LibraryStore::reload`])
+/// and never reads or writes store instance state, which a `&self`/`&mut
+/// self` method would falsely imply. The store methods below own the
+/// migration flow end-to-end; there is no separate facade shim.
 pub fn migrate_v1(legacy: Vec<ConnectionConfig>) -> LibraryDocument {
     let library = Library::new(DEFAULT_LIBRARY_NAME);
     let connections = legacy
@@ -732,9 +800,11 @@ fn assert_v1_parity(
     Ok(())
 }
 
-/// UI-facing projection of the store's mode (Req 10.12; task 8.7 renders
-/// the recovery instructions, this layer only exposes them).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Current store mode for the UI (recovery state, Req 10.12). Task 6.4:
+/// serialized (internally tagged, camelCase) for the `get_library_status`
+/// and `reload_library_store` read commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
 pub enum StoreStatus {
     /// Document loaded (v2 as-is or after v1 migration); mutations allowed.
     Ready,
@@ -765,15 +835,16 @@ struct StoreInner {
     state: StoreState,
 }
 
-/// Owner of `connections.json`: loads (migrating v1 on first sight),
-/// serves the current snapshot, and gates every mutation behind the
+/// Owner of the v2 library document (transitional `libraries.json` until
+/// 6.6 unifies it with the v1-owned `connections.json`): loads (migrating
+/// v1 on first sight), serves the current snapshot, and gates every
+/// mutation behind the
 /// write-blocked recovery state (Req 10.10/10.12).
-///
 /// On any load/migration failure the store opens in
 /// [`StoreStatus::WriteBlocked`]: the on-disk file and backup are left
-/// untouched, [`LibraryStore::save`] rejects every mutation — including
-/// the empty replacement that would wipe unreadable data — and only a
-/// successful [`LibraryStore::reload`] lifts the block.
+/// untouched, every mutation is rejected — including the empty replacement
+/// that would wipe unreadable data — and only a successful
+/// [`LibraryStore::reload`] lifts the block.
 pub struct LibraryStore {
     inner: Mutex<StoreInner>,
 }
@@ -784,7 +855,6 @@ impl LibraryStore {
     /// load yields a write-blocked store.
     pub fn open(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let backup_path = backup_path_for(&path);
         let state = match load_or_migrate(&path) {
             Ok(outcome) => {
                 match &outcome {
@@ -797,7 +867,7 @@ impl LibraryStore {
                     LoadOutcome::LoadedV2(_) => {
                         log::info!("Library store: loaded v2 document from {}", path.display());
                     }
-                    LoadOutcome::MigratedV2 { .. } => {
+                    LoadOutcome::MigratedV2 { backup_path, .. } => {
                         log::info!(
                             "Library store: migrated {} to v2 (backup at {})",
                             path.display(),
@@ -838,6 +908,12 @@ impl LibraryStore {
     }
 
     /// The current document snapshot, or `None` while write-blocked.
+    ///
+    /// Test-facing (task 6.4): production reads go through the typed read
+    /// models ([`LibraryStore::list_tree`], [`LibraryStore::descendants`],
+    /// [`LibraryStore::status`]) which also express the write-blocked
+    /// state; tests need the raw snapshot to seed and assert documents.
+    #[cfg(test)]
     pub fn document(&self) -> Option<LibraryDocument> {
         match &self
             .inner
@@ -877,13 +953,184 @@ impl LibraryStore {
     /// (Req 10.12: a failed load must never lead to a successful
     /// empty-store save). On commit failure the previous in-memory
     /// snapshot and on-disk file are retained.
+    ///
+    /// Test-facing whole-document replace (task 6.4 reconciliation):
+    /// production mutations flow through the single-lock CRUD facade
+    /// below, whose transactions commit through the same core
+    /// ([`LibraryStore::commit_publish`] via [`LibraryStore::save_locked`]);
+    /// tests use this to seed and fault-inject arbitrary documents.
+    #[cfg(test)]
     pub fn save(&self, document: LibraryDocument) -> Result<(), MigrationError> {
         let mut inner = self.inner.lock().expect("library store lock poisoned");
+        Self::save_locked(&mut inner, document)
+    }
+
+    /// Blocked-check + transactional commit with the store lock held by
+    /// the caller; shared by [`LibraryStore::save`] (tests) and
+    /// [`LibraryStore::mutate`] (production CRUD transactions).
+    fn save_locked(
+        inner: &mut StoreInner,
+        document: LibraryDocument,
+    ) -> Result<(), MigrationError> {
         if let StoreState::WriteBlocked { cause } = &inner.state {
             return Err(MigrationError::WriteBlocked {
                 reason: cause.to_string(),
             });
         }
+        Self::commit_publish(inner, document)
+    }
+
+    // ---- Task 6.4: CRUD and read models (Req 10.1/10.2/10.3/10.5) ------
+    // Commands in `commands::library` are thin marshalers around these
+    // methods; all validation and transaction handling lives here.
+
+    /// Req 10.2: create a library (fresh UUID v4 id, current timestamps)
+    /// in one serialized transaction and persist it.
+    pub fn create_library(&self, name: &str) -> Result<Library, LibraryStoreError> {
+        check_name("library", name)?;
+        self.mutate(|mut next| {
+            let library = Library::new(name.trim());
+            next.libraries.push(library.clone());
+            Ok((next, library))
+        })
+    }
+
+    /// Req 10.2: rename a library and bump its `updated_at`. Unknown ids
+    /// and blank names are rejected before anything is touched.
+    pub fn rename_library(&self, id: &str, name: &str) -> Result<Library, LibraryStoreError> {
+        check_name("library", name)?;
+        self.mutate(|mut next| {
+            let renamed = {
+                let library = next
+                    .libraries
+                    .iter_mut()
+                    .find(|library| library.id == id)
+                    .ok_or_else(|| LibraryError::UnknownLibrary { id: id.to_string() })?;
+                library.name = name.trim().to_string();
+                library.updated_at = Utc::now();
+                library.clone()
+            };
+            Ok((next, renamed))
+        })
+    }
+
+    /// Req 10.3/10.7 folder semantics: create a folder under a library
+    /// root (`parent_id == None`) or under another folder of the SAME
+    /// library. Unknown libraries/parents and cross-library parents are
+    /// rejected by the transaction's validation step (typed
+    /// [`LibraryError`]); nothing is persisted on rejection.
+    pub fn create_folder(
+        &self,
+        library_id: &str,
+        parent_id: Option<&str>,
+        name: &str,
+    ) -> Result<Folder, LibraryStoreError> {
+        check_name("folder", name)?;
+        self.mutate(|mut next| {
+            let folder = Folder::new(library_id, parent_id.map(str::to_string), name.trim());
+            next.folders.push(folder.clone());
+            Ok((next, folder))
+        })
+    }
+
+    /// Req 10.3/10.7: rename a folder in place. Unknown ids and blank
+    /// names are rejected without touching the snapshot.
+    pub fn rename_folder(&self, id: &str, name: &str) -> Result<Folder, LibraryStoreError> {
+        check_name("folder", name)?;
+        self.mutate(|mut next| {
+            let renamed = {
+                let folder = next
+                    .folders
+                    .iter_mut()
+                    .find(|folder| folder.id == id)
+                    .ok_or_else(|| LibraryError::UnknownFolder { id: id.to_string() })?;
+                folder.name = name.trim().to_string();
+                folder.clone()
+            };
+            Ok((next, renamed))
+        })
+    }
+
+    /// Design "Library Commands" `list_tree() -> LibraryTree`: flat
+    /// libraries/folders plus dashboard connection summaries (10.1).
+    /// Rejected with a typed error while write-blocked (no snapshot).
+    pub fn list_tree(&self) -> Result<LibraryTree, LibraryStoreError> {
+        self.read(|document| {
+            Ok(LibraryTree {
+                libraries: document.libraries.clone(),
+                folders: document.folders.clone(),
+                connections: document.connections.iter().map(summary_of).collect(),
+            })
+        })
+    }
+
+    /// Dashboard listing incl. nested folders (Req 10.5, design L346).
+    ///
+    /// RECONCILIATION (tasks.md 6.1 Implementation Note, resolved in 6.4):
+    /// design shows a bare `Vec<ConnectionSummary>` on the store, but the
+    /// store deliberately keeps a typed error, for two reasons:
+    /// 1. an unknown node must not masquerade as an empty dashboard — a
+    ///    stale tree id would silently render "no connections" instead of
+    ///    surfacing the drift ([`LibraryError::UnknownNode`]);
+    /// 2. a write-blocked store has no readable snapshot at all, which a
+    ///    bare `Vec` cannot express ([`LibraryStoreError::WriteBlocked`]).
+    ///
+    /// The command layer surfaces the message to the UI.
+    pub fn descendants(&self, node: NodeId) -> Result<Vec<ConnectionSummary>, LibraryStoreError> {
+        self.read(|document| {
+            document
+                .descendants(node)
+                .map_err(LibraryStoreError::Invalid)
+        })
+    }
+
+    /// Run a read query against the current snapshot under the store lock.
+    fn read<T>(
+        &self,
+        query: impl FnOnce(&LibraryDocument) -> Result<T, LibraryStoreError>,
+    ) -> Result<T, LibraryStoreError> {
+        let inner = self.inner.lock().expect("library store lock poisoned");
+        match &inner.state {
+            StoreState::Ready(document) => query(document),
+            StoreState::WriteBlocked { cause } => Err(LibraryStoreError::WriteBlocked {
+                reason: cause.to_string(),
+            }),
+        }
+    }
+
+    /// One serialized transaction (design "Storage transactions and
+    /// recovery"): clone the current snapshot, apply `change`, then
+    /// validate/persist/publish the result while holding the SAME lock, so
+    /// concurrent commands can never interleave or lose updates. On any
+    /// error — blank name, invariant violation, persist failure — the
+    /// previous in-memory snapshot and on-disk file are retained.
+    fn mutate<T>(
+        &self,
+        change: impl FnOnce(LibraryDocument) -> Result<(LibraryDocument, T), LibraryStoreError>,
+    ) -> Result<T, LibraryStoreError> {
+        let mut inner = self.inner.lock().expect("library store lock poisoned");
+        let current = match &inner.state {
+            StoreState::Ready(document) => document.clone(),
+            StoreState::WriteBlocked { cause } => {
+                return Err(LibraryStoreError::WriteBlocked {
+                    reason: cause.to_string(),
+                });
+            }
+        };
+        let (next, value) = change(current)?;
+        Self::save_locked(&mut inner, next).map_err(map_commit_error)?;
+        Ok(value)
+    }
+
+    /// Validate → serialize → atomically persist → publish, with the store
+    /// lock held by the caller. Shared transaction core of
+    /// [`LibraryStore::save`] and every task 6.4 CRUD mutation; publishing
+    /// happens only after a successful commit, so a failed commit leaves
+    /// the previous in-memory snapshot and on-disk file untouched.
+    fn commit_publish(
+        inner: &mut StoreInner,
+        document: LibraryDocument,
+    ) -> Result<(), MigrationError> {
         document.validate().map_err(MigrationError::InvalidData)?;
         let json = serde_json::to_string_pretty(&document).map_err(|e| {
             MigrationError::SerializeFailed {
@@ -901,6 +1148,31 @@ impl LibraryStore {
         // Publish only after the commit succeeded.
         inner.state = StoreState::Ready(document);
         Ok(())
+    }
+}
+
+/// Store-layer input validation for entity names, so the IPC commands stay
+/// thin marshalers (task 6.4): a name must be non-blank after trimming.
+fn check_name(kind: &'static str, name: &str) -> Result<(), LibraryStoreError> {
+    if name.trim().is_empty() {
+        return Err(LibraryStoreError::InvalidName { kind });
+    }
+    Ok(())
+}
+
+/// Fold a commit-path [`MigrationError`] into the CRUD error surface.
+fn map_commit_error(error: MigrationError) -> LibraryStoreError {
+    match error {
+        MigrationError::WriteBlocked { reason } => LibraryStoreError::WriteBlocked { reason },
+        MigrationError::InvalidData(err) => LibraryStoreError::Invalid(err),
+        MigrationError::SerializeFailed { cause } | MigrationError::CommitFailed { cause } => {
+            LibraryStoreError::PersistFailed { cause }
+        }
+        // commit_publish produces no other variants; keep the mapping
+        // total anyway so a future variant cannot panic.
+        other => LibraryStoreError::PersistFailed {
+            cause: other.to_string(),
+        },
     }
 }
 
@@ -1953,5 +2225,388 @@ mod migration_tests {
         store.save(doc.clone()).unwrap();
         let on_disk: LibraryDocument = serde_json::from_str(&read_file(&path)).unwrap();
         assert_eq!(value_of(&on_disk), value_of(&doc));
+    }
+}
+
+#[cfg(test)]
+mod crud_tests {
+    //! Task 6.4 (Req 10.1/10.2/10.3/10.5): the CRUD and read-model facade
+    //! behind the IPC commands in `commands::library`. The commands are
+    //! thin marshalers; these tests specify the store they call: one
+    //! serialized transaction per mutation, nested-descendant read models,
+    //! snapshot preservation on every error path, and write-blocked
+    //! rejection of CRUD and reads (Req 10.12).
+
+    use super::*;
+    use crate::store::connections::ConnectionConfig;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    const MALFORMED: &str = "{ not a library document";
+    const MISSING_ID: &str = "00000000-0000-4000-8000-000000000000";
+
+    fn store_at(root: &std::path::Path, file: &str) -> LibraryStore {
+        LibraryStore::open(root.join(file))
+    }
+
+    fn conn(library_id: &str, folder_id: Option<&str>, name: &str) -> ConnectionConfig {
+        let now = Utc::now();
+        ConnectionConfig {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            host: format!("{name}.invalid"),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: library_id.to_string(),
+            folder_id: folder_id.map(str::to_string),
+            created_at: now,
+            updated_at: now,
+            last_connected_at: None,
+        }
+    }
+
+    fn sorted(summaries: Vec<ConnectionSummary>) -> String {
+        let mut names: Vec<String> = summaries.into_iter().map(|s| s.name).collect();
+        names.sort();
+        names.join(",")
+    }
+
+    #[test]
+    fn create_and_rename_library_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+
+        let created = store.create_library("Work").unwrap();
+        assert_eq!(created.name, "Work");
+        assert_eq!(
+            Uuid::parse_str(&created.id).unwrap().get_version_num(),
+            4,
+            "fresh UUID v4 per library"
+        );
+
+        let renamed = store.rename_library(&created.id, "Personal").unwrap();
+        assert_eq!(renamed.name, "Personal");
+        assert_eq!(renamed.id, created.id);
+        assert!(
+            renamed.updated_at >= created.updated_at,
+            "rename bumps updatedAt"
+        );
+
+        // Persistence round-trip: a fresh store over the same file sees
+        // the rename (Req 10.2 persist).
+        let reopened = store_at(dir.path(), "connections.json");
+        let tree = reopened.list_tree().unwrap();
+        assert_eq!(tree.libraries.len(), 1);
+        assert_eq!(tree.libraries[0].name, "Personal");
+        assert_eq!(tree.libraries[0].id, created.id);
+    }
+
+    #[test]
+    fn create_and_rename_folder_round_trip_under_root_and_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let library = store.create_library("Work").unwrap();
+
+        let root = store.create_folder(&library.id, None, "Prod").unwrap();
+        assert_eq!(root.library_id, library.id);
+        assert_eq!(root.parent_id, None, "no parent = library root");
+
+        let nested = store
+            .create_folder(&library.id, Some(&root.id), "Europe")
+            .unwrap();
+        assert_eq!(nested.parent_id.as_deref(), Some(root.id.as_str()));
+
+        let renamed = store.rename_folder(&nested.id, "EMEA").unwrap();
+        assert_eq!(renamed.name, "EMEA");
+
+        let reopened = store_at(dir.path(), "connections.json");
+        let tree = reopened.list_tree().unwrap();
+        assert_eq!(tree.folders.len(), 2);
+        let saved = tree
+            .folders
+            .iter()
+            .find(|f| f.id == nested.id)
+            .expect("renamed folder persists");
+        assert_eq!(saved.name, "EMEA");
+        assert_eq!(saved.parent_id.as_deref(), Some(root.id.as_str()));
+    }
+
+    #[test]
+    fn descendants_lists_connections_in_nested_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let a = store.create_library("A").unwrap();
+        let b = store.create_library("B").unwrap();
+        let root = store.create_folder(&a.id, None, "Prod").unwrap();
+        let mid = store
+            .create_folder(&a.id, Some(&root.id), "Europe")
+            .unwrap();
+        let deep = store.create_folder(&a.id, Some(&mid.id), "Berlin").unwrap();
+
+        // Connection CRUD is task 6.6; seed the read model through the
+        // store's validated whole-document save.
+        store
+            .save(LibraryDocument::new(
+                vec![a.clone(), b.clone()],
+                vec![root, mid, deep],
+                vec![
+                    conn(&a.id, None, "a-root"),
+                    conn(&a.id, None, "a-deepless"),
+                    conn(&b.id, None, "b-root"),
+                ],
+            ))
+            .unwrap();
+        // Re-file a connection into the deepest folder by saving the
+        // adjusted document (nested placement for the query below).
+        let mut document = store.document().expect("ready store has a snapshot");
+        document.connections[1].folder_id = Some(document.folders[2].id.clone());
+        store.save(document).unwrap();
+
+        assert_eq!(
+            sorted(store.descendants(NodeId::library(&a.id)).unwrap()),
+            "a-deepless,a-root",
+            "library node reaches the whole tree incl. nested folders"
+        );
+        let tree = store.list_tree().unwrap();
+        let deep_conn = tree
+            .connections
+            .iter()
+            .find(|c| c.name == "a-deepless")
+            .unwrap();
+        assert_eq!(
+            sorted(
+                store
+                    .descendants(NodeId::folder(&tree.folders[1].id))
+                    .unwrap()
+            ),
+            "a-deepless",
+            "folder node reaches its subtree"
+        );
+        assert_eq!(
+            store
+                .descendants(NodeId::connection(&deep_conn.id))
+                .unwrap()
+                .len(),
+            1,
+            "connection node yields itself"
+        );
+
+        // Unknown node is a typed error, never a silent empty dashboard.
+        let missing = NodeId::folder(MISSING_ID);
+        assert!(matches!(
+            store.descendants(missing.clone()),
+            Err(LibraryStoreError::Invalid(LibraryError::UnknownNode { node })) if node == missing
+        ));
+    }
+
+    #[test]
+    fn list_tree_returns_flat_entities_and_connection_summaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let library = store.create_library("Work").unwrap();
+        let folder = store.create_folder(&library.id, None, "Prod").unwrap();
+        store
+            .save(LibraryDocument::new(
+                vec![library.clone()],
+                vec![folder.clone()],
+                vec![conn(&library.id, Some(&folder.id), "web-1")],
+            ))
+            .unwrap();
+
+        let tree = store.list_tree().unwrap();
+        assert_eq!(tree.libraries.len(), 1);
+        assert_eq!(tree.folders.len(), 1);
+        assert_eq!(tree.connections.len(), 1);
+        let summary = &tree.connections[0];
+        assert_eq!(summary.name, "web-1");
+        assert_eq!(summary.host, "web-1.invalid");
+        assert_eq!(summary.library_id, library.id);
+        assert_eq!(summary.folder_id.as_deref(), Some(folder.id.as_str()));
+    }
+
+    #[test]
+    fn rejected_mutations_preserve_prior_snapshot_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let store = store_at(dir.path(), "connections.json");
+        let library = store.create_library("Work").unwrap();
+        let other = store.create_library("Other").unwrap();
+        let foreign = store.create_folder(&other.id, None, "Foreign").unwrap();
+
+        let before_tree = store.list_tree().unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+
+        // Blank names are rejected before anything is touched.
+        assert!(matches!(
+            store.create_library("   "),
+            Err(LibraryStoreError::InvalidName { kind: "library" })
+        ));
+        assert!(matches!(
+            store.rename_folder(&foreign.id, ""),
+            Err(LibraryStoreError::InvalidName { kind: "folder" })
+        ));
+        // Unknown entities.
+        assert!(matches!(
+            store.rename_library(MISSING_ID, "X"),
+            Err(LibraryStoreError::Invalid(
+                LibraryError::UnknownLibrary { .. }
+            ))
+        ));
+        assert!(matches!(
+            store.rename_folder(MISSING_ID, "X"),
+            Err(LibraryStoreError::Invalid(
+                LibraryError::UnknownFolder { .. }
+            ))
+        ));
+        assert!(matches!(
+            store.create_folder(MISSING_ID, None, "X"),
+            Err(LibraryStoreError::Invalid(
+                LibraryError::UnknownLibrary { .. }
+            ))
+        ));
+        assert!(matches!(
+            store.create_folder(&library.id, Some(MISSING_ID), "X"),
+            Err(LibraryStoreError::Invalid(
+                LibraryError::UnknownFolder { .. }
+            ))
+        ));
+        // Cross-library parent.
+        assert!(matches!(
+            store.create_folder(&library.id, Some(&foreign.id), "X"),
+            Err(LibraryStoreError::Invalid(
+                LibraryError::CrossLibraryParent { .. }
+            ))
+        ));
+
+        // Prior snapshot (in memory) and file (on disk) are preserved.
+        assert_eq!(store.list_tree().unwrap(), before_tree);
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+    }
+
+    #[test]
+    fn persist_failure_preserves_prior_snapshot_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file where the data directory should be makes every
+        // commit fail after validation.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let path = blocker.join("connections.json");
+        let store = LibraryStore::open(&path);
+        assert_eq!(
+            store.status(),
+            StoreStatus::Ready,
+            "open on a missing file starts empty and ready"
+        );
+
+        let err = store.create_library("Work").unwrap_err();
+        assert!(
+            matches!(err, LibraryStoreError::PersistFailed { .. }),
+            "got {err:?}"
+        );
+
+        // In-memory snapshot and disk are untouched by the failed mutation.
+        assert!(store.list_tree().unwrap().libraries.is_empty());
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"not a directory");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn write_blocked_store_rejects_every_crud_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        std::fs::write(&path, MALFORMED).unwrap();
+        let store = LibraryStore::open(&path);
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+
+        let results = [
+            store.create_library("X").map(|_| ()),
+            store.rename_library(MISSING_ID, "X").map(|_| ()),
+            store.create_folder(MISSING_ID, None, "X").map(|_| ()),
+            store.rename_folder(MISSING_ID, "X").map(|_| ()),
+        ];
+        for result in results {
+            assert!(matches!(
+                result,
+                Err(LibraryStoreError::WriteBlocked { .. })
+            ));
+        }
+        assert!(matches!(
+            store.list_tree(),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        assert!(matches!(
+            store.descendants(NodeId::library(MISSING_ID)),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+
+        // Reloading still-invalid data keeps the block; the file is
+        // preserved byte-for-byte throughout.
+        assert!(store.reload().is_err());
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+        assert_eq!(std::fs::read(&path).unwrap(), MALFORMED.as_bytes());
+    }
+
+    #[test]
+    fn successful_reload_lifts_the_block_for_crud_and_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        std::fs::write(&path, MALFORMED).unwrap();
+        let store = LibraryStore::open(&path);
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+
+        let library = Library::new("Work");
+        let valid = serde_json::to_string_pretty(&LibraryDocument::new(
+            vec![library.clone()],
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap();
+        std::fs::write(&path, valid).unwrap();
+
+        store.reload().unwrap();
+        assert_eq!(store.status(), StoreStatus::Ready);
+        let tree = store.list_tree().unwrap();
+        assert_eq!(tree.libraries.len(), 1);
+        assert_eq!(tree.libraries[0].id, library.id);
+
+        // Mutations are allowed again once valid data is reloaded.
+        store.create_library("Second").unwrap();
+        assert_eq!(store.list_tree().unwrap().libraries.len(), 2);
+    }
+
+    #[test]
+    fn concurrent_mutations_serialize_without_lost_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(store_at(dir.path(), "connections.json"));
+
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || {
+                    for i in 0..5 {
+                        store.create_library(&format!("lib-{t}-{i}")).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let tree = store.list_tree().unwrap();
+        assert_eq!(tree.libraries.len(), 40, "every transaction lands");
+        let ids: HashSet<&str> = tree.libraries.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids.len(), 40, "fresh UUID v4 per library, no duplicates");
+
+        // The persisted file agrees with the published snapshot.
+        let reopened = store_at(dir.path(), "connections.json");
+        assert_eq!(reopened.list_tree().unwrap(), tree);
     }
 }

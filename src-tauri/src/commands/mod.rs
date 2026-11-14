@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod connection;
+pub mod library;
 pub mod session;
 pub mod settings;
 /// Test-support-only E2E commands (task 5.3): compiled and registered ONLY

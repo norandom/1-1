@@ -16,6 +16,7 @@ use rdp::session::SessionManager;
 use renderer::gpu::GpuRenderer;
 use renderer::shared_frame::SharedFrame;
 use store::connections::ConnectionStore;
+use store::library::LibraryStore;
 use store::settings::SettingsStore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -61,6 +62,16 @@ pub fn run() {
 
             // Initialize stores
             let connection_store = ConnectionStore::new(data_dir.clone());
+            // Task 6.4 (Req 10.1/10.2/10.3/10.5): v2 library store —
+            // libraries, folders, tree queries and write-blocked recovery.
+            // Judgment call: it owns `libraries.json`, NOT
+            // connections.json, because the live connections.json stays
+            // v1-owned by ConnectionStore until the 6.6 integration;
+            // pointing the v2 store at connections.json now would migrate
+            // live user data ahead of that task. Same single-file v2
+            // document shape as design "Logical Data Model" (option A');
+            // 6.6 owns the unification.
+            let library_store = LibraryStore::open(data_dir.join("libraries.json"));
             let settings_store = SettingsStore::new(data_dir);
             let session_manager = SessionManager::new();
             // Task 5.3 (Req 12.7): test-support builds may redirect
@@ -81,6 +92,7 @@ pub fn run() {
 
             // Register managed state
             app.manage(connection_store);
+            app.manage(library_store);
             app.manage(settings_store);
             app.manage(session_manager);
             app.manage(credential_store);
@@ -167,6 +179,15 @@ pub fn run() {
             // Clipboard commands
             commands::clipboard::clipboard_write,
             commands::clipboard::clipboard_read,
+            // Library commands (task 6.4, Req 10.1/10.2/10.3/10.5)
+            commands::library::create_library,
+            commands::library::rename_library,
+            commands::library::create_folder,
+            commands::library::rename_folder,
+            commands::library::list_tree,
+            commands::library::list_descendants,
+            commands::library::get_library_status,
+            commands::library::reload_library_store,
             // Session commands
             commands::session::connect,
             commands::session::disconnect,

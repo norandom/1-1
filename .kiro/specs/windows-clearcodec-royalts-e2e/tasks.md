@@ -166,7 +166,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Fault tests cover backup/commit failure, malformed data, interrupted staging and restart; recovery cannot save an empty replacement.
   - _Boundary: Migration_
   - _Requirements: 6.1,6.2,10.10,10.12_
-- [ ] 6.4 Implement library and folder CRUD/read models
+- [x] 6.4 Implement library and folder CRUD/read models
   - Keep one store owner and serialized transactions; register thin commands and typed wrappers.
   - Done: Create/rename/read operations round-trip with nested descendants; errors preserve prior snapshot.
   - _Boundary: Library commands integration_
@@ -351,6 +351,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,7.3,8.1,8.2,8.3,8.4,8.5,8.6,12.1,12.6,12.8,12.9,13.1,13.2,13.3,13.4_
 
 ## Implementation Notes
+- 6.4 design alignments landed 2026-11-14: design.md now records the typed `descendants` error, the free-fn `migrate_v1` shape, the two recovery read commands, and the transitional `libraries.json` layout. **6.6 obligation**: unify `libraries.json` + v1 `connections.json` — merge v1 connections into the (possibly already user-populated) v2 default library without data loss; promote `LibraryStore::document()/save()` from `#[cfg(test)]` if a whole-document production caller appears.
 - 6.1 model layer notes for the store tasks: `LibraryError` is hand-rolled (Display + std::error::Error) though thiserror sits unused in Cargo.toml — either switch to the derive or record the hand-roll decision when 6.3+ adds error types; `LibraryDocument::descendants` returns a typed `UnknownNode` error where design L346 shows a bare Vec on `LibraryStore` — 6.4 must reconcile (map at the store layer or amend design); `#[allow(dead_code)]` on `pub mod library` must be dropped when the first production caller lands (6.3-6.6).
 - Sub-agent verification claims must paste VERBATIM tool output (5.4 round 1: a name-filtered clippy summary hid `(lib) generated 2 warnings` dead-code lines behind the two pre-existing warning texts, producing a false "exactly 2 warnings both configs" claim). Reviewers: always re-run static checks with full output.
 - Pre-existing baseline: `npm run lint` fails at HEAD (7 errors / 2 warnings in `src/**` — ConnectionCard.tsx, SessionCanvas.tsx, ui/{badge,button,tabs,toggle}.tsx, useClipboard.ts); must be fixed before the lint tier can gate CI (found during 1.1 review; not caused by 1.1).
