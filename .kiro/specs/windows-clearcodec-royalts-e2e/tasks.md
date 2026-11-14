@@ -156,7 +156,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Tests validate unique IDs, ownership, ancestor cycles, deep nesting and descendant queries.
   - _Boundary: Library model_
   - _Requirements: 10.1,10.5,10.8_
-- [ ] 6.2 Prove atomic replacement with the existing tempfile crate
+- [x] 6.2 Prove atomic replacement with the existing tempfile crate
   - 3-hour spike: promote tempfile to runtime use only if NamedTempFile new_in/persist fits replacement and failure behavior on all OSes. Use a narrow writer wrapper; atomic visibility is not a claim of power-loss durability.
   - Done: Tests preserve prior file on failed replacement, use same-directory staging and retain recoverable error state; if unsupported, return to design before a second crate.
   - _Boundary: Atomic writer_

@@ -81,8 +81,12 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 wgpu = "24"
 pollster = "0.4"
 raw-window-handle = "0.6"
+# Task 6.2 (design "CI ownership and reuse decisions"): tempfile promoted
+# from dev-dependency after the spike proved NamedTempFile new_in/persist
+# same-directory staging, atomic replace and failure preservation
+# (src/store/atomic_write.rs). Not a second writer crate.
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 # Tokio "full" does not include test-util; paused-clock tests (task 3.2) need it.
 tokio = { version = "1", features = ["test-util"] }
