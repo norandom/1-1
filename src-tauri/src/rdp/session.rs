@@ -1213,6 +1213,17 @@ fn encode_mouse_fastpath_event(
 }
 
 /// Manages all active sessions using lightweight handles.
+/// Task 7.1 (Req 11.8/11.9): whether a session status still owns a live
+/// actor whose entry Connect must reuse (connecting/connected/reconnecting),
+/// as opposed to a terminal entry (error/disconnected) that Connect
+/// restarts in place with the same session identity.
+fn session_is_live(status: &SessionState) -> bool {
+    matches!(
+        status,
+        SessionState::Connecting | SessionState::Connected | SessionState::Reconnecting
+    )
+}
+
 pub struct SessionManager {
     handles: Arc<Mutex<HashMap<String, SessionHandle>>>,
 }
@@ -1224,6 +1235,10 @@ impl SessionManager {
         }
     }
 
+    /// Map entry count. Task 7.1 moved the session cap into the atomic
+    /// admission path (`create_session_with_transport`), so this is
+    /// introspection used by the lifecycle tests.
+    #[cfg(test)]
     pub async fn session_count(&self) -> usize {
         self.handles.lock().await.len()
     }
@@ -1253,6 +1268,7 @@ impl SessionManager {
     /// `create_session` with the transport seams injected.
     /// Production callers use [`SessionManager::create_session`]; deterministic
     /// lifecycle tests script the connector and record frontend events here.
+    /// Admission is idempotent per connection ID (task 7.1).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_session_with_transport(
         &self,
@@ -1264,15 +1280,56 @@ impl SessionManager {
         shared_frame: Option<Arc<SharedFrame>>,
         connect: ConnectFn,
     ) -> Result<String, String> {
-        let count = self.session_count().await;
-        if count >= MAX_SESSIONS {
-            return Err(format!(
-                "Maximum session limit ({}) reached. Disconnect an existing session first.",
-                MAX_SESSIONS
-            ));
-        }
+        // Task 7.1 (Req 11.8/11.9): admission is decided and applied under a
+        // single lock acquisition, so concurrent Connect commands for the
+        // same connection serialize here: exactly one actor per connection
+        // and a stable returned identity.
+        let mut handles = self.handles.lock().await;
 
-        let session_id = Uuid::new_v4().to_string();
+        let existing = handles
+            .values()
+            .find(|handle| handle.info_rx.borrow().connection_id == config.id)
+            .map(|handle| {
+                let info = handle.info_rx.borrow();
+                (info.id.clone(), info.status.clone())
+            });
+
+        let session_id = match existing {
+            // Req 11.8: a live connecting/connected/reconnecting session
+            // already exists — return its identity instead of starting
+            // another actor (the caller focuses its tab).
+            Some((id, status)) if session_is_live(&status) => {
+                log::info!(
+                    "Connection {} already has live session {}; reusing it",
+                    config.id,
+                    id
+                );
+                return Ok(id);
+            }
+            // Req 11.9: a terminal (error/disconnected) entry keeps its
+            // slot; restart in place with the same session/tab identity.
+            Some((id, status)) => {
+                log::info!(
+                    "Connection {} has terminal session {:?}; restarting as session {}",
+                    config.id,
+                    status,
+                    id
+                );
+                id
+            }
+            // Fresh admission enforces the concurrent-session cap (Req 2.2)
+            // under the same lock as the insert, so racing Connects cannot
+            // both pass the check.
+            None => {
+                if handles.len() >= MAX_SESSIONS {
+                    return Err(format!(
+                        "Maximum session limit ({}) reached. Disconnect an existing session first.",
+                        MAX_SESSIONS
+                    ));
+                }
+                Uuid::new_v4().to_string()
+            }
+        };
         let (width, height) = normalize_remote_resolution(
             config.display_width.unwrap_or(1920),
             config.display_height.unwrap_or(1080),
@@ -1319,7 +1376,8 @@ impl SessionManager {
         // Spawn the actor task
         let task_handle = tokio::spawn(actor.run());
 
-        // Store the handle
+        // Store the handle. A restart replaces the terminal entry under the
+        // same session ID while still holding the admission lock.
         let handle = SessionHandle {
             cmd_tx,
             info_rx,
@@ -1327,7 +1385,7 @@ impl SessionManager {
             task_handle,
         };
 
-        self.handles.lock().await.insert(session_id.clone(), handle);
+        handles.insert(session_id.clone(), handle);
 
         log::info!("Created session {}", session_id);
         Ok(session_id)
@@ -1630,6 +1688,318 @@ mod tests {
                 .any(|(_, v)| status_string(v) == "disconnected")
         })
         .await;
+    }
+
+    // ── Task 7.1 (Req 2.2/11.4/11.8/11.9): idempotent connect admission ──
+
+    /// Classification behind the admission decision: only
+    /// connecting/connected/reconnecting sessions are live; error and
+    /// disconnected entries are terminal and restart in place.
+    #[test]
+    fn test_session_is_live_classification_covers_all_states() {
+        assert!(session_is_live(&SessionState::Connecting));
+        assert!(session_is_live(&SessionState::Connected));
+        assert!(session_is_live(&SessionState::Reconnecting));
+        assert!(!session_is_live(&SessionState::Disconnected));
+        assert!(!session_is_live(&SessionState::Error("boom".to_string())));
+    }
+
+    /// Concurrent Connect requests for one connection must serialize into a
+    /// single actor and share one session identity; the serialization point
+    /// is the SessionManager admission lock (Req 11.8).
+    #[tokio::test(start_paused = true)]
+    async fn test_concurrent_connects_for_one_connection_admit_one_actor_and_shared_session_id() {
+        let manager = Arc::new(SessionManager::new());
+        let (events, mut events_rx) = RecordedEvents::new();
+        let connect_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut admissions = Vec::new();
+        for _ in 0..8 {
+            let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = SessionEventSink::recorded(Arc::clone(&events));
+            let connect = scripted_connect(Arc::clone(&connect_calls));
+            let manager = Arc::clone(&manager);
+            admissions.push(tokio::spawn(async move {
+                manager
+                    .create_session_with_transport(
+                        test_config("dup"),
+                        None,
+                        scripted_frame_channel(FrameScript::Ok, sizes),
+                        sink,
+                        true,
+                        None,
+                        connect,
+                    )
+                    .await
+            }));
+        }
+
+        let mut ids = Vec::new();
+        for admission in admissions {
+            ids.push(
+                admission
+                    .await
+                    .expect("admission task alive")
+                    .expect("concurrent duplicate connects are admitted idempotently"),
+            );
+        }
+
+        for id in &ids[1..] {
+            assert_eq!(
+                id, &ids[0],
+                "every concurrent Connect shares one session id"
+            );
+        }
+        assert_eq!(manager.session_count().await, 1);
+        let listed = manager.list_sessions().await;
+        assert_eq!(listed.len(), 1, "the tree reflects a single session");
+        assert_eq!(listed[0].id, ids[0]);
+        assert_eq!(listed[0].connection_id, "conn-dup");
+
+        // The one admitted actor dialed the connector exactly once and
+        // settled into the live mock loop.
+        let session_id = ids[0].clone();
+        wait_for(&session_id, &events, &mut events_rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+        })
+        .await;
+        assert_eq!(
+            connect_calls.load(Ordering::SeqCst),
+            1,
+            "exactly one actor was spawned for the connection"
+        );
+    }
+
+    /// Req 11.8: Connect while a session is connecting, connected or
+    /// reconnecting returns the existing session ID and starts no second
+    /// actor.
+    #[tokio::test(start_paused = true)]
+    async fn test_connect_while_session_live_returns_existing_session_id_without_new_actor() {
+        let manager = SessionManager::new();
+        let first = create_scripted(&manager, "dup-live", true, FrameScript::Ok).await;
+        let mut rx = first.events_rx.clone();
+        wait_for(&first.id, &first.events, &mut rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+        })
+        .await;
+
+        let second = create_scripted(&manager, "dup-live", true, FrameScript::Ok).await;
+        assert_eq!(
+            second.id, first.id,
+            "Connect while live must return the existing session identity"
+        );
+        assert_eq!(
+            second.connect_calls.load(Ordering::SeqCst),
+            0,
+            "no second actor may dial for a live session"
+        );
+        assert_eq!(manager.session_count().await, 1);
+    }
+
+    /// Req 11.9: Connect after a terminal (error/disconnected) session
+    /// restarts in place — same session ID, a fresh actor, still exactly one
+    /// entry for the connection.
+    #[tokio::test(start_paused = true)]
+    async fn test_connect_after_terminal_session_restarts_in_place_with_stable_session_id() {
+        let manager = SessionManager::new();
+        let session = create_scripted(&manager, "restart", true, FrameScript::Ok).await;
+        let mut rx = session.events_rx.clone();
+        wait_for(&session.id, &session.events, &mut rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+        })
+        .await;
+
+        // Stop the actor WITHOUT removing the entry: a terminal tab stays
+        // open with a stable identity.
+        session
+            .cmd_tx
+            .send(SessionCommand::Disconnect)
+            .await
+            .expect("actor alive");
+        wait_for(&session.id, &session.events, &mut rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+        })
+        .await;
+        assert_eq!(
+            manager.session_count().await,
+            1,
+            "a terminal session keeps its slot until the tab is explicitly closed"
+        );
+
+        let dials_before_restart = session.connect_calls.load(Ordering::SeqCst);
+        let (events, mut events_rx) = RecordedEvents::new();
+        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let restarted_id = manager
+            .create_session_with_transport(
+                test_config("restart"),
+                None,
+                scripted_frame_channel(FrameScript::Ok, sizes),
+                SessionEventSink::recorded(Arc::clone(&events)),
+                true,
+                None,
+                scripted_connect(Arc::clone(&session.connect_calls)),
+            )
+            .await
+            .expect("restarting a terminal session is admitted");
+
+        assert_eq!(
+            restarted_id, session.id,
+            "restart keeps the session/tab identity stable (Req 11.4/11.9)"
+        );
+        // The restarted actor dialed again and brought the entry back to a
+        // live state under the same identity.
+        wait_for(&session.id, &events, &mut events_rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+        })
+        .await;
+        assert_eq!(
+            session.connect_calls.load(Ordering::SeqCst),
+            dials_before_restart + 1,
+            "the restart spawned a fresh actor"
+        );
+        assert_eq!(manager.session_count().await, 1);
+        let listed = manager.list_sessions().await;
+        assert_eq!(listed.len(), 1, "the tree reflects that single session");
+        assert_eq!(listed[0].id, session.id);
+        assert!(
+            matches!(
+                listed[0].status,
+                SessionState::Connecting | SessionState::Connected
+            ),
+            "restarted entry is live again, got {:?}",
+            listed[0].status
+        );
+    }
+
+    /// Design "Destructive actions and identity": an explicit tab close
+    /// removes the entry, so a later Connect gets a NEW session identity.
+    #[tokio::test(start_paused = true)]
+    async fn test_connect_after_explicit_close_admits_new_session_identity() {
+        let manager = SessionManager::new();
+        let closed = create_scripted(&manager, "reclose", true, FrameScript::Ok).await;
+        let mut rx = closed.events_rx.clone();
+        wait_for(&closed.id, &closed.events, &mut rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+        })
+        .await;
+
+        manager
+            .remove_session(&closed.id)
+            .await
+            .expect("explicit close succeeds");
+        assert_eq!(manager.session_count().await, 0);
+
+        let reopened = create_scripted(&manager, "reclose", true, FrameScript::Ok).await;
+        assert_ne!(
+            reopened.id, closed.id,
+            "after an explicit close, Connect gets a new session identity"
+        );
+        assert_eq!(manager.session_count().await, 1);
+    }
+
+    /// Req 2.2 + 11.8/11.9 at the cap boundary: a NEW connection is rejected
+    /// at MAX_SESSIONS, while duplicate-live and terminal-restart Connects
+    /// reuse their own slot instead of being rejected.
+    #[tokio::test(start_paused = true)]
+    async fn test_session_cap_rejects_new_connections_but_reuses_live_and_restarts_terminal_entries_at_limit()
+     {
+        let manager = SessionManager::new();
+        let mut sessions = Vec::new();
+        for i in 1..=10u32 {
+            sessions
+                .push(create_scripted(&manager, &format!("cap{i}"), true, FrameScript::Ok).await);
+        }
+        assert_eq!(manager.session_count().await, 10);
+
+        // A NEW connection is rejected with the explanatory message (Req 2.2).
+        let (events, _events_rx) = RecordedEvents::new();
+        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let err = manager
+            .create_session_with_transport(
+                test_config("cap11"),
+                None,
+                scripted_frame_channel(FrameScript::Ok, sizes),
+                SessionEventSink::recorded(events),
+                true,
+                None,
+                scripted_connect(Arc::new(AtomicUsize::new(0))),
+            )
+            .await
+            .expect_err("an 11th new connection must be rejected");
+        assert_eq!(
+            err,
+            "Maximum session limit (10) reached. Disconnect an existing session first."
+        );
+
+        // Duplicate Connect for a LIVE session is NOT rejected (Req 11.8),
+        // even with all ten slots taken.
+        let live = &sessions[1];
+        let mut live_rx = live.events_rx.clone();
+        wait_for(&live.id, &live.events, &mut live_rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+        })
+        .await;
+        let (events, _events_rx) = RecordedEvents::new();
+        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dup_id = manager
+            .create_session_with_transport(
+                test_config("cap2"),
+                None,
+                scripted_frame_channel(FrameScript::Ok, sizes),
+                SessionEventSink::recorded(events),
+                true,
+                None,
+                scripted_connect(Arc::new(AtomicUsize::new(0))),
+            )
+            .await
+            .expect("duplicate Connect for a live session reuses it, even at the cap");
+        assert_eq!(dup_id, live.id);
+        assert_eq!(manager.session_count().await, 10);
+
+        // Restart of a TERMINAL entry at the cap reuses its own slot.
+        let terminal = &sessions[0];
+        let mut terminal_rx = terminal.events_rx.clone();
+        wait_for(&terminal.id, &terminal.events, &mut terminal_rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+        })
+        .await;
+        terminal
+            .cmd_tx
+            .send(SessionCommand::Disconnect)
+            .await
+            .expect("actor alive");
+        wait_for(&terminal.id, &terminal.events, &mut terminal_rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+        })
+        .await;
+
+        let dials_before_restart = terminal.connect_calls.load(Ordering::SeqCst);
+        let (events, mut events_rx) = RecordedEvents::new();
+        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let restarted_id = manager
+            .create_session_with_transport(
+                test_config("cap1"),
+                None,
+                scripted_frame_channel(FrameScript::Ok, sizes),
+                SessionEventSink::recorded(Arc::clone(&events)),
+                true,
+                None,
+                scripted_connect(Arc::clone(&terminal.connect_calls)),
+            )
+            .await
+            .expect("terminal restart reuses its own slot, even at the cap");
+        assert_eq!(restarted_id, terminal.id);
+        // The restarted actor dialed again under the same identity.
+        wait_for(&terminal.id, &events, &mut events_rx, |evs| {
+            evs.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+        })
+        .await;
+        assert_eq!(
+            terminal.connect_calls.load(Ordering::SeqCst),
+            dials_before_restart + 1,
+            "the restart spawned a fresh actor"
+        );
+        assert_eq!(manager.session_count().await, 10);
     }
 
     #[tokio::test(start_paused = true)]

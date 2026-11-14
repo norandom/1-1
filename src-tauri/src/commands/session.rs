@@ -5,7 +5,7 @@ use tauri::{
 };
 
 use crate::rdp::client::SessionCommand;
-use crate::rdp::session::{MAX_SESSIONS, SessionInfo, SessionManager, admit_mock_session};
+use crate::rdp::session::{SessionInfo, SessionManager, admit_mock_session};
 use crate::renderer::shared_frame::SharedFrame;
 use crate::store::credentials::CredentialStore;
 use crate::store::library::LibraryStore;
@@ -27,14 +27,10 @@ pub async fn connect(
     settings_store: State<'_, SettingsStore>,
     shared_frame: State<'_, Arc<SharedFrame>>,
 ) -> Result<String, String> {
-    // Check max session limit
-    let count = session_mgr.session_count().await;
-    if count >= MAX_SESSIONS {
-        return Err(format!(
-            "Maximum session limit ({}) reached. Disconnect an existing session first.",
-            MAX_SESSIONS
-        ));
-    }
+    // Task 7.1 (Req 2.2/11.8/11.9): the session cap and per-connection
+    // idempotent admission are enforced atomically inside SessionManager
+    // when the actor is spawned, so a duplicate Connect for a live session
+    // reaches that reuse path instead of being rejected at this boundary.
 
     // Look up the connection config
     let config = conn_store

@@ -183,7 +183,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 1.1,1.2,1.3,1.4,1.5,6.2,10.7,10.19,12.10_
 
 - [ ] 7. Session identity and destructive operations
-- [ ] 7.1 Make connect admission idempotent by connection
+- [x] 7.1 Make connect admission idempotent by connection
   - Reuse SessionManager map and Tokio command serialization; return the existing live session ID or restart a terminal entry with stable ID; UI focus is owned by the later tab integration task.
   - Done: Concurrent Connect requests yield one actor and returned session ID; explicit close then Connect gets a new identity.
   - _Boundary: Session identity_
