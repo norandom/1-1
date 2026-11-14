@@ -760,6 +760,9 @@ fn migrate_v1_bytes(
 /// preserve the ORIGINAL v1 bytes without clobber — an existing backup is
 /// kept when valid, and an unusable existing backup fails the whole flow
 /// closed. Data is never destroyed to make migration proceed.
+#[cfg(test)]
+static FAIL_NEXT_BACKUP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn backup_v1_original(path: &Path, original: &[u8]) -> Result<PathBuf, MigrationError> {
     let backup_path = backup_path_for(path);
     if backup_path.exists() {
@@ -770,6 +773,12 @@ fn backup_v1_original(path: &Path, original: &[u8]) -> Result<PathBuf, Migration
         validate_backup_bytes(&existing)
             .map_err(|cause| MigrationError::BackupExistsInvalid { cause })?;
     } else {
+        #[cfg(test)]
+        if FAIL_NEXT_BACKUP.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(MigrationError::BackupCreateFailed {
+                cause: "injected for tests (root-proof, OS-independent)".into(),
+            });
+        }
         write_atomic(&backup_path, original).map_err(|e| MigrationError::BackupCreateFailed {
             cause: e.to_string(),
         })?;
@@ -1088,6 +1097,12 @@ struct StoreInner {
     /// `None` for single-file stores ([`LibraryStore::open`]).
     transitional_path: Option<PathBuf>,
     state: StoreState,
+    /// Test-only commit-failure injection (root-proof, OS-independent —
+    /// CI run 43587595668 lesson: permission-based injections cannot fail
+    /// inside the root-run Linux container). Checked in `commit_publish`
+    /// between serialization and the persist stage; fires once.
+    #[cfg(test)]
+    fail_next_commit: bool,
 }
 
 /// Owner of the unified v2 connection library document (task 6.6): the
@@ -1128,6 +1143,18 @@ impl LibraryStore {
     /// writes on failure.
     pub fn open_unified(path: impl Into<PathBuf>, transitional_path: impl Into<PathBuf>) -> Self {
         Self::open_with(path, Some(transitional_path.into()))
+    }
+
+    /// Test-only: make the NEXT `commit_publish` fail deterministically
+    /// after validation, on every OS — including the root-run CI Linux
+    /// container where permission-based injections are ineffective
+    /// (CI run 43587595668).
+    #[cfg(test)]
+    pub fn fail_next_commit(&self) {
+        self.inner
+            .lock()
+            .expect("library store lock poisoned")
+            .fail_next_commit = true;
     }
 
     fn open_with(path: impl Into<PathBuf>, transitional_path: Option<PathBuf>) -> Self {
@@ -1175,6 +1202,8 @@ impl LibraryStore {
                 path,
                 transitional_path,
                 state,
+                #[cfg(test)]
+                fail_next_commit: false,
             }),
         }
     }
@@ -1658,6 +1687,13 @@ impl LibraryStore {
             std::fs::create_dir_all(parent).map_err(|e| MigrationError::CommitFailed {
                 cause: format!("cannot create data directory: {e}"),
             })?;
+        }
+        #[cfg(test)]
+        if inner.fail_next_commit {
+            inner.fail_next_commit = false;
+            return Err(MigrationError::CommitFailed {
+                cause: "injected for tests (root-proof, OS-independent)".into(),
+            });
         }
         write_atomic(&inner.path, json.as_bytes()).map_err(|e| MigrationError::CommitFailed {
             cause: e.to_string(),
@@ -2798,23 +2834,19 @@ mod migration_tests {
         );
     }
 
-    /// Unix-only injection: a read-only data directory (chmod, no admin
-    /// rights) fails backup creation; migration must block BEFORE any v2
-    /// commit. Windows lacks an equivalent admin-free create-failure, so
-    /// backup faults there are covered by the invalid/unreadable-backup
-    /// tests above.
-    #[cfg(unix)]
+    /// OS-independent backup-creation failure injection (CI run
+    /// 43587595668 lesson): the CI Linux container runs as root, so the
+    /// previous chmod read-only-directory injection could NOT fail backup
+    /// creation there; the FAIL_NEXT_BACKUP seam fails it deterministically
+    /// on every OS. Migration must block BEFORE any v2 commit.
     #[test]
     fn backup_creation_failure_blocks_migration_before_commit() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("connections.json");
         write_file(&path, V1_GOLDEN);
 
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        FAIL_NEXT_BACKUP.store(true, std::sync::atomic::Ordering::SeqCst);
         let result = load_or_migrate(&path);
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
 
         let err = result.unwrap_err();
         assert!(
@@ -3234,18 +3266,21 @@ mod crud_tests {
     #[test]
     fn persist_failure_preserves_prior_snapshot_and_file() {
         let dir = tempfile::tempdir().unwrap();
-        // A regular file where the data directory should be makes every
-        // commit fail after validation.
-        let blocker = dir.path().join("blocker");
-        std::fs::write(&blocker, b"not a directory").unwrap();
-        let path = blocker.join("connections.json");
-        let store = LibraryStore::open(&path);
-        assert_eq!(
-            store.status(),
-            StoreStatus::Ready,
-            "open on a missing file starts empty and ready"
-        );
+        let path = dir.path().join("connections.json");
 
+        // Phase 1: a successful mutation establishes the prior snapshot
+        // in memory and on disk (also proves a missing file opens Ready
+        // and commits through the normal path).
+        let store = LibraryStore::open(&path);
+        store.create_library("First").unwrap();
+        let before_tree = store.list_tree().unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+
+        // Phase 2: the NEXT commit fails deterministically after
+        // validation. The seam is OS-independent and root-proof: the CI
+        // Linux container runs as root, so the previous ENOTDIR /
+        // permission injections did not fail there (CI run 43587595668).
+        store.fail_next_commit();
         let err = store.create_library("Work").unwrap_err();
         assert!(
             matches!(err, LibraryStoreError::PersistFailed { .. }),
@@ -3253,9 +3288,8 @@ mod crud_tests {
         );
 
         // In-memory snapshot and disk are untouched by the failed mutation.
-        assert!(store.list_tree().unwrap().libraries.is_empty());
-        assert_eq!(std::fs::read(&blocker).unwrap(), b"not a directory");
-        assert!(!path.exists());
+        assert_eq!(store.list_tree().unwrap(), before_tree);
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
     }
 
     #[test]
@@ -3423,58 +3457,6 @@ mod move_tests {
             .into_iter()
             .find(|connection| connection.id == id)
             .unwrap_or_else(|| panic!("connection {id} missing from snapshot"))
-    }
-
-    /// Windows half of the injection below: the read-only attribute makes
-    /// the replacement step itself fail with ERROR_ACCESS_DENIED (same
-    /// trick as the atomic_write tests).
-    #[cfg(windows)]
-    fn set_readonly(path: &std::path::Path, on: bool) {
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_readonly(on);
-        std::fs::set_permissions(path, perms).unwrap();
-    }
-
-    /// Deterministic, admin-free commit-failure injection that keeps the
-    /// original file bytes intact: Windows refuses to REPLACE a read-only
-    /// file (ERROR_ACCESS_DENIED); Unix refuses to STAGE inside a
-    /// directory without write permission. Both fail the atomic persist
-    /// after validation, exercising the store's rollback path without
-    /// admin rights or OS-global changes.
-    fn block_persist(path: &std::path::Path) {
-        #[cfg(windows)]
-        {
-            set_readonly(path, true);
-        }
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::metadata(path.parent().unwrap())
-                .unwrap()
-                .permissions();
-            std::fs::set_permissions(
-                path.parent().unwrap(),
-                std::fs::Permissions::from_mode(perms.mode() & 0o500),
-            )
-            .unwrap();
-        }
-    }
-
-    /// Restore what [`block_persist`] changed, so tempdir cleanup works.
-    fn unblock_persist(path: &std::path::Path) {
-        #[cfg(windows)]
-        {
-            set_readonly(path, false);
-        }
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                path.parent().unwrap(),
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .unwrap();
-        }
     }
 
     #[test]
@@ -3839,15 +3821,16 @@ mod move_tests {
         let before_tree = store.list_tree().unwrap();
         let before_bytes = std::fs::read(&path).unwrap();
 
-        // Force the atomic persist to fail after validation.
-        block_persist(&path);
+        // Force the atomic persist to fail after validation. The seam is
+        // OS-independent and root-proof (CI run 43587595668): permission
+        // based injections cannot fail inside the root-run CI container.
+        store.fail_next_commit();
         let err = store
             .move_node(
                 NodeId::folder(subtree.id.clone()),
                 NodeId::folder(target.id.clone()),
             )
             .unwrap_err();
-        unblock_persist(&path);
 
         assert!(
             matches!(err, LibraryStoreError::PersistFailed { .. }),
