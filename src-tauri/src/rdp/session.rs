@@ -581,11 +581,25 @@ impl SessionActor {
 
         let outcome = self.connect_outcome().await;
 
-        match outcome {
+        // Both real-session variants share one actor path; only the framed
+        // transport differs (production TLS vs the in-memory test seam).
+        let real_session = match outcome {
             ConnectionOutcome::RealSession {
                 connection_result,
                 framed,
-            } => {
+            } => Some((*connection_result, SessionTransport::Tls(framed))),
+            ConnectionOutcome::RealSessionLocal {
+                connection_result,
+                framed,
+            } => Some((*connection_result, SessionTransport::Local(framed))),
+            ConnectionOutcome::Failed(reason) => {
+                log::info!("Session {} using mock frames (reason: {})", self.id, reason);
+                None
+            }
+        };
+
+        match real_session {
+            Some((connection_result, transport)) => {
                 log::info!("Session {} entered real RDP session", self.id);
                 self.state = SessionState::Connected;
                 self.connected_at = Some(Utc::now());
@@ -597,15 +611,14 @@ impl SessionActor {
 
                 // Run the real RDP session loop
                 let disconnect_reason = self
-                    .run_real_session_loop(*connection_result, *framed)
+                    .run_real_session_loop(connection_result, transport)
                     .await;
 
                 if disconnect_reason == DisconnectReason::ConnectionLost && self.auto_reconnect {
                     self.run_reconnect_loop().await;
                 }
             }
-            ConnectionOutcome::Failed(reason) => {
-                log::info!("Session {} using mock frames (reason: {})", self.id, reason);
+            None => {
                 self.state = SessionState::Connected;
                 self.connected_at = Some(Utc::now());
                 self.publish_info();
@@ -632,21 +645,56 @@ impl SessionActor {
     async fn run_real_session_loop(
         &mut self,
         connection_result: ironrdp_connector::ConnectionResult,
-        framed: crate::rdp::client::TlsFramed,
+        transport: SessionTransport,
     ) -> DisconnectReason {
+        // 0.13 session API: the stage is built through the connector adapter
+        // (ActiveStage::new(ConnectionResult) no longer exists upstream).
+        // The activation factory is cloned out first: task 7.4 keeps it for
+        // the in-place Deactivation-Reactivation Sequence (its Config and MCS
+        // channel ids are invariant for the whole connection lifetime).
+        let activation_factory = connection_result.activation_factory.clone();
+        let active_stage =
+            crate::rdp::client::active_stage_from_connection_result(connection_result);
+
+        // Both transports split identically: upstream's `split_tokio_framed`
+        // only needs `AsyncRead + AsyncWrite + Unpin + Sync`, which the TLS
+        // stream and the in-memory duplex both satisfy.
+        match transport {
+            SessionTransport::Tls(framed) => {
+                let (reader, writer) = ironrdp_tokio::split_tokio_framed(*framed);
+                self.run_framed_session_loop(activation_factory, active_stage, reader, writer)
+                    .await
+            }
+            SessionTransport::Local(framed) => {
+                let (reader, writer) = ironrdp_tokio::split_tokio_framed(*framed);
+                self.run_framed_session_loop(activation_factory, active_stage, reader, writer)
+                    .await
+            }
+        }
+    }
+
+    /// Transport-generic real session loop.
+    ///
+    /// Split into its own function (task 7.4) so the production TLS framing
+    /// and the in-memory characterization seam run byte-for-byte the same
+    /// session logic, including in-place reactivation on DeactivateAll.
+    async fn run_framed_session_loop<SR, SW>(
+        &mut self,
+        activation_factory: ironrdp_connector::connection_activation::ConnectionActivationFactory,
+        mut active_stage: ironrdp_session::ActiveStage,
+        mut reader: ironrdp_tokio::Framed<SR>,
+        mut writer: ironrdp_tokio::Framed<SW>,
+    ) -> DisconnectReason
+    where
+        SR: ironrdp_tokio::FramedRead,
+        SW: ironrdp_tokio::FramedWrite,
+    {
         use ironrdp_graphics::image_processing::PixelFormat;
         use ironrdp_session::ActiveStageOutput;
         use ironrdp_session::image::DecodedImage;
         use ironrdp_tokio::FramedWrite;
-        // 0.13 session API: the stage is built through the connector adapter
-        // (ActiveStage::new(ConnectionResult) no longer exists upstream).
-        let mut active_stage =
-            crate::rdp::client::active_stage_from_connection_result(connection_result);
         let mut image =
             DecodedImage::new(PixelFormat::RgbA32, self.width as u16, self.height as u16);
-
-        // Split the framed stream for concurrent read/write
-        let (mut reader, mut writer) = ironrdp_tokio::split_tokio_framed(framed);
 
         if let Some(text) = self.local_clipboard_text.clone()
             && self
@@ -657,7 +705,7 @@ impl SessionActor {
             return DisconnectReason::ConnectionLost;
         }
 
-        loop {
+        'session: loop {
             tokio::select! {
                 // Read PDUs from the server
                 pdu_result = reader.read_pdu() => {
@@ -686,6 +734,7 @@ impl SessionActor {
                     };
 
                     let mut updated_regions = Vec::new();
+                    let mut deactivate_all = false;
                     for out in outputs {
                         match out {
                             ActiveStageOutput::ResponseFrame(frame) => {
@@ -710,25 +759,52 @@ impl SessionActor {
                                 return DisconnectReason::UserDisconnect;
                             }
                             ActiveStageOutput::DeactivateAll => {
-                                log::info!("Session {} deactivate-all received", self.id);
-                                // Task 4.3 evaluation (behavior kept): the 0.12/0.13
-                                // stack CAN re-activate in place — ConnectionResult
-                                // carries `activation_factory` (fresh
-                                // ConnectionActivationSequence) and ActiveStage
-                                // exposes `reactivate()` — but driving that is new
-                                // mid-loop control flow beyond the accessor/builder
-                                // boundary, and it would change the pinned observable
-                                // behavior: DeactivateAll → ConnectionLost → the
-                                // existing reconnect loop with backoff (identical to
-                                // the old stack; a full reconnect re-runs activation).
-                                // Deferred deliberately — see baseline-coverage.md
-                                // task 4.3.
-                                return DisconnectReason::ConnectionLost;
+                                log::info!(
+                                    "Session {} deactivate-all received; reactivating in place",
+                                    self.id
+                                );
+                                // Task 7.4 (user decision 2026-11-14): adopt
+                                // the proven upstream mechanism instead of
+                                // the task 4.3 recorded behavior
+                                // (DeactivateAll → ConnectionLost → the
+                                // backoff reconnect loop; see
+                                // baseline-coverage.md task 4.3). The
+                                // sequence is driven below, over the SAME
+                                // transport and stage, so session identity
+                                // never changes. Unexpected transport drops
+                                // (Req 2.3) and cancel during reconnect
+                                // (Req 2.4) keep their existing semantics —
+                                // a reactivation that cannot complete still
+                                // unwinds as ConnectionLost.
+                                deactivate_all = true;
+                                break;
                             }
                             _ => {
                                 // PointerDefault, PointerHidden, PointerPosition, PointerBitmap
                                 // Ignored for now
                             }
+                        }
+                    }
+
+                    if deactivate_all {
+                        match self
+                            .drive_reactivation(
+                                &activation_factory,
+                                &mut active_stage,
+                                &mut image,
+                                &mut reader,
+                                &mut writer,
+                            )
+                            .await
+                        {
+                            ReactivationOutcome::Reactivated => {
+                                // Skip the pending region packet and the
+                                // clipboard flush: pre-deactivation image
+                                // content is stale until the reactivated
+                                // share redraws.
+                                continue 'session;
+                            }
+                            ReactivationOutcome::Stop(reason) => return reason,
                         }
                     }
 
@@ -918,6 +994,177 @@ impl SessionActor {
         }
     }
 
+    /// Drive the upstream Deactivation-Reactivation Sequence in place
+    /// (task 7.4; MS-RDPBCGR §1.3.1.3).
+    ///
+    /// A fresh `ConnectionActivationSequence` is produced from the
+    /// connection's `ConnectionActivationFactory` (its Config and MCS
+    /// channel ids are invariant for the connection's whole lifetime) and
+    /// driven over the SAME transport — the pattern upstream's own sequence
+    /// drivers use (`step` when the sequence wants a server PDU,
+    /// `step_no_input` when it has unsolicited client PDUs to send). On
+    /// Finalized the still-existing `ActiveStage` is rearmed via
+    /// `ActiveStage::reactivate` (new share id, pointer settings and
+    /// negotiated chunk size), so the session keeps its identity: no
+    /// ConnectionLost, no reconnecting/backoff cycle.
+    ///
+    /// Failures (transport drop, protocol error, server redirection, user
+    /// disconnect) surface as [`ReactivationOutcome::Stop`]; the caller maps
+    /// `ConnectionLost` into the existing reconnect loop, preserving Req
+    /// 2.3/2.4 semantics for genuinely broken transports.
+    async fn drive_reactivation<SR, SW>(
+        &mut self,
+        factory: &ironrdp_connector::connection_activation::ConnectionActivationFactory,
+        active_stage: &mut ironrdp_session::ActiveStage,
+        image: &mut ironrdp_session::image::DecodedImage,
+        reader: &mut ironrdp_tokio::Framed<SR>,
+        writer: &mut ironrdp_tokio::Framed<SW>,
+    ) -> ReactivationOutcome
+    where
+        SR: ironrdp_tokio::FramedRead,
+        SW: ironrdp_tokio::FramedWrite,
+    {
+        use ironrdp_connector::Sequence as _;
+        use ironrdp_connector::connection_activation::ConnectionActivationState;
+        use ironrdp_graphics::image_processing::PixelFormat;
+        use ironrdp_session::image::DecodedImage;
+        use ironrdp_tokio::FramedWrite as _;
+
+        let mut sequence = factory.create();
+        let mut buf = ironrdp_core::WriteBuf::new();
+        log::info!(
+            "Session {} driving deactivation-reactivation sequence",
+            self.id
+        );
+
+        loop {
+            buf.clear();
+
+            // `received_at: None` preserves the pre-0.13 behavior used by
+            // the surrounding session loop (timestamps only feed upstream's
+            // bandwidth auto-detect).
+            let written = if sequence.next_pdu_hint().is_some() {
+                // Wait for the next server PDU while staying responsive to
+                // commands (cancel mirrors Req 2.4's intent).
+                let (_action, payload) = tokio::select! {
+                    pdu = reader.read_pdu() => match pdu {
+                        Ok(pdu) => pdu,
+                        Err(e) => {
+                            log::warn!("Session {} reactivation read error: {}", self.id, e);
+                            return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
+                        }
+                    },
+                    cmd = self.cmd_rx.recv() => {
+                        match cmd {
+                            Some(SessionCommand::Disconnect) | None => {
+                                log::info!(
+                                    "Session {} disconnect requested during reactivation",
+                                    self.id
+                                );
+                                self.state = SessionState::Disconnected;
+                                self.publish_info();
+                                return ReactivationOutcome::Stop(
+                                    DisconnectReason::UserDisconnect,
+                                );
+                            }
+                            // Input against a deactivated share cannot be
+                            // encoded; the window is a handful of PDUs.
+                            Some(other) => {
+                                log::debug!(
+                                    "Session {} dropping command during reactivation: {:?}",
+                                    self.id,
+                                    other
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                };
+
+                match sequence.step(&payload, None, &mut buf) {
+                    Ok(written) => written,
+                    Err(e) => {
+                        log::warn!("Session {} reactivation sequence error: {}", self.id, e);
+                        self.last_error = Some(format!("Reactivation failed: {}", e));
+                        return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
+                    }
+                }
+            } else {
+                match sequence.step_no_input(&mut buf) {
+                    Ok(written) => written,
+                    Err(e) => {
+                        log::warn!("Session {} reactivation sequence error: {}", self.id, e);
+                        self.last_error = Some(format!("Reactivation failed: {}", e));
+                        return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
+                    }
+                }
+            };
+
+            if let Some(len) = written.size()
+                && let Err(e) = writer.write_all(&buf.filled()[..len]).await
+            {
+                log::warn!("Session {} reactivation write error: {}", self.id, e);
+                return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
+            }
+
+            match sequence.connection_activation_state() {
+                ConnectionActivationState::Finalized {
+                    desktop_size,
+                    share_id,
+                    static_channel_chunk_size,
+                    enable_server_pointer,
+                    pointer_software_rendering,
+                    ..
+                } => {
+                    let rearmed = active_stage.reactivate(
+                        factory.io_channel_id(),
+                        factory.user_channel_id(),
+                        share_id,
+                        enable_server_pointer,
+                        pointer_software_rendering,
+                        static_channel_chunk_size,
+                    );
+
+                    if !rearmed {
+                        log::warn!(
+                            "Session {} refused invalid negotiated chunk size during reactivation",
+                            self.id
+                        );
+                        return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
+                    }
+
+                    let new_width = u32::from(desktop_size.width);
+                    let new_height = u32::from(desktop_size.height);
+                    if new_width != self.width || new_height != self.height {
+                        self.width = new_width;
+                        self.height = new_height;
+                        *image = DecodedImage::new(
+                            PixelFormat::RgbA32,
+                            desktop_size.width,
+                            desktop_size.height,
+                        );
+                        self.publish_info();
+                    }
+
+                    log::info!(
+                        "Session {} reactivated in place (share id {})",
+                        self.id,
+                        share_id
+                    );
+                    return ReactivationOutcome::Reactivated;
+                }
+                // A mid-session redirect cannot be honored without tearing
+                // this transport down; same policy as the connect path
+                // (redirect → error), so fall back to the reconnect loop.
+                ConnectionActivationState::Redirected { .. } => {
+                    log::warn!("Session {} server redirection during reactivation", self.id);
+                    return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Auto-reconnect loop with exponential backoff.
     async fn run_reconnect_loop(&mut self) {
         let mut attempt = 0u32;
@@ -953,11 +1200,20 @@ impl SessionActor {
             // mock loop without dialing — see connect_outcome).
             let outcome = self.connect_outcome().await;
 
-            match outcome {
+            let real_session = match outcome {
                 ConnectionOutcome::RealSession {
                     connection_result,
                     framed,
-                } => {
+                } => Some((*connection_result, SessionTransport::Tls(framed))),
+                ConnectionOutcome::RealSessionLocal {
+                    connection_result,
+                    framed,
+                } => Some((*connection_result, SessionTransport::Local(framed))),
+                ConnectionOutcome::Failed(_reason) => None,
+            };
+
+            match real_session {
+                Some((connection_result, transport)) => {
                     self.state = SessionState::Connected;
                     self.reconnect_attempts = 0;
                     self.last_error = None;
@@ -971,14 +1227,14 @@ impl SessionActor {
                     );
 
                     let reason = self
-                        .run_real_session_loop(*connection_result, *framed)
+                        .run_real_session_loop(connection_result, transport)
                         .await;
                     match reason {
                         DisconnectReason::UserDisconnect => return,
                         DisconnectReason::ConnectionLost => continue,
                     }
                 }
-                ConnectionOutcome::Failed(_reason) => {
+                None => {
                     // Fall back to mock on reconnect too
                     self.state = SessionState::Connected;
                     self.reconnect_attempts = 0;
@@ -1115,6 +1371,29 @@ impl SessionActor {
 enum DisconnectReason {
     UserDisconnect,
     ConnectionLost,
+}
+
+/// The framed transport a real session runs over.
+///
+/// Production sessions ride the TLS stream from [`attempt_rdp_connection`];
+/// the `Local` arm is the task 7.4 characterization seam (an in-memory tokio
+/// duplex wrapped in the same upstream `Framed` API) so deterministic tests
+/// can drive the real session loop — including the Deactivation-Reactivation
+/// Sequence — without network I/O.
+enum SessionTransport {
+    Tls(Box<crate::rdp::client::TlsFramed>),
+    Local(Box<ironrdp_tokio::TokioFramed<tokio::io::DuplexStream>>),
+}
+
+/// Outcome of driving the upstream Deactivation-Reactivation Sequence.
+enum ReactivationOutcome {
+    /// The server completed the sequence; the existing stage is re-armed and
+    /// the session loop continues in place (same actor, same session id).
+    Reactivated,
+    /// The sequence cannot complete on this transport (transport drop,
+    /// protocol failure, server redirection, user disconnect). The actor
+    /// must unwind with the carried reason.
+    Stop(DisconnectReason),
 }
 
 fn normalize_remote_resolution(width: u32, height: u32) -> (u32, u32) {
@@ -3671,6 +3950,387 @@ mod tests {
                 events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
             })
             .await;
+        }
+    }
+
+    /// Task 7.4 — server DeactivateAll reactivates the session IN PLACE.
+    ///
+    /// These tests drive the REAL session loop over the in-memory framed
+    /// seam (`ConnectionOutcome::RealSessionLocal`) with a scripted server
+    /// side. They replace the task 4.3 recorded behavior (DeactivateAll →
+    /// ConnectionLost → backoff reconnect; rationale preserved in
+    /// baseline-coverage.md task 4.3) with the upstream
+    /// Deactivation-Reactivation Sequence
+    /// (`ConnectionActivationFactory` + `ActiveStage::reactivate`).
+    mod real_session_reactivation {
+        use super::*;
+        use crate::rdp::client::ConnectionOutcome;
+        use ironrdp_pdu::rdp::headers::ShareControlPdu;
+
+        // Channel ids mirroring `baseline::synthetic_connection_result`.
+        const IO_CHANNEL_ID: u16 = 1003;
+        const USER_CHANNEL_ID: u16 = 1004;
+        // The share id the scripted server picks for the reactivation.
+        const REACTIVATION_SHARE_ID: u32 = 0x0011_2233;
+        // Desktop the scripted server negotiates for the reactivation. It
+        // differs from the fixture's 64x64 so applying the sequence's
+        // Finalized state is observable in published session info.
+        const REACTIVATION_WIDTH: u16 = 96;
+        const REACTIVATION_HEIGHT: u16 = 80;
+
+        /// Encode a ShareControlPdu as a server→client MCS SendDataIndication
+        /// — the full wire frame, byte-identical in shape to what `read_pdu`
+        /// delivers from a real transport. Upstream ships an encoder for the
+        /// client→server SendDataRequest only
+        /// (`mcs::encode_send_data_request`); the server direction is built
+        /// from the same pieces the decoder consumes.
+        fn server_share_control_frame(pdu: ShareControlPdu, share_id: u32) -> Vec<u8> {
+            use ironrdp_pdu::mcs::{McsMessage, SendDataIndication};
+            use ironrdp_pdu::rdp::capability_sets::SERVER_CHANNEL_ID;
+            use ironrdp_pdu::rdp::headers::ShareControlHeader;
+            use ironrdp_pdu::x224::X224;
+
+            let user_data = ironrdp_pdu::encode_vec(&ShareControlHeader {
+                share_control_pdu: pdu,
+                pdu_source: SERVER_CHANNEL_ID,
+                share_id,
+            })
+            .expect("scripted share control encodes");
+
+            ironrdp_pdu::encode_vec(&X224(McsMessage::SendDataIndication(SendDataIndication {
+                initiator_id: SERVER_CHANNEL_ID,
+                channel_id: IO_CHANNEL_ID,
+                user_data: std::borrow::Cow::Owned(user_data),
+            })))
+            .expect("scripted x224 frame encodes")
+        }
+
+        fn deactivate_all_frame() -> Vec<u8> {
+            server_share_control_frame(
+                ShareControlPdu::ServerDeactivateAll(
+                    ironrdp_pdu::rdp::headers::ServerDeactivateAll,
+                ),
+                REACTIVATION_SHARE_ID,
+            )
+        }
+
+        fn demand_active_frame() -> Vec<u8> {
+            use ironrdp_pdu::rdp::capability_sets::{
+                Bitmap, BitmapDrawingFlags, CapabilitySet, DemandActive, General, PROTOCOL_VER,
+                ServerDemandActive,
+            };
+
+            server_share_control_frame(
+                ShareControlPdu::ServerDemandActive(ServerDemandActive {
+                    pdu: DemandActive {
+                        source_descriptor: "scripted-server".to_owned(),
+                        capability_sets: vec![
+                            CapabilitySet::General(General {
+                                protocol_version: PROTOCOL_VER,
+                                ..Default::default()
+                            }),
+                            CapabilitySet::Bitmap(Bitmap {
+                                pref_bits_per_pix: 32,
+                                desktop_width: REACTIVATION_WIDTH,
+                                desktop_height: REACTIVATION_HEIGHT,
+                                desktop_resize_flag: true,
+                                drawing_flags: BitmapDrawingFlags::ALLOW_SKIP_ALPHA,
+                            }),
+                        ],
+                    },
+                }),
+                REACTIVATION_SHARE_ID,
+            )
+        }
+
+        fn finalization_frame(pdu: ironrdp_pdu::rdp::headers::ShareDataPdu) -> Vec<u8> {
+            use ironrdp_pdu::rdp::client_info::CompressionType;
+            use ironrdp_pdu::rdp::headers::{CompressionFlags, ShareDataHeader, StreamPriority};
+
+            server_share_control_frame(
+                ShareControlPdu::Data(ShareDataHeader {
+                    share_data_pdu: pdu,
+                    stream_priority: StreamPriority::Medium,
+                    compression_flags: CompressionFlags::empty(),
+                    compression_type: CompressionType::K8,
+                }),
+                REACTIVATION_SHARE_ID,
+            )
+        }
+
+        /// All server frames of a complete Deactivation-Reactivation Sequence.
+        fn reactivation_script_frames() -> Vec<Vec<u8>> {
+            use ironrdp_pdu::rdp::capability_sets::SERVER_CHANNEL_ID;
+            use ironrdp_pdu::rdp::finalization_messages::{
+                ControlAction, ControlPdu, FontPdu, SynchronizePdu,
+            };
+            use ironrdp_pdu::rdp::headers::ShareDataPdu;
+
+            let server_finalization = [
+                ShareDataPdu::Synchronize(SynchronizePdu {
+                    target_user_id: USER_CHANNEL_ID,
+                }),
+                ShareDataPdu::Control(ControlPdu {
+                    action: ControlAction::Cooperate,
+                    grant_id: 0,
+                    control_id: 0,
+                }),
+                ShareDataPdu::Control(ControlPdu {
+                    action: ControlAction::GrantedControl,
+                    grant_id: USER_CHANNEL_ID,
+                    control_id: u32::from(SERVER_CHANNEL_ID),
+                }),
+                ShareDataPdu::FontMap(FontPdu::default()),
+            ];
+
+            let mut frames = vec![deactivate_all_frame(), demand_active_frame()];
+            frames.extend(server_finalization.into_iter().map(finalization_frame));
+            frames
+        }
+
+        /// Create a real-session actor over the in-memory framed seam.
+        ///
+        /// The scripted server writes `server_frames` in order; `hold_open`
+        /// keeps the transport alive afterwards (a live reactivated session)
+        /// or drops it (transport EOF).
+        async fn create_scripted_real_session(
+            manager: &SessionManager,
+            tag: &str,
+            auto_reconnect: bool,
+            server_frames: Vec<Vec<u8>>,
+            hold_open: bool,
+        ) -> TestSession {
+            let (events, events_rx) = RecordedEvents::new();
+            let frame_sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let connect_calls = Arc::new(AtomicUsize::new(0));
+            let (client_end, mut server_end) = tokio::io::duplex(64 * 1024);
+
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                // Whole pre-encoded frames — the server side needs no framing.
+                for frame in server_frames {
+                    server_end
+                        .write_all(&frame)
+                        .await
+                        .expect("scripted server write");
+                }
+                if hold_open {
+                    // Keep the server half alive: a live (possibly
+                    // reactivated) session, parked like an idle server.
+                    std::future::pending::<()>().await;
+                }
+            });
+
+            let scripted_once = std::sync::Mutex::new(Some(client_end));
+            let calls = Arc::clone(&connect_calls);
+            let connect: ConnectFn = Arc::new(move |_config, _password, _width, _height| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let scripted = scripted_once.lock().unwrap().take();
+                Box::pin(async move {
+                    match scripted {
+                        Some(stream) => ConnectionOutcome::RealSessionLocal {
+                            connection_result: Box::new(
+                                crate::rdp::baseline::synthetic_connection_result(64, 64),
+                            ),
+                            framed: Box::new(ironrdp_tokio::TokioFramed::new(stream)),
+                        },
+                        // Later dials fail like a dead endpoint so the OLD
+                        // observable (DeactivateAll → backoff reconnect
+                        // cycle) stays distinguishable from the new
+                        // in-place reactivation.
+                        None => ConnectionOutcome::Failed(
+                            "scripted real session already consumed".to_string(),
+                        ),
+                    }
+                })
+            });
+
+            let id = manager
+                .create_session_with_transport(
+                    test_config(tag),
+                    None,
+                    scripted_frame_channel(FrameScript::Ok, Arc::clone(&frame_sizes)),
+                    SessionEventSink::recorded(Arc::clone(&events)),
+                    auto_reconnect,
+                    None,
+                    connect,
+                )
+                .await
+                .expect("scripted real session creation should succeed");
+            let cmd_tx = manager
+                .get_cmd_sender(&id)
+                .await
+                .expect("session handle exists right after creation");
+            TestSession {
+                id,
+                cmd_tx,
+                events,
+                events_rx,
+                frame_sizes,
+                connect_calls,
+            }
+        }
+
+        /// Task 7.4 acceptance (Req 11.4): DeactivateAll during an active
+        /// session reactivates IN PLACE — stable session identity, no
+        /// ConnectionLost, no reconnecting/backoff cycle, exactly one dial —
+        /// and the reactivated stage keeps serving the same actor (a later
+        /// Disconnect through the original command channel lands cleanly).
+        #[tokio::test(start_paused = true)]
+        async fn deactivate_all_reactivates_in_place_without_reconnect_cycle() {
+            let manager = SessionManager::new();
+            let session = create_scripted_real_session(
+                &manager,
+                "reactivate",
+                true,
+                reactivation_script_frames(),
+                true,
+            )
+            .await;
+            let mut rx = session.events_rx.clone();
+
+            // Reactivation applied: the Finalized desktop size (96x80) is
+            // published while the session stays connected.
+            let applied = tokio::time::timeout(
+                std::time::Duration::from_secs(600),
+                wait_for(&session.id, &session.events, &mut rx, |events| {
+                    events
+                        .last()
+                        .map(|(_, v)| {
+                            status_string(v) == "connected"
+                                && v["width"].as_u64() == Some(u64::from(REACTIVATION_WIDTH))
+                                && v["height"].as_u64() == Some(u64::from(REACTIVATION_HEIGHT))
+                        })
+                        .unwrap_or(false)
+                }),
+            )
+            .await;
+            if applied.is_err() {
+                panic!(
+                    "reactivation did not apply the Finalized desktop size; recorded statuses: {:?}",
+                    statuses_of(&info_events(&session.id, &session.events))
+                );
+            }
+
+            let statuses = statuses_of(&info_events(&session.id, &session.events));
+            assert!(
+                !statuses.iter().any(|s| s == "reconnecting"),
+                "DeactivateAll must not enter the reconnect cycle (got {statuses:?})"
+            );
+            assert!(
+                !statuses.iter().any(|s| s.starts_with("error:")),
+                "DeactivateAll must not error (got {statuses:?})"
+            );
+            // In place means exactly one dial for this connection.
+            assert_eq!(session.connect_calls.load(Ordering::SeqCst), 1);
+
+            // Identity stability: the same session id stays listed and live.
+            let info = manager
+                .get_session_info(&session.id)
+                .await
+                .expect("session remains listed after reactivation");
+            assert_eq!(info.id, session.id);
+            assert_eq!(manager.list_sessions().await.len(), 1);
+
+            // Actor continuity: the ORIGINAL command channel still drives the
+            // same actor — a user disconnect after reactivation lands cleanly
+            // with no reconnect attempt and no error.
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .expect("disconnect accepted after reactivation");
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+            assert_eq!(session.connect_calls.load(Ordering::SeqCst), 1);
+        }
+
+        /// Boundary preserved (Req 2.3): DeactivateAll followed by a dead
+        /// transport is still an unexpected transport drop — the session
+        /// enters the existing reconnecting/backoff loop (identity
+        /// preserved); in-place reactivation only applies when the server
+        /// completes the sequence.
+        #[tokio::test(start_paused = true)]
+        async fn deactivate_all_then_transport_drop_still_reconnects_with_backoff() {
+            let manager = SessionManager::new();
+            // Script: deactivate, then the server vanishes (task ends →
+            // duplex EOF) without ever sending DemandActive.
+            let session = create_scripted_real_session(
+                &manager,
+                "react-drop",
+                true,
+                vec![deactivate_all_frame()],
+                false,
+            )
+            .await;
+            let mut rx = session.events_rx.clone();
+
+            // The pinned drop observable: reconnecting → mock-fallback
+            // connected (the scripted dial fails after the first).
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events
+                    .iter()
+                    .any(|(_, v)| status_string(v) == "reconnecting")
+                    && events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+            })
+            .await;
+            assert_eq!(session.connect_calls.load(Ordering::SeqCst), 2);
+
+            // Same session identity across the reconnect cycle.
+            assert!(manager.get_session_info(&session.id).await.is_some());
+
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .expect("cancel accepted");
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+        }
+
+        /// While the reactivation sequence is waiting on the server, a user
+        /// disconnect stops the session immediately: no reconnect attempt,
+        /// terminal disconnected status (cancel semantics mirror Req 2.4).
+        #[tokio::test(start_paused = true)]
+        async fn disconnect_during_reactivation_window_stops_without_reconnect() {
+            let manager = SessionManager::new();
+            // DeactivateAll, then the server holds the transport open but
+            // stays silent (no DemandActive): the actor is parked inside the
+            // reactivation window.
+            let session = create_scripted_real_session(
+                &manager,
+                "react-cancel",
+                true,
+                vec![deactivate_all_frame()],
+                true,
+            )
+            .await;
+            let mut rx = session.events_rx.clone();
+
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .expect("cancel accepted during reactivation");
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+
+            let statuses = statuses_of(&info_events(&session.id, &session.events));
+            assert!(
+                !statuses.iter().any(|s| s == "reconnecting"),
+                "cancel during reactivation must not reconnect (got {statuses:?})"
+            );
+            assert!(
+                !statuses.iter().any(|s| s.starts_with("error:")),
+                "cancel during reactivation must not error (got {statuses:?})"
+            );
+            assert_eq!(session.connect_calls.load(Ordering::SeqCst), 1);
         }
     }
 }

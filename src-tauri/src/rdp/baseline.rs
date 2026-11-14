@@ -1051,6 +1051,11 @@ async fn smoke_host(
             connection_result,
             framed,
         } => (*connection_result, *framed),
+        // Task 7.4 test seam: production connectors never produce the
+        // in-memory transport; the smoke only ever dials real servers.
+        ConnectionOutcome::RealSessionLocal { .. } => {
+            unreachable!("smoke runs against real servers only (RealSessionLocal is a test seam)")
+        }
         ConnectionOutcome::Failed(reason) => {
             if report.error.is_none() {
                 report.error = Some(reason.clone());
@@ -1162,6 +1167,11 @@ async fn smoke_host(
                 "outcome".into(),
                 serde_json::json!(format!("failed: {reason}")),
             );
+        }
+        // Task 7.4 test seam: production connectors never produce the
+        // in-memory transport.
+        ConnectionOutcome::RealSessionLocal { .. } => {
+            unreachable!("smoke runs against real servers only (RealSessionLocal is a test seam)")
         }
     }
     report.reconnect_cycle = Some(cycle2);

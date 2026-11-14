@@ -62,6 +62,17 @@ pub enum ConnectionOutcome {
         connection_result: Box<ConnectionResult>,
         framed: Box<TlsFramed>,
     },
+    /// Task 7.4 characterization seam: a real session over an in-memory
+    /// framed transport. Identical actor semantics to [`ConnectionOutcome::RealSession`],
+    /// but the framed stream is a tokio duplex, so deterministic tests can
+    /// script the server side of the session loop (Server Deactivate All, the
+    /// Deactivation-Reactivation Sequence) without TLS/TCP. Production
+    /// connectors never produce this variant.
+    #[cfg_attr(not(test), allow(dead_code))]
+    RealSessionLocal {
+        connection_result: Box<ConnectionResult>,
+        framed: Box<ironrdp_tokio::TokioFramed<tokio::io::DuplexStream>>,
+    },
     /// Connection failed; reason provided.
     Failed(String),
 }

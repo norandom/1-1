@@ -198,7 +198,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Timeout/persist failure retains saved data; race/restart tests confirm stopped-session and cleanup semantics.
   - _Boundary: Deletion integration_
   - _Requirements: 1.5,6.2,10.2,10.17,10.18_
-- [ ] 7.4 Reactivate deactivated sessions in place
+- [x] 7.4 Reactivate deactivated sessions in place
   - User decision 2026-11-14 (group-4 hold item 3): adopt the proven upstream mechanism (activation_factory + ActiveStage::reactivate()) so server DeactivateAll reactivates the existing session in place, replacing the pinned DeactivateAll -> ConnectionLost -> backoff-reconnect behavior; flip the suite pins that freeze the old observable behavior. Surface any Req 2 wording change at the group-7 boundary HOLD before landing.
   - Done: DeactivateAll during an active session reactivates in place with stable session identity (no ConnectionLost/backoff cycle); unexpected-drop reconnect and cancel behavior unchanged.
   - _Boundary: Session reactivation_
