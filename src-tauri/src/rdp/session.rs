@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use ironrdp_pdu::input::fast_path::FastPathInputEvent;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::{Mutex, mpsc, watch};
@@ -1224,14 +1224,48 @@ fn session_is_live(status: &SessionState) -> bool {
     )
 }
 
+/// Single-lock manager state: the task 7.1 admission map plus the task
+/// 7.3 deletion tombstones share one mutex, so Connect admission and
+/// destructive-operation coordination can never interleave.
+#[derive(Default)]
+struct SessionMap {
+    handles: HashMap<String, SessionHandle>,
+    /// Connection IDs whose coordinated deletion has begun (task 7.3):
+    /// admission under the same lock rejects these, so no actor can
+    /// appear for a connection between its stop phase and the store
+    /// commit — or after a committed deletion. Rolled back when a
+    /// deletion aborts (stop timeout / persist failure), kept forever
+    /// once the deletion persisted.
+    deleted_connections: HashSet<String>,
+}
+
+/// Bound for awaiting actor stop during a coordinated deletion (task
+/// 7.3, design "Destructive actions and identity"): five seconds shared
+/// across every affected session of one operation. Enforced with
+/// `timeout_at` on the actor `JoinHandle`s — no polling, no wall-clock
+/// sleeps (the paused test clock drives it deterministically).
+const DELETION_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Task 7.3 remediation (review round 1): the timeout half of the
+/// post-commit extras sweep (see
+/// [`SessionManager::stop_sessions_for_committed_connections`]). The
+/// store transaction already committed, so the tombstones stay — a
+/// stale-config Connect may never resurrect a committed deletion —
+/// while `stopped` surfaces the sessions that DID stop before the
+/// bound (Req 10.18 exactness) and `offenders` keep their live entries.
+pub(crate) struct CommittedStopTimeout {
+    pub(crate) offenders: Vec<String>,
+    pub(crate) stopped: Vec<String>,
+}
+
 pub struct SessionManager {
-    handles: Arc<Mutex<HashMap<String, SessionHandle>>>,
+    state: Arc<Mutex<SessionMap>>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
         Self {
-            handles: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(SessionMap::default())),
         }
     }
 
@@ -1240,7 +1274,7 @@ impl SessionManager {
     /// introspection used by the lifecycle tests.
     #[cfg(test)]
     pub async fn session_count(&self) -> usize {
-        self.handles.lock().await.len()
+        self.state.lock().await.handles.len()
     }
 
     /// Spawn a new session actor and return its ID.
@@ -1284,9 +1318,24 @@ impl SessionManager {
         // single lock acquisition, so concurrent Connect commands for the
         // same connection serialize here: exactly one actor per connection
         // and a stable returned identity.
-        let mut handles = self.handles.lock().await;
+        let mut state = self.state.lock().await;
 
-        let existing = handles
+        // Task 7.3 (design "Destructive actions and identity"): a
+        // connection whose coordinated deletion has begun can never
+        // admit a new actor — a Connect that raced the deletion (or a
+        // double-click that read the config before the store commit)
+        // fails closed here, under the same lock as the deletion's
+        // stop phase, so no actor can appear between stop and commit
+        // or resurrect a committed deletion.
+        if state.deleted_connections.contains(&config.id) {
+            return Err(format!(
+                "Connection {} was deleted; no session can be created for it",
+                config.id
+            ));
+        }
+
+        let existing = state
+            .handles
             .values()
             .find(|handle| handle.info_rx.borrow().connection_id == config.id)
             .map(|handle| {
@@ -1321,7 +1370,7 @@ impl SessionManager {
             // under the same lock as the insert, so racing Connects cannot
             // both pass the check.
             None => {
-                if handles.len() >= MAX_SESSIONS {
+                if state.handles.len() >= MAX_SESSIONS {
                     return Err(format!(
                         "Maximum session limit ({}) reached. Disconnect an existing session first.",
                         MAX_SESSIONS
@@ -1385,7 +1434,7 @@ impl SessionManager {
             task_handle,
         };
 
-        handles.insert(session_id.clone(), handle);
+        state.handles.insert(session_id.clone(), handle);
 
         log::info!("Created session {}", session_id);
         Ok(session_id)
@@ -1393,8 +1442,8 @@ impl SessionManager {
 
     /// Send a disconnect command and remove the session handle.
     pub async fn remove_session(&self, session_id: &str) -> Result<(), String> {
-        let mut handles = self.handles.lock().await;
-        if let Some(handle) = handles.remove(session_id) {
+        let mut state = self.state.lock().await;
+        if let Some(handle) = state.handles.remove(session_id) {
             // Send disconnect command (ignore error if actor already stopped)
             let _ = handle.cmd_tx.send(SessionCommand::Disconnect).await;
             log::info!("Session {} removed", session_id);
@@ -1404,30 +1453,208 @@ impl SessionManager {
         }
     }
 
+    /// Task 7.3 (Req 10.17, design "Destructive actions and identity"):
+    /// begin a coordinated deletion for the given connections. Under the
+    /// SAME lock as task 7.1 admission this:
+    ///
+    /// 1. tombstones every connection ID — Connects racing the deletion
+    ///    serialize on this lock and fail closed until the outcome is
+    ///    finalized (or rolled back);
+    /// 2. sends `Disconnect` to every session actor of those connections
+    ///    (the command that also cancels reconnect/backoff retries);
+    /// 3. awaits each actor's stop with ONE shared five-second bound —
+    ///    [`DELETION_STOP_TIMEOUT`] — measured on the actor
+    ///    `JoinHandle`s, so "stopped" means the actor task finished.
+    ///
+    /// `Ok(stopped)` lists the session IDs that were live and stopped;
+    /// their entries are removed and the tombstones stay for the
+    /// caller's store commit. `Err(offenders)` means at least one actor
+    /// missed the bound: the deletion must abort — the offenders keep
+    /// their entries (still live, still Connect-reusable), the
+    /// tombstones are rolled back here, but sessions that DID stop
+    /// within the bound remain stopped and removed ("already-stopped
+    /// sessions remain stopped").
+    pub(crate) async fn stop_sessions_for_connections(
+        &self,
+        connection_ids: &[String],
+    ) -> Result<Vec<String>, Vec<String>> {
+        let mut state = self.state.lock().await;
+        let (stopped, offenders) = Self::stop_sessions_under_lock(&mut state, connection_ids).await;
+        if offenders.is_empty() {
+            Ok(stopped)
+        } else {
+            // Deletion aborts here: the saved connections survive, so
+            // they must be connectable again immediately.
+            for id in connection_ids {
+                state.deleted_connections.remove(id);
+            }
+            Err(offenders)
+        }
+    }
+
+    /// Task 7.3 remediation (review round 1): the post-commit sweep for
+    /// connections the committed store transaction deleted WITHOUT
+    /// previewing (they joined the deleted library between the
+    /// coordination layer's preview and the commit). Same bounded stop
+    /// as [`SessionManager::stop_sessions_for_connections`], but the
+    /// caller cannot abort — the deletion is already persisted — so a
+    /// stop timeout must NOT roll the tombstones back: every id was
+    /// committed-deleted and stays tombstoned forever, so a stale-config
+    /// Connect can never resurrect it. The sessions that DID stop
+    /// before the bound are surfaced alongside the offenders
+    /// ([`CommittedStopTimeout`]) so the caller still reports them
+    /// (Req 10.18).
+    pub(crate) async fn stop_sessions_for_committed_connections(
+        &self,
+        connection_ids: &[String],
+    ) -> Result<Vec<String>, CommittedStopTimeout> {
+        let mut state = self.state.lock().await;
+        let (stopped, offenders) = Self::stop_sessions_under_lock(&mut state, connection_ids).await;
+        if offenders.is_empty() {
+            Ok(stopped)
+        } else {
+            // No rollback: the committed transaction already deleted
+            // every id (no-resurrection invariant); the offenders keep
+            // their live, tracked entries.
+            Err(CommittedStopTimeout { offenders, stopped })
+        }
+    }
+
+    /// The shared bounded-stop core (task 7.3), with the admission lock
+    /// HELD by the caller: tombstone `connection_ids`, `Disconnect`
+    /// every affected actor, then await the stops against ONE shared
+    /// five-second bound. Returns the sessions that stopped (entries
+    /// removed; live ones counted for the 10.18 report) and the
+    /// offenders that missed the bound (entries kept, still live).
+    /// Tombstone settlement stays with the caller — inside the same
+    /// lock hold — because the abortable path rolls back while the
+    /// committed path keeps them.
+    async fn stop_sessions_under_lock(
+        state: &mut SessionMap,
+        connection_ids: &[String],
+    ) -> (Vec<String>, Vec<String>) {
+        for id in connection_ids {
+            state.deleted_connections.insert(id.clone());
+        }
+
+        // Deterministic order: sorted session IDs, so reports and stop
+        // sequences are reproducible regardless of HashMap layout.
+        let mut affected: Vec<(String, bool)> = state
+            .handles
+            .values()
+            .filter_map(|handle| {
+                let info = handle.info_rx.borrow();
+                connection_ids
+                    .contains(&info.connection_id)
+                    .then(|| (info.id.clone(), session_is_live(&info.status)))
+            })
+            .collect();
+        affected.sort();
+        if affected.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        // Cancel every affected actor FIRST — reconnect/backoff loops
+        // and idle session loops all take `Disconnect` from their
+        // command channel — then await the stops, so the shared
+        // deadline measures stopping, not command delivery.
+        for (session_id, _) in &affected {
+            if let Some(handle) = state.handles.get(session_id) {
+                let _ = handle.cmd_tx.send(SessionCommand::Disconnect).await;
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + DELETION_STOP_TIMEOUT;
+        let mut stopped = Vec::new();
+        let mut offenders = Vec::new();
+        for (session_id, was_live) in &affected {
+            let Some(handle) = state.handles.get_mut(session_id) else {
+                continue;
+            };
+            let stop = tokio::time::timeout_at(deadline, &mut handle.task_handle).await;
+            match stop {
+                Ok(joined) => {
+                    if let Err(join_error) = joined {
+                        log::warn!("Session {session_id} actor ended with {join_error}");
+                    }
+                    state.handles.remove(session_id);
+                    if *was_live {
+                        // Only sessions that were live count as "stopped"
+                        // for the 10.18 confirmation counts; terminal
+                        // entries were already stopped and just get
+                        // retired with their connection.
+                        stopped.push(session_id.clone());
+                    }
+                }
+                Err(_elapsed) => {
+                    // The entry stays: the actor is still running and
+                    // must remain addressable (Connect reuses it).
+                    offenders.push(session_id.clone());
+                }
+            }
+        }
+
+        (stopped, offenders)
+    }
+
+    /// Task 7.3: abort a coordinated deletion (stop timeout or persist
+    /// failure) — clear the tombstones so the surviving connections can
+    /// admit sessions again.
+    pub(crate) async fn rollback_connection_deletions(&self, connection_ids: &[String]) {
+        let mut state = self.state.lock().await;
+        for id in connection_ids {
+            state.deleted_connections.remove(id);
+        }
+    }
+
+    /// Task 7.3: settle the tombstones after the store transaction
+    /// committed. Only connections the transaction actually deleted stay
+    /// tombstoned (forever — a deleted connection can never connect
+    /// again); `blocked` ids that survived (e.g. a connection moved out
+    /// of a deleted library mid-deletion) are released so Connect works
+    /// for them again.
+    pub(crate) async fn finalize_connection_deletions(
+        &self,
+        blocked: &[String],
+        deleted: &[String],
+    ) {
+        let mut state = self.state.lock().await;
+        for id in blocked {
+            if !deleted.contains(id) {
+                state.deleted_connections.remove(id);
+            }
+        }
+    }
+
     /// Get a clone of the command sender for a session.
     pub async fn get_cmd_sender(&self, session_id: &str) -> Option<mpsc::Sender<SessionCommand>> {
-        let handles = self.handles.lock().await;
-        handles.get(session_id).map(|h| h.cmd_tx.clone())
+        let state = self.state.lock().await;
+        state.handles.get(session_id).map(|h| h.cmd_tx.clone())
     }
 
     /// Get the latest session info (lock-free read from watch channel).
     pub async fn get_session_info(&self, session_id: &str) -> Option<SessionInfo> {
-        let handles = self.handles.lock().await;
-        handles.get(session_id).map(|h| h.info_rx.borrow().clone())
+        let state = self.state.lock().await;
+        state
+            .handles
+            .get(session_id)
+            .map(|h| h.info_rx.borrow().clone())
     }
 
     /// List all sessions.
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
-        let handles = self.handles.lock().await;
-        handles
+        let state = self.state.lock().await;
+        state
+            .handles
             .values()
             .map(|h| h.info_rx.borrow().clone())
             .collect()
     }
 
     pub async fn get_remote_clipboard(&self, session_id: &str) -> Option<String> {
-        let handles = self.handles.lock().await;
-        handles
+        let state = self.state.lock().await;
+        state
+            .handles
             .get(session_id)
             .and_then(|handle| handle.clipboard_rx.borrow().clone())
     }
@@ -1435,8 +1662,8 @@ impl SessionManager {
     /// Get a snapshot of the current frame for a session (generates mock frame on demand).
     /// This is a fallback for the get_frame command.
     pub async fn get_frame(&self, session_id: &str) -> Option<String> {
-        let handles = self.handles.lock().await;
-        if let Some(handle) = handles.get(session_id) {
+        let state = self.state.lock().await;
+        if let Some(handle) = state.handles.get(session_id) {
             let info = handle.info_rx.borrow().clone();
             // Generate a mock frame on demand with the session's current dimensions
             let fb = FrameBuffer::generate_mock_frame(info.width, info.height);

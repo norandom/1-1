@@ -99,7 +99,7 @@ impl Default for CredentialStore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use keyring::credential::{Credential, CredentialApi, CredentialBuilder, CredentialBuilderApi};
     use keyring::{mock, set_default_credential_builder};
@@ -126,10 +126,11 @@ mod tests {
     }
 
     /// Restores the keyring mock builder on drop so a later test in the same
-    /// process never inherits a scripted/failing builder. `pub(super)`:
+    /// process never inherits a scripted/failing builder. `pub(crate)`:
     /// returned by [`install_scripted`], shared with
-    /// `folder_deletion_tests` (task 7.2).
-    pub(super) struct BuilderGuard;
+    /// `folder_deletion_tests` (task 7.2) and the task 7.3 deletion
+    /// coordination tests in `commands::deletion`.
+    pub(crate) struct BuilderGuard;
     impl BuilderGuard {
         fn install(builder: Box<CredentialBuilder>) -> Self {
             set_default_credential_builder(builder);
@@ -142,10 +143,10 @@ mod tests {
         }
     }
 
-    /// Which failure a scripted keyring operation returns. `pub(super)`:
+    /// Which failure a scripted keyring operation returns. `pub(crate)`:
     /// named by [`install_scripted`]'s signature.
     #[derive(Clone, Copy)]
-    pub(super) enum Fail {
+    pub(crate) enum Fail {
         NoEntry,
         Platform,
     }
@@ -243,8 +244,10 @@ mod tests {
     }
 
     /// Install the scripted keyring builder process-wide (restored on
-    /// drop). `pub(super)`: shared with `folder_deletion_tests` (task 7.2).
-    pub(super) fn install_scripted(
+    /// drop). `pub(crate)`: shared with `folder_deletion_tests` (task 7.2)
+    /// and the task 7.3 deletion coordination tests in
+    /// `commands::deletion`.
+    pub(crate) fn install_scripted(
         seen: Arc<Mutex<Vec<(String, String)>>>,
         fail_build: bool,
         fail_set: Option<Fail>,

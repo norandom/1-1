@@ -8,6 +8,8 @@
 
 use tauri::State;
 
+use crate::commands::deletion::{DeletionReport, delete_connection_coordinated};
+use crate::rdp::session::SessionManager;
 use crate::store::connections::{ConnectionConfig, ConnectionInput};
 use crate::store::credentials::CredentialStore;
 use crate::store::library::{LibraryStore, LibraryStoreError};
@@ -90,19 +92,31 @@ pub async fn update_connection(
     Ok(updated)
 }
 
+/// Req 1.5/6.2/10.17/10.18 (task 7.3): delete a connection through the
+/// coordination layer (`commands::deletion`) — serialize against
+/// Connect for the id, cancel retries and await actor stop with a
+/// five-second bound, atomically persist the deletion, and only then
+/// clean the stored credential best-effort. A stop timeout or persist
+/// failure retains the saved data (reported); a failed keyring cleanup
+/// still reports the successful deletion with the orphaned credential
+/// listed for an explicit retry.
 #[tauri::command]
 pub async fn delete_connection(
     id: String,
     store: State<'_, LibraryStore>,
     cred_store: State<'_, CredentialStore>,
-) -> Result<bool, String> {
-    let removed = store.delete_connection(&id).map_err(to_message)?;
-    if removed {
-        // Best-effort delete password from keychain (Req 1.5)
-        let _ = cred_store.delete_password(&id);
-        log::info!("Deleted connection: {}", id);
-    }
-    Ok(removed)
+    session_mgr: State<'_, SessionManager>,
+) -> Result<DeletionReport, String> {
+    let report = delete_connection_coordinated(&id, &store, &cred_store, &session_mgr).await?;
+    log::info!(
+        "Deleted connection {}: {} connection(s), {} session(s) stopped, {} orphaned \
+         credential(s)",
+        id,
+        report.cascaded.deleted_connection_ids.len(),
+        report.stopped_session_ids.len(),
+        report.orphaned_credential_ids.len(),
+    );
+    Ok(report)
 }
 
 /// Req 10.19 (design "Destructive actions and identity"): duplicate a

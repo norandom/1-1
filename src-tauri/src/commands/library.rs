@@ -8,14 +8,19 @@
 //! Task 7.2 (Req 10.16/10.18) adds `delete_folder`: the folder subtree is
 //! removed and descendant connections move to the library root in one
 //! store transaction; the command reports the exact cascaded counts/IDs.
-//! Scope boundary: library deletion coordinates session actors and
-//! keyring cleanup — that stays with task 7.3. Connection
-//! CRUD/import/duplication commands landed with task 6.6 in
-//! `commands::connection`, over the same unified store. Tree moves
-//! (drag/keyboard UI in group 8) landed with task 6.5 (`move_node`).
+//! Task 7.3 (Req 10.2/10.17/10.18) adds `delete_library`: the library
+//! with every folder and connection filed in it is deleted in one store
+//! transaction, coordinated against live session actors and keyring
+//! cleanup in `commands::deletion`. Connection CRUD/import/duplication
+//! commands landed with task 6.6 in `commands::connection`, over the
+//! same unified store. Tree moves (drag/keyboard UI in group 8) landed
+//! with task 6.5 (`move_node`).
 
 use tauri::State;
 
+use crate::commands::deletion::{DeletionReport, delete_library_coordinated};
+use crate::rdp::session::SessionManager;
+use crate::store::credentials::CredentialStore;
 use crate::store::library::{
     CascadedIds, ConnectionSummary, Folder, Library, LibraryStore, LibraryStoreError, LibraryTree,
     NodeId, StoreStatus,
@@ -136,6 +141,34 @@ pub async fn delete_folder(
         cascaded.deleted_connection_ids.len(),
     );
     Ok(cascaded)
+}
+
+/// Req 10.2/10.17/10.18 (task 7.3): delete a library with every folder
+/// and connection filed in it, coordinated by `commands::deletion` —
+/// sessions of all affected connections are stopped (bounded) and
+/// serialized against Connect, the whole cascade persists in ONE store
+/// transaction, and every deleted connection's credential is cleaned
+/// best-effort only after that commit. Failures retain the saved data
+/// and are reported; the returned [`DeletionReport`] carries the exact
+/// counts for the 10.18 confirmation.
+#[tauri::command]
+pub async fn delete_library(
+    id: String,
+    store: State<'_, LibraryStore>,
+    cred_store: State<'_, CredentialStore>,
+    session_mgr: State<'_, SessionManager>,
+) -> Result<DeletionReport, String> {
+    let report = delete_library_coordinated(&id, &store, &cred_store, &session_mgr).await?;
+    log::info!(
+        "Deleted library {}: removed {} folder(s) and {} connection(s), stopped {} session(s), \
+         {} orphaned credential(s)",
+        id,
+        report.cascaded.deleted_folder_ids.len(),
+        report.cascaded.deleted_connection_ids.len(),
+        report.stopped_session_ids.len(),
+        report.orphaned_credential_ids.len(),
+    );
+    Ok(report)
 }
 
 /// Read model for the sidebar tree (design `list_tree() -> LibraryTree`).

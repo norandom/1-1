@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import type { CascadedIds, ConnectionSummary, Folder, Library, LibraryTree } from '../../types';
+import type { CascadedIds, ConnectionSummary, DeletionReport, Folder, Library, LibraryTree } from '../../types';
 
 import {
   createFolder,
   createLibrary,
+  deleteConnection,
   deleteFolder,
+  deleteLibrary,
   duplicateConnection,
   getLibraryStatus,
   importRdpFile,
@@ -151,6 +153,45 @@ describe('deleteFolder wrapper (task 7.2, Req 10.16/10.18)', () => {
   it('deleteFolder rejects instead of swallowing command errors', async () => {
     invokeMock.mockRejectedValueOnce(new Error('unknown tree node'));
     await expect(deleteFolder('folder-404')).rejects.toThrow('unknown tree node');
+  });
+});
+
+describe('deletion wrappers (task 7.3, Req 1.5/10.17/10.18)', () => {
+  const report: DeletionReport = {
+    deleted: true,
+    cascaded: {
+      deletedFolderIds: ['folder-1'],
+      deletedConnectionIds: ['conn-1', 'conn-2'],
+      movedConnectionIds: [],
+    },
+    stoppedSessionIds: ['ses-1', 'ses-2'],
+    orphanedCredentialIds: ['conn-2'],
+  };
+
+  it('deleteConnection returns the coordination report incl. stopped sessions', async () => {
+    invokeMock.mockResolvedValueOnce(report);
+
+    await expect(deleteConnection('conn-1')).resolves.toEqual(report);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('delete_connection', { id: 'conn-1' });
+  });
+
+  it('deleteLibrary marshals the id and returns the cascaded report', async () => {
+    invokeMock.mockResolvedValueOnce(report);
+
+    await expect(deleteLibrary('lib-1')).resolves.toEqual(report);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('delete_library', { id: 'lib-1' });
+  });
+
+  it('deletion wrappers surface stop/persist failures instead of swallowing them', async () => {
+    invokeMock.mockRejectedValueOnce(
+      new Error('deletion aborted: session(s) [ses-1] did not stop within five seconds')
+    );
+    await expect(deleteConnection('conn-stuck')).rejects.toThrow('did not stop within five seconds');
+
+    invokeMock.mockRejectedValueOnce(
+      new Error('library operation failed to persist; sessions were stopped (2)')
+    );
+    await expect(deleteLibrary('lib-1')).rejects.toThrow('sessions were stopped');
   });
 });
 

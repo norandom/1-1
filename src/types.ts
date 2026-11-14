@@ -109,6 +109,18 @@ export interface CascadedIds {
   movedConnectionIds: string[];
 }
 
+// Exact outcome of a coordinated connection/library deletion (task 7.3,
+// Req 1.5/10.17/10.18): the cascaded counts/IDs for the confirmation
+// UI, the sessions this deletion stopped, and credentials whose keyring
+// cleanup failed after a successful persist — orphans reported for an
+// explicit retry, never treated as deleted connection records.
+export interface DeletionReport {
+  deleted: boolean;
+  cascaded: CascadedIds;
+  stoppedSessionIds: string[];
+  orphanedCredentialIds: string[];
+}
+
 export type LibraryStoreStatus =
   | { status: 'ready' }
   | { status: 'writeBlocked'; reason: string; instructions: string };

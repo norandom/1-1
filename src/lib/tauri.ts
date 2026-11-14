@@ -4,6 +4,7 @@ import type {
   CascadedIds,
   ConnectionConfig,
   ConnectionSummary,
+  DeletionReport,
   Folder,
   Library,
   LibraryStoreStatus,
@@ -49,8 +50,12 @@ export async function updateConnection(
   return await invoke<ConnectionConfig>('update_connection', { id, config });
 }
 
-export async function deleteConnection(id: string): Promise<void> {
-  await invoke('delete_connection', { id });
+export async function deleteConnection(id: string): Promise<DeletionReport> {
+  // Req 1.5/10.17/10.18 (task 7.3): coordinated deletion — the backend
+  // stops the connection's session (bounded) before persisting and
+  // cleans the credential best-effort only after; the report carries
+  // the exact counts incl. stopped sessions and orphaned credentials.
+  return await invoke<DeletionReport>('delete_connection', { id });
 }
 
 /// Req 10.19: duplicate a connection (non-secret settings, same folder,
@@ -236,6 +241,15 @@ export async function renameFolder(id: string, name: string): Promise<Folder> {
 // the exact cascaded counts/IDs for the confirmation UI; errors reject.
 export async function deleteFolder(id: string): Promise<CascadedIds> {
   return await invoke<CascadedIds>('delete_folder', { id });
+}
+
+// Req 10.2/10.17/10.18 (task 7.3): delete a library with every folder and
+// connection filed in it. The backend stops the affected sessions
+// (bounded, serialized against connect) before persisting one cascaded
+// transaction and cleans credentials only after it; the report carries
+// the exact counts, the stopped sessions and any orphaned credentials.
+export async function deleteLibrary(id: string): Promise<DeletionReport> {
+  return await invoke<DeletionReport>('delete_library', { id });
 }
 
 export async function moveNode(

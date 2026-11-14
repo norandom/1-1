@@ -1125,6 +1125,15 @@ struct StoreInner {
     /// between serialization and the persist stage; fires once.
     #[cfg(test)]
     fail_next_commit: bool,
+    /// Test-only race-window injection (task 7.3): connections a test
+    /// stages to JOIN the document inside the next `delete_library`
+    /// transaction — the deterministic model of a connection that was
+    /// filed into the library between the coordination layer's
+    /// `library_connection_ids` preview and the commit (the post-commit
+    /// "extras" sweep window). Drained by `delete_library`; never
+    /// present in production builds.
+    #[cfg(test)]
+    library_delete_joins: Vec<ConnectionConfig>,
 }
 
 /// Owner of the unified v2 connection library document (task 6.6): the
@@ -1179,6 +1188,22 @@ impl LibraryStore {
             .fail_next_commit = true;
     }
 
+    /// Test-only (task 7.3): stage connections that JOIN the library
+    /// inside the next [`LibraryStore::delete_library`] transaction —
+    /// the deterministic stand-in for a connection filed into the
+    /// library between the caller's [`LibraryStore::library_connection_ids`]
+    /// preview and the commit. The staged connections are drained by
+    /// that one transaction (before its cascade is computed), so they
+    /// end up deleted-but-unpreviewed — exactly the "extras" the
+    /// coordination layer's post-commit sweep must handle.
+    #[cfg(test)]
+    pub fn join_connections_inside_next_library_delete(&self, joined: Vec<ConnectionConfig>) {
+        self.inner
+            .lock()
+            .expect("library store lock poisoned")
+            .library_delete_joins = joined;
+    }
+
     fn open_with(path: impl Into<PathBuf>, transitional_path: Option<PathBuf>) -> Self {
         let path = path.into();
         let state = match Self::load_for(&path, &transitional_path) {
@@ -1226,6 +1251,8 @@ impl LibraryStore {
                 state,
                 #[cfg(test)]
                 fail_next_commit: false,
+                #[cfg(test)]
+                library_delete_joins: Vec::new(),
             }),
         }
     }
@@ -1454,6 +1481,57 @@ impl LibraryStore {
         self.mutate(|mut next| {
             let cascaded = apply_folder_deletion(&mut next, id)?;
             Ok((next, cascaded))
+        })
+    }
+
+    /// Req 10.2/10.17/10.18 (task 7.3): delete a library together with
+    /// every folder and every connection filed in it — root-level and
+    /// nested, at any depth — in ONE serialized store transaction. The
+    /// command coordination layer (`commands::deletion`) stops the
+    /// affected sessions first and performs keyring cleanup from the
+    /// returned [`CascadedIds`] only after this transaction committed;
+    /// a failed persist retains the previous snapshot and on-disk file
+    /// (the library deletion then aborts with saved data retained).
+    pub fn delete_library(&self, id: &str) -> Result<CascadedIds, LibraryStoreError> {
+        // Test-only race-window injection (see `library_delete_joins`):
+        // the staged connections join the document HERE — after any
+        // earlier `library_connection_ids` preview, before the cascade —
+        // so the transaction deletes them unpreviewed.
+        #[cfg(test)]
+        let joined = std::mem::take(
+            &mut self
+                .inner
+                .lock()
+                .expect("library store lock poisoned")
+                .library_delete_joins,
+        );
+        self.mutate(|mut next| {
+            #[cfg(test)]
+            next.connections.extend(joined);
+            let cascaded = apply_library_deletion(&mut next, id)?;
+            Ok((next, cascaded))
+        })
+    }
+
+    /// Req 10.17 (task 7.3): the connection IDs a library deletion will
+    /// affect, in document order — the preview the coordination layer
+    /// stops session actors for (and tombstones against Connect) before
+    /// [`LibraryStore::delete_library`] commits. An unknown library is
+    /// the same typed rejection the deletion itself would return.
+    pub fn library_connection_ids(&self, id: &str) -> Result<Vec<String>, LibraryStoreError> {
+        self.read(|document| {
+            if !document.libraries.iter().any(|library| library.id == id) {
+                return Err(LibraryError::UnknownNode {
+                    node: NodeId::library(id),
+                }
+                .into());
+            }
+            Ok(document
+                .connections
+                .iter()
+                .filter(|connection| connection.library_id == id)
+                .map(|connection| connection.id.clone())
+                .collect())
         })
     }
 
@@ -1941,6 +2019,67 @@ fn apply_folder_deletion(
         // field stays available for library deletion (task 7.3).
         deleted_connection_ids: Vec::new(),
         moved_connection_ids,
+    })
+}
+
+/// Pure deletion core of [`LibraryStore::delete_library`] (task 7.3, Req
+/// 10.2/10.17/10.18): remove the library and every folder and connection
+/// filed in it, in the proposed snapshot in place. The surrounding
+/// transaction validates the result before persisting it.
+///
+/// Folders carry their owning `library_id` directly and connections
+/// reference theirs through the single-library ancestry invariant, so
+/// "filed in the library" is a flat filter — no subtree walk. Nothing is
+/// re-filed and nothing survives inside a deleted library, so
+/// `moved_connection_ids` is always empty here: library deletion
+/// deletes connections, it never moves them.
+fn apply_library_deletion(
+    document: &mut LibraryDocument,
+    library_id: &str,
+) -> Result<CascadedIds, LibraryError> {
+    // Resolve the library before touching anything; an unknown id is a
+    // typed rejection, never a silent no-op (same stance as moves and
+    // folder deletion).
+    if !document
+        .libraries
+        .iter()
+        .any(|library| library.id == library_id)
+    {
+        return Err(LibraryError::UnknownNode {
+            node: NodeId::library(library_id),
+        });
+    }
+
+    // Capture the exact outcome (Req 10.18) in document order BEFORE
+    // mutating, so the returned counts and IDs describe precisely what
+    // the transaction below applies.
+    let deleted_folder_ids: Vec<String> = document
+        .folders
+        .iter()
+        .filter(|folder| folder.library_id == library_id)
+        .map(|folder| folder.id.clone())
+        .collect();
+    let deleted_connection_ids: Vec<String> = document
+        .connections
+        .iter()
+        .filter(|connection| connection.library_id == library_id)
+        .map(|connection| connection.id.clone())
+        .collect();
+
+    document
+        .libraries
+        .retain(|library| library.id != library_id);
+    document
+        .folders
+        .retain(|folder| folder.library_id != library_id);
+    document
+        .connections
+        .retain(|connection| connection.library_id != library_id);
+
+    Ok(CascadedIds {
+        deleted_folder_ids,
+        deleted_connection_ids,
+        moved_connection_ids: Vec::new(),
     })
 }
 
@@ -4396,6 +4535,256 @@ mod folder_deletion_tests {
             before_tree,
             "a rejected deletion changes nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod library_deletion_tests {
+    //! Task 7.3 (Req 10.2/10.17/10.18): library deletion through
+    //! [`LibraryStore::delete_library`] — ONE serialized snapshot →
+    //! change → validate → persist → publish transaction (design
+    //! "Storage transactions and recovery" + "Destructive actions and
+    //! identity"). The library, every folder filed in it (at any depth)
+    //! and every connection filed in it (root or nested) disappear in
+    //! that single transaction; other libraries survive untouched. The
+    //! returned [`CascadedIds`] states the exact counts/IDs for the
+    //! 10.18 confirmation surface, and
+    //! [`LibraryStore::library_connection_ids`] is the preview the
+    //! command coordination layer stops sessions against. Session-actor
+    //! and keyring coordination over these primitives is pinned in
+    //! `commands::deletion` tests. Every rejection — unknown library,
+    //! write-blocked recovery, failed persist — retains the previous
+    //! in-memory snapshot and on-disk file.
+
+    use super::*;
+    use crate::store::connections::ConnectionConfig;
+    use uuid::Uuid;
+
+    const MALFORMED: &str = "{ not a library document";
+    const MISSING_ID: &str = "00000000-0000-4000-8000-000000000000";
+
+    fn store_at(root: &std::path::Path, file: &str) -> LibraryStore {
+        LibraryStore::open(root.join(file))
+    }
+
+    fn conn(library_id: &str, folder_id: Option<&str>, name: &str) -> ConnectionConfig {
+        let now = Utc::now();
+        ConnectionConfig {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            host: format!("{name}.invalid"),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: library_id.to_string(),
+            folder_id: folder_id.map(str::to_string),
+            created_at: now,
+            updated_at: now,
+            last_connected_at: None,
+        }
+    }
+
+    fn sorted(mut ids: Vec<String>) -> Vec<String> {
+        ids.sort();
+        ids
+    }
+
+    /// Shared fixture: library W with a nested subtree (`f1 > f1a`, a
+    /// root connection and a nested connection) and a second library O
+    /// with one folder and one connection that must survive.
+    struct Fixture {
+        dir: tempfile::TempDir,
+        store: LibraryStore,
+        work: Library,
+        other: Library,
+        f1: Folder,
+        f1a: Folder,
+        fo: Folder,
+        c_root: ConnectionConfig,
+        c_nested: ConnectionConfig,
+        c_o: ConnectionConfig,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let work = Library::new("Work");
+        let other = Library::new("Other");
+        let f1 = Folder::new(&work.id, None, "F1");
+        let f1a = Folder::new(&work.id, Some(f1.id.clone()), "F1a");
+        let fo = Folder::new(&other.id, None, "OtherRoot");
+        let c_root = conn(&work.id, None, "at-work-root");
+        let c_nested = conn(&work.id, Some(&f1a.id), "nested");
+        let c_o = conn(&other.id, Some(&fo.id), "other-lib");
+        store
+            .save(LibraryDocument::new(
+                vec![work.clone(), other.clone()],
+                vec![f1.clone(), f1a.clone(), fo.clone()],
+                vec![c_root.clone(), c_nested.clone(), c_o.clone()],
+            ))
+            .unwrap();
+        Fixture {
+            dir,
+            store,
+            work,
+            other,
+            f1,
+            f1a,
+            fo,
+            c_root,
+            c_nested,
+            c_o,
+        }
+    }
+
+    fn reopened(f: &Fixture) -> LibraryStore {
+        store_at(f.dir.path(), "connections.json")
+    }
+
+    #[test]
+    fn library_deletion_cascades_folders_and_connections_in_one_transaction() {
+        let f = fixture();
+
+        let cascaded = f.store.delete_library(&f.work.id).unwrap();
+        assert_eq!(
+            sorted(cascaded.deleted_folder_ids),
+            sorted(vec![f.f1.id.clone(), f.f1a.id.clone()])
+        );
+        assert_eq!(
+            sorted(cascaded.deleted_connection_ids),
+            sorted(vec![f.c_root.id.clone(), f.c_nested.id.clone()])
+        );
+        assert!(
+            cascaded.moved_connection_ids.is_empty(),
+            "library deletion never re-files connections: they are deleted"
+        );
+
+        // Only the surviving library remains, in the snapshot and on disk.
+        let document = f.store.document().unwrap();
+        let library_ids: Vec<String> = document
+            .libraries
+            .iter()
+            .map(|library| library.id.clone())
+            .collect();
+        assert_eq!(library_ids, vec![f.other.id.clone()]);
+        assert_eq!(document.folders, vec![f.fo.clone()]);
+        assert_eq!(document.connections, vec![f.c_o.clone()]);
+
+        let disk = reopened(&f).document().unwrap();
+        assert_eq!(disk.libraries.len(), 1);
+        assert_eq!(disk.connections, vec![f.c_o.clone()]);
+    }
+
+    #[test]
+    fn preview_lists_every_connection_of_the_library_only() {
+        let f = fixture();
+
+        let preview = f.store.library_connection_ids(&f.work.id).unwrap();
+        assert_eq!(
+            sorted(preview),
+            sorted(vec![f.c_root.id.clone(), f.c_nested.id.clone()])
+        );
+        assert_eq!(
+            sorted(f.store.library_connection_ids(&f.other.id).unwrap()),
+            vec![f.c_o.id.clone()]
+        );
+    }
+
+    #[test]
+    fn deleting_the_last_library_yields_a_valid_empty_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let only = Library::new("Only");
+        store
+            .save(LibraryDocument::new(
+                vec![only.clone()],
+                Vec::new(),
+                Vec::new(),
+            ))
+            .unwrap();
+
+        let cascaded = store.delete_library(&only.id).unwrap();
+        assert!(cascaded.deleted_folder_ids.is_empty());
+        assert!(cascaded.deleted_connection_ids.is_empty());
+        let document = store.document().unwrap();
+        assert!(document.libraries.is_empty());
+        assert!(
+            store_at(dir.path(), "connections.json")
+                .document()
+                .unwrap()
+                .libraries
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn deleting_or_previewing_an_unknown_library_is_a_typed_error() {
+        let f = fixture();
+        let before_tree = f.store.list_tree().unwrap();
+
+        assert_eq!(
+            f.store.delete_library(MISSING_ID),
+            Err(LibraryStoreError::Invalid(LibraryError::UnknownNode {
+                node: NodeId::library(MISSING_ID)
+            }))
+        );
+        assert_eq!(
+            f.store.library_connection_ids(MISSING_ID),
+            Err(LibraryStoreError::Invalid(LibraryError::UnknownNode {
+                node: NodeId::library(MISSING_ID)
+            }))
+        );
+        assert_eq!(
+            f.store.list_tree().unwrap(),
+            before_tree,
+            "a rejected deletion changes nothing"
+        );
+    }
+
+    #[test]
+    fn failed_persist_retains_the_snapshot_and_the_on_disk_file() {
+        let f = fixture();
+        f.store.fail_next_commit();
+
+        let error = f.store.delete_library(&f.work.id).unwrap_err();
+        assert!(
+            matches!(error, LibraryStoreError::PersistFailed { .. }),
+            "injected commit failure surfaces as PersistFailed: {error:?}"
+        );
+
+        // In-memory snapshot retained…
+        let document = f.store.document().unwrap();
+        assert_eq!(document.libraries.len(), 2);
+        assert_eq!(document.connections.len(), 3);
+        // …and the on-disk file with it (restart validity after failure).
+        let disk = reopened(&f).document().unwrap();
+        assert_eq!(disk.libraries.len(), 2);
+        assert_eq!(disk.connections.len(), 3);
+    }
+
+    #[test]
+    fn write_blocked_store_rejects_the_deletion_and_the_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        std::fs::write(&path, MALFORMED).unwrap();
+        let store = LibraryStore::open(&path);
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+
+        assert!(matches!(
+            store.delete_library(MISSING_ID),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        assert!(matches!(
+            store.library_connection_ids(MISSING_ID),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        // Nothing was written over the invalid file.
+        assert_eq!(std::fs::read(&path).unwrap(), MALFORMED.as_bytes());
     }
 }
 

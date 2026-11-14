@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod connection;
+pub mod deletion;
 pub mod library;
 pub mod session;
 pub mod settings;

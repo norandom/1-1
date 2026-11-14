@@ -193,7 +193,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Exact removed/moved counts match preview; credentials and active sessions survive failed/successful operations.
   - _Boundary: Folder deletion_
   - _Requirements: 10.16,10.18_
-- [ ] 7.3 Coordinate connection/library deletion with actors
+- [x] 7.3 Coordinate connection/library deletion with actors
   - Explicit integration task: serialize affected connect/delete operations, cancel retries, await stop up to five seconds, persist deletion then clean keyring best-effort.
   - Done: Timeout/persist failure retains saved data; race/restart tests confirm stopped-session and cleanup semantics.
   - _Boundary: Deletion integration_

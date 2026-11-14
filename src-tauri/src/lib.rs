@@ -178,12 +178,13 @@ pub fn run() {
             // Clipboard commands
             commands::clipboard::clipboard_write,
             commands::clipboard::clipboard_read,
-            // Library commands (tasks 6.4/6.5/7.2, Req 10.1/10.2/10.3/10.5/10.8/10.15/10.16/10.18)
+            // Library commands (tasks 6.4/6.5/7.2/7.3, Req 10.1/10.2/10.3/10.5/10.8/10.15/10.16/10.17/10.18)
             commands::library::create_library,
             commands::library::rename_library,
             commands::library::create_folder,
             commands::library::rename_folder,
             commands::library::delete_folder,
+            commands::library::delete_library,
             commands::library::move_node,
             commands::library::list_tree,
             commands::library::list_descendants,
