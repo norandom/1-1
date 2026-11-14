@@ -110,6 +110,28 @@ pub struct LibraryTree {
     pub connections: Vec<ConnectionSummary>,
 }
 
+/// Exact removal/move outcome of a destructive tree operation (Req 10.18,
+/// design "Destructive actions and identity"): the deletion surface returns
+/// precise counts — each list's length — plus the affected IDs, so the
+/// confirmation UI (group 8) can state them verbatim. Folder deletion
+/// (task 7.2) fills `deleted_folder_ids` and `moved_connection_ids` and
+/// always leaves `deleted_connection_ids` empty: descendants move to the
+/// library root instead of being deleted (Req 10.16). Library deletion
+/// (task 7.3) will reuse the shape with deleted connections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CascadedIds {
+    /// Every folder removed by the operation, in document order (the
+    /// selected folder plus all nested folders for a folder deletion).
+    pub deleted_folder_ids: Vec<String>,
+    /// Connections removed by the operation. Empty for folder deletion.
+    pub deleted_connection_ids: Vec<String>,
+    /// Connections re-filed at a library root. Their IDs — and therefore
+    /// their keyring accounts and active-session references — are
+    /// unchanged (Req 10.16).
+    pub moved_connection_ids: Vec<String>,
+}
+
 /// Kinds of addressable tree nodes (mirrors the TS `NodeId` union).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1416,6 +1438,25 @@ impl LibraryStore {
         })
     }
 
+    /// Req 10.16/10.18 (task 7.2): delete a folder subtree in ONE serialized
+    /// store transaction. The folder and every nested folder are removed;
+    /// every descendant connection — at any depth — is re-filed at the SAME
+    /// library's root (`folder_id -> None`, `library_id` unchanged), never
+    /// deleted. Connection IDs are unchanged, so keyring accounts (service +
+    /// connection ID) and active-session references keep resolving; the
+    /// deletion path performs no keyring cleanup for moved records (design
+    /// "Destructive actions and identity"). Returns the exact cascaded
+    /// counts/IDs ([`CascadedIds`]) so the confirmation surface can state
+    /// them (Req 10.18). Unknown folder IDs are typed rejections; a
+    /// write-blocked store refuses the deletion; a failed persist retains
+    /// the previous snapshot and on-disk file.
+    pub fn delete_folder(&self, id: &str) -> Result<CascadedIds, LibraryStoreError> {
+        self.mutate(|mut next| {
+            let cascaded = apply_folder_deletion(&mut next, id)?;
+            Ok((next, cascaded))
+        })
+    }
+
     // ---- Task 6.6: connection CRUD, reads, duplication (Req 1.1-1.5,
     // 10.7, 10.19, 12.10) — the retired v1 ConnectionStore behavior
     // unified onto the single-lock transaction core. Commands in
@@ -1704,6 +1745,34 @@ impl LibraryStore {
     }
 }
 
+/// Folder ids of the whole subtree rooted at `root_id` (inclusive), via a
+/// children index and iterative BFS so deep nesting cannot overflow the
+/// stack. Owned ids so callers can keep the set while mutating the
+/// document. Shared by tree moves ([`apply_move`]) and folder deletion
+/// ([`apply_folder_deletion`]).
+fn folder_subtree(folders: &[Folder], root_id: &str) -> HashSet<String> {
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for folder in folders {
+        if let Some(parent) = folder.parent_id.as_deref() {
+            children.entry(parent).or_default().push(folder.id.as_str());
+        }
+    }
+    let mut subtree: HashSet<String> = HashSet::from([root_id.to_string()]);
+    let mut queue: VecDeque<String> = VecDeque::from([root_id.to_string()]);
+    while let Some(current) = queue.pop_front() {
+        for child in children
+            .get(current.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            if subtree.insert((*child).to_string()) {
+                queue.push_back((*child).to_string());
+            }
+        }
+    }
+    subtree
+}
+
 /// Pure tree-move core of [`LibraryStore::move_node`] (task 6.5): apply
 /// the move to the proposed snapshot in place; the surrounding
 /// transaction validates the result before persisting it.
@@ -1757,29 +1826,11 @@ fn apply_move(
             // iterative so deep nesting cannot overflow): the moved
             // folder plus every descendant that follows it across
             // libraries.
-            let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
-            for folder in &document.folders {
-                if let Some(parent) = folder.parent_id.as_deref() {
-                    children.entry(parent).or_default().push(folder.id.as_str());
-                }
-            }
-            let mut subtree: HashSet<String> = HashSet::from([node.id.clone()]);
-            let mut queue: VecDeque<String> = VecDeque::from([node.id.clone()]);
-            while let Some(current) = queue.pop_front() {
-                for child in children
-                    .get(current.as_str())
-                    .map(Vec::as_slice)
-                    .unwrap_or_default()
-                {
-                    if subtree.insert((*child).to_string()) {
-                        queue.push_back((*child).to_string());
-                    }
-                }
-            }
+            let subtree = folder_subtree(&document.folders, &node.id);
             // A folder cannot move into its own subtree — this also covers
             // moving onto itself: either would form a parent cycle
             // (design "LibraryStore v2" / "Storage transactions").
-            if target.kind == NodeKind::Folder && subtree.contains(&target.id) {
+            if target.kind == NodeKind::Folder && subtree.contains(target.id.as_str()) {
                 return Err(LibraryError::FolderCycle { folder_id: node.id });
             }
 
@@ -1788,7 +1839,7 @@ fn apply_move(
                 if folder.id == node.id {
                     folder.parent_id = new_parent.clone();
                     folder.library_id = target_library_id.clone();
-                } else if subtree.contains(&folder.id) {
+                } else if subtree.contains(folder.id.as_str()) {
                     folder.library_id = target_library_id.clone();
                 }
             }
@@ -1818,6 +1869,79 @@ fn apply_move(
         NodeKind::Library => unreachable!("library move sources are rejected up front"),
     }
     Ok(())
+}
+
+/// Pure deletion core of [`LibraryStore::delete_folder`] (task 7.2, Req
+/// 10.16): remove the folder subtree and re-file every descendant
+/// connection at the same library's root, in the proposed snapshot in
+/// place. The surrounding transaction validates the result before
+/// persisting it.
+///
+/// Single-library ancestry (the document invariant) guarantees the whole
+/// subtree and every connection filed inside it belong to the selected
+/// folder's one library, so the survivors keep their `library_id` — the
+/// ONLY field that changes is the re-filed connections' `folder_id`.
+fn apply_folder_deletion(
+    document: &mut LibraryDocument,
+    folder_id: &str,
+) -> Result<CascadedIds, LibraryError> {
+    // Resolve the folder before touching anything; an unknown id is a
+    // typed rejection, never a silent no-op (same stance as moves).
+    if !document.folders.iter().any(|folder| folder.id == folder_id) {
+        return Err(LibraryError::UnknownNode {
+            node: NodeId::folder(folder_id),
+        });
+    }
+    let subtree = folder_subtree(&document.folders, folder_id);
+
+    // Capture the exact outcome (Req 10.18) in document order BEFORE
+    // mutating, so the returned counts and IDs describe precisely what
+    // the transaction below applies.
+    let deleted_folder_ids: Vec<String> = document
+        .folders
+        .iter()
+        .filter(|folder| subtree.contains(folder.id.as_str()))
+        .map(|folder| folder.id.clone())
+        .collect();
+    let moved_connection_ids: Vec<String> = document
+        .connections
+        .iter()
+        .filter(|connection| {
+            connection
+                .folder_id
+                .as_deref()
+                .is_some_and(|filed_under| subtree.contains(filed_under))
+        })
+        .map(|connection| connection.id.clone())
+        .collect();
+
+    // Remove the folder and every nested folder…
+    document
+        .folders
+        .retain(|folder| !subtree.contains(folder.id.as_str()));
+    // …and re-file every descendant connection — at any depth — at the
+    // library root. IDs, `library_id`, settings and timestamps are
+    // untouched, so keyring accounts (service + connection ID) and
+    // active-session references keep resolving (Req 10.16); no keyring
+    // cleanup exists for moved records (design "Destructive actions and
+    // identity").
+    for connection in &mut document.connections {
+        if connection
+            .folder_id
+            .as_deref()
+            .is_some_and(|filed_under| subtree.contains(filed_under))
+        {
+            connection.folder_id = None;
+        }
+    }
+
+    Ok(CascadedIds {
+        deleted_folder_ids,
+        // Folder deletion never deletes connections (Req 10.16) — the
+        // field stays available for library deletion (task 7.3).
+        deleted_connection_ids: Vec::new(),
+        moved_connection_ids,
+    })
 }
 
 /// Store-layer input validation for entity names, so the IPC commands stay
@@ -3856,6 +3980,422 @@ mod move_tests {
         ));
         // Nothing was written over the invalid file.
         assert_eq!(std::fs::read(&path).unwrap(), MALFORMED.as_bytes());
+    }
+
+    #[test]
+    fn folder_move_to_library_root_refiles_subtree_parent_none() {
+        // tasks.md Implementation Note (task 7.2): the direct folder →
+        // library-root move (parent -> None + subtree `library_id` rewrite)
+        // was the one unpinned branch of `apply_move` — folder deletion
+        // (7.2) shares exactly this re-filing code path, so the pin lands
+        // with it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let a = Library::new("A");
+        let b = Library::new("B");
+        let holder = Folder::new(&a.id, None, "Holder");
+        let moving = Folder::new(&a.id, Some(holder.id.clone()), "Moving");
+        let nested = Folder::new(&a.id, Some(moving.id.clone()), "Nested");
+        let c_moving = conn(&a.id, Some(&moving.id), "mid");
+        let c_nested = conn(&a.id, Some(&nested.id), "deep");
+        store
+            .save(LibraryDocument::new(
+                vec![a.clone(), b.clone()],
+                vec![holder.clone(), moving.clone(), nested.clone()],
+                vec![c_moving.clone(), c_nested.clone()],
+            ))
+            .unwrap();
+
+        // Same library: re-file `moving` at A's root.
+        store
+            .move_node(
+                NodeId::folder(moving.id.clone()),
+                NodeId::library(a.id.clone()),
+            )
+            .unwrap();
+        let tree = store.list_tree().unwrap();
+        let moved = folder_of(&tree, &moving.id);
+        assert_eq!(
+            moved.parent_id, None,
+            "a library target means that library's root"
+        );
+        assert_eq!(moved.library_id, a.id);
+        let child = folder_of(&tree, &nested.id);
+        assert_eq!(
+            child.parent_id.as_deref(),
+            Some(moving.id.as_str()),
+            "descendant folders keep their parent inside the moved subtree"
+        );
+        assert_eq!(child.library_id, a.id);
+        // Connections stay filed INSIDE the moved subtree — only deletion
+        // (7.2) re-files them at the root.
+        let mid = connection_of(&tree, &c_moving.id);
+        assert_eq!(mid.folder_id.as_deref(), Some(moving.id.as_str()));
+        assert_eq!(mid.library_id, a.id);
+        let deep = connection_of(&tree, &c_nested.id);
+        assert_eq!(deep.folder_id.as_deref(), Some(nested.id.as_str()));
+        assert_eq!(deep.library_id, a.id);
+
+        // Cross library: the same direct-to-root move rewrites the whole
+        // subtree's library ancestry onto B.
+        store
+            .move_node(
+                NodeId::folder(moving.id.clone()),
+                NodeId::library(b.id.clone()),
+            )
+            .unwrap();
+        let tree = store.list_tree().unwrap();
+        let moved = folder_of(&tree, &moving.id);
+        assert_eq!(moved.parent_id, None);
+        assert_eq!(moved.library_id, b.id);
+        let child = folder_of(&tree, &nested.id);
+        assert_eq!(
+            child.library_id, b.id,
+            "descendant folder follows across libraries"
+        );
+        assert_eq!(
+            connection_of(&tree, &c_moving.id).library_id,
+            b.id,
+            "subtree connection follows its folder across libraries"
+        );
+        assert_eq!(connection_of(&tree, &c_nested.id).library_id, b.id);
+        // The untouched folder stays filed in A.
+        assert_eq!(folder_of(&tree, &holder.id).library_id, a.id);
+
+        // Persisted atomically: a fresh store over the same file agrees.
+        let reopened = store_at(dir.path(), "connections.json");
+        assert_eq!(reopened.list_tree().unwrap(), tree);
+    }
+}
+
+#[cfg(test)]
+mod folder_deletion_tests {
+    //! Task 7.2 (Req 10.16/10.18): folder deletion through
+    //! [`LibraryStore::delete_folder`] — ONE serialized snapshot → change →
+    //! validate → persist → publish transaction (design "Storage
+    //! transactions and recovery" + "Destructive actions and identity").
+    //! The folder and every nested folder disappear; every descendant
+    //! connection — at any depth — is re-filed at the SAME library's root
+    //! with its ID (and therefore its keyring account and active-session
+    //! references) unchanged; nothing but folders is deleted. The returned
+    //! [`CascadedIds`] states the exact counts and IDs for the 10.18
+    //! confirmation surface. Credentials and sessions are structurally
+    //! untouched on this path (no keyring call exists between
+    //! `delete_folder` and `mutate`; the session manager is never
+    //! addressed) — the cross-subsystem survival guarantees are pinned in
+    //! `store::credentials::folder_deletion_tests` (keyring) and
+    //! `commands::library::tests` (live sessions). Every rejection —
+    //! unknown folder, write-blocked recovery, failed persist — retains
+    //! the previous in-memory snapshot and on-disk file.
+
+    use super::*;
+    use crate::store::connections::ConnectionConfig;
+    use uuid::Uuid;
+
+    const MALFORMED: &str = "{ not a library document";
+    const MISSING_ID: &str = "00000000-0000-4000-8000-000000000000";
+
+    fn store_at(root: &std::path::Path, file: &str) -> LibraryStore {
+        LibraryStore::open(root.join(file))
+    }
+
+    fn conn(library_id: &str, folder_id: Option<&str>, name: &str) -> ConnectionConfig {
+        let now = Utc::now();
+        ConnectionConfig {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            host: format!("{name}.invalid"),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: library_id.to_string(),
+            folder_id: folder_id.map(str::to_string),
+            created_at: now,
+            updated_at: now,
+            last_connected_at: None,
+        }
+    }
+
+    fn connection_entity(store: &LibraryStore, id: &str) -> ConnectionConfig {
+        store
+            .document()
+            .unwrap()
+            .connections
+            .into_iter()
+            .find(|connection| connection.id == id)
+            .unwrap_or_else(|| panic!("connection {id} missing from snapshot"))
+    }
+
+    fn sorted(mut ids: Vec<String>) -> Vec<String> {
+        ids.sort();
+        ids
+    }
+
+    /// Shared fixture: library W with a three-level subtree
+    /// (`f1 > f1a > f1a1`, connections at every level), an unrelated
+    /// surviving folder `keep` in W, and a second library O with one
+    /// folder and connection.
+    struct Fixture {
+        dir: tempfile::TempDir,
+        store: LibraryStore,
+        work: Library,
+        f1: Folder,
+        f1a: Folder,
+        f1a1: Folder,
+        keep: Folder,
+        other: Library,
+        fo: Folder,
+        c_f1: ConnectionConfig,
+        c_f1a: ConnectionConfig,
+        c_f1a1: ConnectionConfig,
+        c_root: ConnectionConfig,
+        c_keep: ConnectionConfig,
+        c_o: ConnectionConfig,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let work = Library::new("Work");
+        let other = Library::new("Other");
+        let f1 = Folder::new(&work.id, None, "F1");
+        let f1a = Folder::new(&work.id, Some(f1.id.clone()), "F1a");
+        let f1a1 = Folder::new(&work.id, Some(f1a.id.clone()), "F1a1");
+        let keep = Folder::new(&work.id, None, "Keep");
+        let fo = Folder::new(&other.id, None, "OtherRoot");
+        let c_f1 = conn(&work.id, Some(&f1.id), "depth-1");
+        let c_f1a = conn(&work.id, Some(&f1a.id), "depth-2");
+        let c_f1a1 = conn(&work.id, Some(&f1a1.id), "depth-3");
+        let c_root = conn(&work.id, None, "already-root");
+        let c_keep = conn(&work.id, Some(&keep.id), "keeper");
+        let c_o = conn(&other.id, Some(&fo.id), "other-lib");
+        store
+            .save(LibraryDocument::new(
+                vec![work.clone(), other.clone()],
+                vec![
+                    f1.clone(),
+                    f1a.clone(),
+                    f1a1.clone(),
+                    keep.clone(),
+                    fo.clone(),
+                ],
+                vec![
+                    c_f1.clone(),
+                    c_f1a.clone(),
+                    c_f1a1.clone(),
+                    c_root.clone(),
+                    c_keep.clone(),
+                    c_o.clone(),
+                ],
+            ))
+            .unwrap();
+        Fixture {
+            dir,
+            store,
+            work,
+            f1,
+            f1a,
+            f1a1,
+            keep,
+            other,
+            fo,
+            c_f1,
+            c_f1a,
+            c_f1a1,
+            c_root,
+            c_keep,
+            c_o,
+        }
+    }
+
+    #[test]
+    fn folder_deletion_removes_subtree_and_moves_connections_to_library_root() {
+        let f = fixture();
+        let cascaded = f.store.delete_folder(&f.f1.id).unwrap();
+
+        // Exact counts and separated IDs (Req 10.18): three folders gone,
+        // three connections moved, zero connections deleted.
+        assert_eq!(cascaded.deleted_folder_ids.len(), 3);
+        assert_eq!(
+            sorted(cascaded.deleted_folder_ids),
+            sorted(vec![f.f1.id.clone(), f.f1a.id.clone(), f.f1a1.id.clone()]),
+            "the folder and every nested folder is removed"
+        );
+        assert_eq!(
+            sorted(cascaded.moved_connection_ids),
+            sorted(vec![
+                f.c_f1.id.clone(),
+                f.c_f1a.id.clone(),
+                f.c_f1a1.id.clone()
+            ]),
+            "descendants at every depth move"
+        );
+        assert!(
+            cascaded.deleted_connection_ids.is_empty(),
+            "folder deletion never deletes connections (Req 10.16)"
+        );
+
+        // Tree shape: only the untouched folders survive, and no connection
+        // was lost.
+        let tree = f.store.list_tree().unwrap();
+        assert_eq!(
+            tree.folders.len(),
+            2,
+            "subtree folders are gone: {:?}",
+            tree.folders
+        );
+        assert_eq!(tree.connections.len(), 6, "no connection was deleted");
+        assert!(tree.folders.iter().any(|folder| folder.id == f.keep.id));
+        assert!(tree.folders.iter().any(|folder| folder.id == f.fo.id));
+
+        // Every descendant connection now sits at W's root — same library.
+        for id in [&f.c_f1.id, &f.c_f1a.id, &f.c_f1a1.id] {
+            let summary = tree
+                .connections
+                .iter()
+                .find(|connection| &connection.id == id)
+                .unwrap_or_else(|| panic!("connection {id} missing after deletion"));
+            assert_eq!(summary.folder_id, None, "{id} re-filed at the library root");
+            assert_eq!(
+                summary.library_id, f.work.id,
+                "{id} stays in the same library"
+            );
+        }
+
+        // Untouched placements: an already-root connection, an unrelated
+        // folder's connection, and the other library's subtree.
+        let c_root = tree
+            .connections
+            .iter()
+            .find(|connection| connection.id == f.c_root.id)
+            .unwrap();
+        assert_eq!(c_root.folder_id, None);
+        let c_keep = tree
+            .connections
+            .iter()
+            .find(|connection| connection.id == f.c_keep.id)
+            .unwrap();
+        assert_eq!(c_keep.folder_id.as_deref(), Some(f.keep.id.as_str()));
+        let c_o = tree
+            .connections
+            .iter()
+            .find(|connection| connection.id == f.c_o.id)
+            .unwrap();
+        assert_eq!(c_o.library_id, f.other.id);
+        assert_eq!(c_o.folder_id.as_deref(), Some(f.fo.id.as_str()));
+
+        // ONE transaction: the persisted file already reflects exactly the
+        // post-deletion tree (a fresh store over the same file agrees).
+        let reopened = store_at(f.dir.path(), "connections.json");
+        assert_eq!(reopened.list_tree().unwrap(), tree);
+    }
+
+    #[test]
+    fn moved_connections_keep_their_exact_entity_and_id() {
+        let f = fixture();
+        f.store.delete_folder(&f.f1.id).unwrap();
+
+        for original in [&f.c_f1, &f.c_f1a, &f.c_f1a1] {
+            let moved = connection_entity(&f.store, &original.id);
+            assert_eq!(
+                moved.id, original.id,
+                "keyring accounts (service + connection id) and session references keep resolving"
+            );
+            let mut expected = original.clone();
+            expected.folder_id = None; // the ONLY change
+            assert_eq!(
+                moved, expected,
+                "ids, settings and timestamps are untouched by the move to the root"
+            );
+        }
+    }
+
+    #[test]
+    fn deleting_an_empty_folder_reports_zero_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path(), "connections.json");
+        let work = Library::new("Work");
+        let empty = Folder::new(&work.id, None, "Empty");
+        store
+            .save(LibraryDocument::new(
+                vec![work],
+                vec![empty.clone()],
+                vec![],
+            ))
+            .unwrap();
+
+        let cascaded = store.delete_folder(&empty.id).unwrap();
+
+        assert_eq!(cascaded.deleted_folder_ids, vec![empty.id.clone()]);
+        assert!(
+            cascaded.moved_connection_ids.is_empty(),
+            "no descendant connections exist to move"
+        );
+        assert!(cascaded.deleted_connection_ids.is_empty());
+        assert_eq!(store.list_tree().unwrap().folders.len(), 0);
+    }
+
+    #[test]
+    fn failed_persist_retains_snapshot_and_file_exactly() {
+        let f = fixture();
+        let path = f.dir.path().join("connections.json");
+        let before_tree = f.store.list_tree().unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+
+        // Force the atomic persist to fail after validation. The seam is
+        // OS-independent and root-proof (CI runs as root; permission-based
+        // injections are banned).
+        f.store.fail_next_commit();
+        let err = f.store.delete_folder(&f.f1.id).unwrap_err();
+
+        assert!(
+            matches!(err, LibraryStoreError::PersistFailed { .. }),
+            "got {err:?}"
+        );
+        // Rollback: the previous snapshot is retained in memory AND the
+        // file keeps its exact bytes — same folder and connection counts,
+        // same IDs, same placements.
+        assert_eq!(f.store.list_tree().unwrap(), before_tree);
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+    }
+
+    #[test]
+    fn write_blocked_store_rejects_folder_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        std::fs::write(&path, MALFORMED).unwrap();
+        let store = LibraryStore::open(&path);
+        assert!(matches!(store.status(), StoreStatus::WriteBlocked { .. }));
+
+        assert!(matches!(
+            store.delete_folder(MISSING_ID),
+            Err(LibraryStoreError::WriteBlocked { .. })
+        ));
+        // Nothing was written over the invalid file.
+        assert_eq!(std::fs::read(&path).unwrap(), MALFORMED.as_bytes());
+    }
+
+    #[test]
+    fn deleting_an_unknown_folder_is_a_typed_error() {
+        let f = fixture();
+        let before_tree = f.store.list_tree().unwrap();
+
+        assert_eq!(
+            f.store.delete_folder(MISSING_ID),
+            Err(LibraryStoreError::Invalid(LibraryError::UnknownNode {
+                node: NodeId::folder(MISSING_ID)
+            }))
+        );
+        assert_eq!(
+            f.store.list_tree().unwrap(),
+            before_tree,
+            "a rejected deletion changes nothing"
+        );
     }
 }
 

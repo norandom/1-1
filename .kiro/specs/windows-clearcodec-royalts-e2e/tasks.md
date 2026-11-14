@@ -188,7 +188,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Concurrent Connect requests yield one actor and returned session ID; explicit close then Connect gets a new identity.
   - _Boundary: Session identity_
   - _Requirements: 2.2,10.4,10.6,11.4,11.8,11.9_
-- [ ] 7.2 Delete folders without deleting connections
+- [x] 7.2 Delete folders without deleting connections
   - Remove entire folder subtree and move descendants to library root in a single store transaction.
   - Done: Exact removed/moved counts match preview; credentials and active sessions survive failed/successful operations.
   - _Boundary: Folder deletion_

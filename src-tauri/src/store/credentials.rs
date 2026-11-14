@@ -126,8 +126,10 @@ mod tests {
     }
 
     /// Restores the keyring mock builder on drop so a later test in the same
-    /// process never inherits a scripted/failing builder.
-    struct BuilderGuard;
+    /// process never inherits a scripted/failing builder. `pub(super)`:
+    /// returned by [`install_scripted`], shared with
+    /// `folder_deletion_tests` (task 7.2).
+    pub(super) struct BuilderGuard;
     impl BuilderGuard {
         fn install(builder: Box<CredentialBuilder>) -> Self {
             set_default_credential_builder(builder);
@@ -140,9 +142,10 @@ mod tests {
         }
     }
 
-    /// Which failure a scripted keyring operation returns.
+    /// Which failure a scripted keyring operation returns. `pub(super)`:
+    /// named by [`install_scripted`]'s signature.
     #[derive(Clone, Copy)]
-    enum Fail {
+    pub(super) enum Fail {
         NoEntry,
         Platform,
     }
@@ -239,7 +242,9 @@ mod tests {
         }
     }
 
-    fn install_scripted(
+    /// Install the scripted keyring builder process-wide (restored on
+    /// drop). `pub(super)`: shared with `folder_deletion_tests` (task 7.2).
+    pub(super) fn install_scripted(
         seen: Arc<Mutex<Vec<(String, String)>>>,
         fail_build: bool,
         fail_set: Option<Fail>,
@@ -593,5 +598,98 @@ mod tests {
                 "cleanup never touches production credentials"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod folder_deletion_tests {
+    //! Task 7.2 (Req 10.16): folder deletion re-files descendant
+    //! connections at the library root but must NEVER touch the keyring —
+    //! a credential account is service + connection ID, moved records keep
+    //! their IDs, and no keyring cleanup exists for moved records (design
+    //! "Destructive actions and identity"). Pinned through the same
+    //! scripted keyring seam as the task 3.1/5.1 tests: the recorded call
+    //! log stays unchanged across the deletion (not even a delete call)
+    //! and a stored entry still resolves afterwards under the same
+    //! account.
+    //!
+    //! Live-session survival for the same operation is pinned in
+    //! `commands::library::tests`.
+
+    use super::CredentialStore;
+    use super::tests::install_scripted;
+    use crate::store::connections::ConnectionConfig;
+    use crate::store::library::{Folder, Library, LibraryDocument, LibraryStore};
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[test]
+    fn folder_deletion_never_touches_the_keyring_for_moved_connections() {
+        let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let (_lock, _guard) = install_scripted(Arc::clone(&seen), false, None, None, None);
+        let creds = CredentialStore::new();
+
+        // A folder with one filed connection, persisted through the v2
+        // store — the exact shape `delete_folder` operates on.
+        let dir = tempfile::tempdir().unwrap();
+        let store = LibraryStore::open(dir.path().join("connections.json"));
+        let work = Library::new("Work");
+        let folder = Folder::new(&work.id, None, "F");
+        let nested = Folder::new(&work.id, Some(folder.id.clone()), "Nested");
+        let now = chrono::Utc::now();
+        let conn = ConnectionConfig {
+            id: Uuid::new_v4().to_string(),
+            name: "conn".to_string(),
+            host: "conn.invalid".to_string(),
+            port: 3389,
+            username: String::new(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            mock: false,
+            library_id: work.id.clone(),
+            folder_id: Some(nested.id.clone()),
+            created_at: now,
+            updated_at: now,
+            last_connected_at: None,
+        };
+        store
+            .save(LibraryDocument::new(
+                vec![work],
+                vec![folder.clone(), nested],
+                vec![conn.clone()],
+            ))
+            .unwrap();
+
+        // The user has a stored credential for that connection.
+        creds.store_password(&conn.id, "secret-1").unwrap();
+        let seen_after_setup = seen.lock().unwrap().clone();
+        assert!(
+            !seen_after_setup.is_empty(),
+            "setup itself used the keyring"
+        );
+
+        let cascaded = store.delete_folder(&folder.id).unwrap();
+        assert_eq!(cascaded.moved_connection_ids, vec![conn.id.clone()]);
+        assert!(cascaded.deleted_connection_ids.is_empty());
+
+        // The deletion made NO keyring call of any kind — in particular no
+        // delete for the moved record (design: "no keyring cleanup for
+        // moved records").
+        assert_eq!(
+            &*seen.lock().unwrap(),
+            &seen_after_setup,
+            "folder deletion must not touch the keyring"
+        );
+
+        // The credential still resolves under the SAME account (service +
+        // unchanged connection ID).
+        assert_eq!(
+            creds.get_password(&conn.id).unwrap().as_deref(),
+            Some("secret-1"),
+            "the moved connection's keyring entry survives untouched"
+        );
     }
 }

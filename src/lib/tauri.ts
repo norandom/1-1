@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { Channel } from '@tauri-apps/api/core';
 import type {
+  CascadedIds,
   ConnectionConfig,
   ConnectionSummary,
   Folder,
@@ -228,6 +229,13 @@ export async function createFolder(
 
 export async function renameFolder(id: string, name: string): Promise<Folder> {
   return await invoke<Folder>('rename_folder', { id, name });
+}
+
+// Req 10.16/10.18 (task 7.2): delete a folder subtree; every descendant
+// connection moves to the same library's root (never deleted). Returns
+// the exact cascaded counts/IDs for the confirmation UI; errors reject.
+export async function deleteFolder(id: string): Promise<CascadedIds> {
+  return await invoke<CascadedIds>('delete_folder', { id });
 }
 
 export async function moveNode(

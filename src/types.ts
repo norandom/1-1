@@ -98,6 +98,17 @@ export interface LibraryTree {
   connections: ConnectionSummary[];
 }
 
+// Exact removal/move outcome of a destructive tree operation (task 7.2,
+// Req 10.16/10.18): each list's length is the count the confirmation UI
+// must state; folder deletion never deletes connections, so
+// deletedConnectionIds is empty there and movedConnectionIds carries the
+// re-filed descendants (IDs unchanged).
+export interface CascadedIds {
+  deletedFolderIds: string[];
+  deletedConnectionIds: string[];
+  movedConnectionIds: string[];
+}
+
 export type LibraryStoreStatus =
   | { status: 'ready' }
   | { status: 'writeBlocked'; reason: string; instructions: string };

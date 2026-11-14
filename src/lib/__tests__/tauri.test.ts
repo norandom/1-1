@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import type { ConnectionSummary, Folder, Library, LibraryTree } from '../../types';
+import type { CascadedIds, ConnectionSummary, Folder, Library, LibraryTree } from '../../types';
 
 import {
   createFolder,
   createLibrary,
+  deleteFolder,
   duplicateConnection,
   getLibraryStatus,
   importRdpFile,
@@ -131,6 +132,25 @@ describe('library wrappers (task 6.4, Req 10.1/10.2/10.3/10.5)', () => {
   it('CRUD wrappers reject instead of swallowing command errors', async () => {
     invokeMock.mockRejectedValueOnce(new Error('store is write-blocked'));
     await expect(createLibrary('Work')).rejects.toThrow('store is write-blocked');
+  });
+});
+
+describe('deleteFolder wrapper (task 7.2, Req 10.16/10.18)', () => {
+  it('deleteFolder marshals the id and returns the exact cascaded counts/IDs', async () => {
+    const cascaded: CascadedIds = {
+      deletedFolderIds: ['folder-1', 'folder-1a', 'folder-1a1'],
+      deletedConnectionIds: [],
+      movedConnectionIds: ['conn-1', 'conn-2'],
+    };
+    invokeMock.mockResolvedValueOnce(cascaded);
+
+    await expect(deleteFolder('folder-1')).resolves.toEqual(cascaded);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith('delete_folder', { id: 'folder-1' });
+  });
+
+  it('deleteFolder rejects instead of swallowing command errors', async () => {
+    invokeMock.mockRejectedValueOnce(new Error('unknown tree node'));
+    await expect(deleteFolder('folder-404')).rejects.toThrow('unknown tree node');
   });
 });
 
