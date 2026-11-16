@@ -1,8 +1,10 @@
 import { useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { Monitor, ArrowRight } from 'lucide-react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useConnectionStore } from '../../stores/connectionStore';
+// Task 8.5 (Req 10.6): quick connect goes through the ONE shared
+// connect action, exactly like the tree and the dashboard.
+import { useConnectAction } from '../../hooks/useConnectAction';
 import {
   CommandDialog,
   Command,
@@ -14,17 +16,17 @@ import {
 } from '@/components/ui/command';
 
 export function QuickConnect() {
-  const navigate = useNavigate();
   const show = useSessionStore((s) => s.showQuickConnect);
   const setShow = useSessionStore((s) => s.setShowQuickConnect);
   const connections = useConnectionStore((s) => s.connections);
+  const { connectById } = useConnectAction();
 
   const handleConnect = useCallback(
     (connectionId: string) => {
       setShow(false);
-      navigate(`/session/${connectionId}`);
+      connectById(connectionId);
     },
-    [navigate, setShow]
+    [setShow, connectById]
   );
 
   // Reset on open handled by CommandDialog mounting fresh

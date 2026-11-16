@@ -4,7 +4,9 @@ import { AnimatePresence } from 'framer-motion';
 import { Titlebar } from './components/layout/Titlebar';
 import { Sidebar } from './components/layout/Sidebar';
 import { StatusBar } from './components/layout/StatusBar';
-import { ConnectionGrid } from './components/connections/ConnectionGrid';
+// Task 8.5 (Req 11.5): the `/` panel is selection-driven — the dashboard
+// of the selected node or the start view (quick connect + shortcuts).
+import { MainPanel } from './components/dashboard/MainPanel';
 import { ConnectionForm } from './components/connections/ConnectionForm';
 import { QuickConnect } from './components/connections/QuickConnect';
 import { SessionView } from './components/session/SessionView';
@@ -64,7 +66,7 @@ export default function App() {
           <main className="flex-1 min-w-0 overflow-hidden">
             <ErrorBoundary>
               <Routes>
-                <Route path="/" element={<ConnectionGrid />} />
+                <Route path="/" element={<MainPanel />} />
                 <Route path="/session/:id" element={<SessionView />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>

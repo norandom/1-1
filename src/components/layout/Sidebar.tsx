@@ -131,7 +131,12 @@ export function Sidebar() {
                 variant="ghost"
                 aria-label={entry.accessibleName}
                 className="relative h-11 w-11 rounded-xl"
-                onClick={() => selectNode(entry.library)}
+                onClick={() => {
+                  // Task 8.5 (Req 10.5/11.6): a rail library click selects
+                  // it and shows its dashboard, sessions untouched.
+                  selectNode(entry.library);
+                  if (location.pathname !== '/') navigate('/');
+                }}
               >
                 <LibraryIcon size={20} />
                 <span

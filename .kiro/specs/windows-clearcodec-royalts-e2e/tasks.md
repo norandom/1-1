@@ -225,7 +225,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Drag and keyboard subtree moves persist; rejected writes restore visible location and focus.
   - _Boundary: Move UI_
   - _Requirements: 10.8,10.14,10.15_
-- [ ] 8.5 Connect dashboards and start view
+- [x] 8.5 Connect dashboards and start view
   - Reuse card/form/quick-connect patterns; select nodes without closing sessions and show descendants.
   - Done: Dashboard double-click and tree Connect share one action; empty/no-selection states and live status are correct.
   - _Boundary: Dashboard integration_

@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   DndContext,
   KeyboardSensor,
@@ -54,6 +54,8 @@ import {
   predictLibraryDeletion,
 } from '../../lib/tree-confirm';
 import { ConnectionForm } from '../connections/ConnectionForm';
+// Task 8.5 (Req 10.6): the ONE shared connect action (design.md L379).
+import { useConnectAction } from '../../hooks/useConnectAction';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -270,6 +272,7 @@ function TreeRow({
 
 export function ConnectionTree() {
   const navigate = useNavigate();
+  const location = useLocation();
 
   // Tree state (8.2 store): tree/selection/expansion persisted, filter.
   const tree = useLibraryStore((s) => s.tree);
@@ -329,9 +332,18 @@ export function ConnectionTree() {
   };
 
   // ── Actions (10.6 connect path today: the session view; tabs are 8.6) ──
-  const connectNode = (node: NodeId): void => {
-    selectNode(node);
-    navigate(`/session/${node.id}`);
+  // Task 8.5: connect goes through the ONE shared action — the dashboard
+  // double-click and quick connect use exactly this entry too.
+  const { connect: connectNode } = useConnectAction();
+
+  /**
+   * Req 10.5/11.6: selecting a library/folder shows its dashboard. The
+   * selection drives the `/` main panel; navigating there replaces a
+   * session view WITHOUT disturbing the session (SessionView has no
+   * unmount disconnect; 7.1 admission reconnects it on return).
+   */
+  const showDashboard = (): void => {
+    if (location.pathname !== '/') navigate('/');
   };
 
   const nodeName = (node: NodeId): string => {
@@ -441,6 +453,7 @@ export function ConnectionTree() {
     if (result.action?.type === 'select-dashboard') {
       // Selection is store-owned; the dashboard panel itself is task 8.5.
       selectNode(result.action.node);
+      showDashboard();
     } else if (result.action?.type === 'connect') {
       connectNode(result.action.node);
     } else if (result.action?.type === 'open-context-menu') {
@@ -631,6 +644,8 @@ export function ConnectionTree() {
                 onRowClick={(node, key) => {
                   selectNode(node);
                   setFocusedKey(key);
+                  // Single-click library/folder → its dashboard (10.5).
+                  if (node.kind !== 'connection') showDashboard();
                 }}
                 onConnect={connectNode}
                 onOpenMenu={openMenu}
