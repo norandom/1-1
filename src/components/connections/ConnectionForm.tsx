@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Zap, Check } from 'lucide-react';
 import type { ConnectionConfig } from '../../types';
 import { useConnectionStore } from '../../stores/connectionStore';
@@ -46,7 +46,14 @@ export function ConnectionForm({ connection, onClose }: Props) {
   const addToast = useToastStore((s) => s.addToast);
   // Task 8.2 (Req 10.1): create files into the selected library/folder
   // (a selected connection files next to it); null = backend default.
-  const destination = useLibraryStore(selectNewConnectionDestination);
+  // Raw slice + useMemo (NOT a direct derived selector: unstable snapshots
+  // loop useSyncExternalStore — see ConnectionTree for the full note).
+  const tree = useLibraryStore((s) => s.tree);
+  const selectedNodeId = useLibraryStore((s) => s.selectedNodeId);
+  const destination = useMemo(
+    () => selectNewConnectionDestination({ tree, selectedNodeId }),
+    [tree, selectedNodeId]
+  );
   // Task 8.7 (Req 10.12): every entry point to this form is gated while
   // write-blocked; this guard makes the save itself airtight too.
   const mutationsBlocked = useLibraryStore(selectIsWriteBlocked);

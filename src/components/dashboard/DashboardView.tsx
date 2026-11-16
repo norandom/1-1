@@ -27,7 +27,13 @@ export function DashboardView({ node }: { node: NodeId }) {
   const tree = useLibraryStore((s) => s.tree);
   const sessions = useSessionStore((s) => s.sessions);
   const connections = useConnectionStore((s) => s.connections);
-  const destination = useLibraryStore(selectNewConnectionDestination);
+  // Raw slice + useMemo (NOT a direct derived selector: unstable snapshots
+  // loop useSyncExternalStore — see ConnectionTree for the full note).
+  const selectedNodeId = useLibraryStore((s) => s.selectedNodeId);
+  const destination = useMemo(
+    () => selectNewConnectionDestination({ tree, selectedNodeId }),
+    [tree, selectedNodeId]
+  );
   // Task 8.7 (Req 10.12): the create CTAs are disabled while the store
   // is write-blocked — the dashboard itself stays viewable.
   const mutationsBlocked = useLibraryStore(selectIsWriteBlocked);

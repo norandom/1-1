@@ -311,9 +311,26 @@ export function ConnectionTree() {
   const duplicateConnection = useConnectionStore((s) => s.duplicateConnection);
   const addToast = useToastStore((s) => s.addToast);
 
-  const visible = useLibraryStore(selectVisibleNodes);
-  const effectiveExpansion = useLibraryStore(selectEffectiveExpansion);
-  const filterResult = useLibraryStore(selectFilterResult);
+  // Derived tree views MUST be computed from raw store slices via useMemo:
+  // zustand's useSyncExternalStore caches the selector result, so feeding it
+  // a selector that builds fresh references per call (selectVisibleNodes and
+  // friends) re-renders in an infinite loop (React "getSnapshot should be
+  // cached" -> Maximum update depth exceeded; found by the group-8 cold
+  // launch). All other components follow this same raw-slice + useMemo shape.
+  const tagsById = useLibraryStore((s) => s.tagsById);
+  const expanded = useLibraryStore((s) => s.expanded);
+  const visible = useMemo(
+    () => selectVisibleNodes({ tree, filter, tagsById, expanded }),
+    [tree, filter, tagsById, expanded]
+  );
+  const effectiveExpansion = useMemo(
+    () => selectEffectiveExpansion({ tree, filter, tagsById, expanded }),
+    [tree, filter, tagsById, expanded]
+  );
+  const filterResult = useMemo(
+    () => selectFilterResult({ tree, filter, tagsById }),
+    [tree, filter, tagsById]
+  );
   const isFilterActive = filterResult !== null;
 
   const statuses = useMemo(() => statusesFromSessions(sessions.values()), [sessions]);
