@@ -1,6 +1,7 @@
 pub mod baseline;
 pub mod client;
 pub mod clipboard;
+pub mod codec_policy;
 pub mod display;
 /// Task 5.4 (Req 12.4/12.10): build-gated frame-kind spy. Compiled ONLY in
 /// `test-support` builds; production builds do not contain this module, its

@@ -245,7 +245,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 10.12,10.15_
 
 - [ ] 9. Upstream EGFX and bounded rendering
-- [ ] 9.1 Implement capability policy from proven upstream APIs
+- [x] 9.1 Implement capability policy from proven upstream APIs
   - Use only supported non-AVC flags/versions from the pinned crate; distinguish channel selection and observed update codec.
   - Done: Tests cover supported EGFX codecs, no-EGFX bitmap fallback and absence of AVC advertisement.
   - _Boundary: Codec policy_

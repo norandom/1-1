@@ -123,10 +123,13 @@ pub(crate) fn build_connector_config(
     // fields that the old 0.8 connector hardcoded internally are preserved:
     // `connection_type: Lan` and empty `alternate_shell`/`work_dir` were 0.8
     // constants; `enable_standard_rdp_security: false` matches 0.8, which
-    // rejected standard RDP security at negotiation. New 0.12 switches stay in
-    // their off position: `support_dyn_vc_gfx_protocol` waits for the EGFX
-    // graphics pipeline (group 9), `multitransport_flags`/`compression_type`
-    // off, `remote_application_mode` off.
+    // rejected standard RDP security at negotiation. Graphics advertisement
+    // comes from CodecPolicy (task 9.1, single source of truth):
+    // `support_dyn_vc_gfx_protocol` sets the
+    // `SUPPORT_DYN_VC_GFX_PROTOCOL` early capability flag (Req 9.1) and the
+    // embedded fast-path bitmap config is the no-EGFX fallback (Req 9.3).
+    // `multitransport_flags`/`compression_type` stay off,
+    // `remote_application_mode` off.
     connector::Config {
         credentials: Credentials::UsernamePassword {
             username: config.username.clone(),
@@ -154,7 +157,7 @@ pub(crate) fn build_connector_config(
         device_scale_factor: None,
         monitor_extended_layout: None,
         relative_mouse_input: false,
-        bitmap: None,
+        bitmap: Some(crate::rdp::codec_policy::CodecPolicy::fastpath_bitmap()),
         client_build: 0,
         client_name: "rdp-client".to_owned(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
@@ -178,7 +181,8 @@ pub(crate) fn build_connector_config(
         timezone_info: TimezoneInfo::default(),
         compression_type: None,
         multitransport_flags: None,
-        support_dyn_vc_gfx_protocol: false,
+        support_dyn_vc_gfx_protocol:
+            crate::rdp::codec_policy::CodecPolicy::support_dyn_vc_gfx_protocol(),
         alternate_shell: String::new(),
         work_dir: String::new(),
         remote_application_mode: false,
@@ -617,6 +621,65 @@ mod tests {
         assert_eq!(
             connector.platform, expected,
             "connector must advertise the build OS as its platform capability (Req 8.3)"
+        );
+    }
+
+    // Task 9.1 (Req 9.1/9.3): the connector consumes CodecPolicy as the
+    // single source of truth for graphics advertisement — the EGFX
+    // early-capability switch and the no-EGFX fast-path bitmap fallback
+    // config both come from the policy, never from ad-hoc literals here.
+    #[test]
+    fn connector_config_consumes_codec_policy() {
+        use crate::rdp::codec_policy::CodecPolicy;
+
+        let config = crate::store::connections::ConnectionConfig {
+            id: "drift-task-9-1-codec-policy".to_string(),
+            name: "codec policy consumption".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 3389,
+            username: "user".to_string(),
+            domain: String::new(),
+            color_accent: None,
+            tags: Vec::new(),
+            display_width: None,
+            display_height: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_connected_at: None,
+            mock: false,
+            library_id: String::new(),
+            folder_id: None,
+        };
+
+        let connector = build_connector_config(&config, "pw", 1280, 720);
+
+        assert!(
+            connector.support_dyn_vc_gfx_protocol == CodecPolicy::support_dyn_vc_gfx_protocol()
+                && connector.support_dyn_vc_gfx_protocol,
+            "the GFX early-capability switch must come from CodecPolicy and be ON (Req 9.1)"
+        );
+
+        let fallback = CodecPolicy::fastpath_bitmap();
+        let bitmap = connector
+            .bitmap
+            .as_ref()
+            .expect("fast-path bitmap fallback config must be embedded in the connector config");
+        assert_eq!(
+            bitmap.color_depth, fallback.color_depth,
+            "fallback color depth must come from CodecPolicy (Req 9.3)"
+        );
+        assert_eq!(
+            bitmap.lossy_compression, fallback.lossy_compression,
+            "fallback lossy-compression switch must come from CodecPolicy"
+        );
+        assert_eq!(
+            bitmap.codecs.0.len(),
+            fallback.codecs.0.len(),
+            "fallback codec advertisement must come from CodecPolicy"
+        );
+        assert!(
+            bitmap.codecs.0.is_empty(),
+            "no-EGFX fallback must advertise no bitmap codec: standard/uncompressed bitmap updates only (Req 9.3)"
         );
     }
 }
