@@ -16,11 +16,15 @@ import { useTheme } from './hooks/useTheme';
 import { useKeyboard } from './hooks/useKeyboard';
 import { useSettingsStore } from './stores/settingsStore';
 import { useConnectionStore } from './stores/connectionStore';
+import { useLibraryStore } from './stores/libraryStore';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
 export default function App() {
   const fetchSettings = useSettingsStore((s) => s.fetchSettings);
   const fetchConnections = useConnectionStore((s) => s.fetchConnections);
+  // Task 8.2 (Req 10.1/10.9): the sidebar tree state — also restores the
+  // persisted selection/expansion and aggregates real tags for filtering.
+  const fetchTree = useLibraryStore((s) => s.fetchTree);
   const [showNewConnection, setShowNewConnection] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
 
@@ -31,7 +35,8 @@ export default function App() {
   useEffect(() => {
     fetchSettings();
     fetchConnections();
-  }, [fetchSettings, fetchConnections]);
+    fetchTree();
+  }, [fetchSettings, fetchConnections, fetchTree]);
 
   // Keyboard shortcuts
   const handleNewConnection = useCallback(() => {

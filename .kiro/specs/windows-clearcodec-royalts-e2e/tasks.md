@@ -210,7 +210,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: UX acceptance states define expected keyboard, status and focus outcomes before component changes.
   - _Boundary: UX fixtures_
   - _Requirements: 10.13,10.14,11.6,11.7_
-- [ ] 8.2 Build typed tree state and node-aware editing
+- [x] 8.2 Build typed tree state and node-aware editing
   - Reuse Zustand, current form and IPC wrappers; persist selection/expansion; filter includes ancestors and restores prior state.
   - Done: Store tests cover filter/selection; create/edit uses selected destination; QuickConnect aggregates libraries.
   - _Boundary: Tree state integration_

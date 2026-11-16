@@ -134,6 +134,21 @@ describe('connectionStore', () => {
     expect(vi.mocked(tauri.duplicateConnection)).toHaveBeenCalledExactlyOnceWith('src-1');
   });
 
+  it('fetchConnections keeps connections from every library (QuickConnect aggregation, task 8.2 / Req 10.1)', async () => {
+    // QuickConnect renders the full store list; the store must aggregate
+    // across all libraries rather than a single one.
+    const mockConnections = [
+      { ...sampleConnection, id: 'lib1-c1', libraryId: 'lib-personal', createdAt: '2026-11-01', updatedAt: '2026-11-01' },
+      { ...sampleConnection, id: 'lib2-c2', name: 'Team Box', libraryId: 'lib-team', createdAt: '2026-11-02', updatedAt: '2026-11-02' },
+    ];
+    vi.mocked(tauri.listConnections).mockResolvedValueOnce(mockConnections);
+
+    await useConnectionStore.getState().fetchConnections();
+
+    const connections = useConnectionStore.getState().connections;
+    expect(connections.map((c) => c.libraryId)).toEqual(['lib-personal', 'lib-team']);
+  });
+
   it('setSearchQuery updates query', () => {
     useConnectionStore.getState().setSearchQuery('production');
     expect(useConnectionStore.getState().searchQuery).toBe('production');

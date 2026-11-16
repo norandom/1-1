@@ -93,6 +93,18 @@ describe('settingsStore', () => {
     expect(tauri.updateSettings).toHaveBeenCalledWith({ theme: 'light' });
   });
 
+  it('persists the sidebar rail preference through AppSettings.sidebarCollapsed (task 8.2, Req 10.11)', async () => {
+    // RAIL_STATE_PINS: the collapse/expand preference persists via the
+    // real setting — tree selection/expansion live in libraryStore's
+    // localStorage instead, so this is the only rail persistence path.
+    vi.mocked(tauri.updateSettings).mockResolvedValueOnce({ ...defaultSettings, sidebarCollapsed: true });
+
+    await useSettingsStore.getState().updateSettings({ sidebarCollapsed: true });
+
+    expect(useSettingsStore.getState().settings.sidebarCollapsed).toBe(true);
+    expect(tauri.updateSettings).toHaveBeenCalledWith({ sidebarCollapsed: true });
+  });
+
   it('keeps the optimistic merge when the backend save fails (silent divergence)', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.mocked(tauri.updateSettings).mockRejectedValueOnce(new Error('write failed'));

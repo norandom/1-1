@@ -3,6 +3,7 @@ import { Zap, Check } from 'lucide-react';
 import type { ConnectionConfig } from '../../types';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useLibraryStore, selectNewConnectionDestination } from '../../stores/libraryStore';
 import { useToastStore } from '../../stores/toastStore';
 import * as tauri from '../../lib/tauri';
 import {
@@ -42,6 +43,9 @@ export function ConnectionForm({ connection, onClose }: Props) {
   const updateConnection = useConnectionStore((s) => s.updateConnection);
   const defaultPort = useSettingsStore((s) => s.settings.defaultPort);
   const addToast = useToastStore((s) => s.addToast);
+  // Task 8.2 (Req 10.1): create files into the selected library/folder
+  // (a selected connection files next to it); null = backend default.
+  const destination = useLibraryStore(selectNewConnectionDestination);
 
   const isEdit = !!connection;
 
@@ -80,9 +84,11 @@ export function ConnectionForm({ connection, onClose }: Props) {
     setIsSubmitting(true);
     try {
       if (isEdit && connection) {
-        await updateConnection(connection.id, { name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h });
+        // Edit keeps the connection in its own library/folder — moving is
+        // the dedicated move action (task 8.4), never a save side effect.
+        await updateConnection(connection.id, { name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, libraryId: connection.libraryId, folderId: connection.folderId ?? null });
       } else {
-        await createConnection({ name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, lastConnectedAt: undefined });
+        await createConnection({ name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, lastConnectedAt: undefined, libraryId: destination?.libraryId, folderId: destination?.folderId });
       }
       addToast({ message: 'Connection saved', type: 'success' });
       onClose();
@@ -111,7 +117,11 @@ export function ConnectionForm({ connection, onClose }: Props) {
         <DialogHeader>
           <DialogTitle>{isEdit ? 'Edit Connection' : 'New Connection'}</DialogTitle>
           <DialogDescription>
-            {isEdit ? 'Update the connection details below.' : 'Enter the details for your remote desktop connection.'}
+            {isEdit
+              ? 'Update the connection details below.'
+              : destination
+                ? `Enter the details for your remote desktop connection. Saving into: ${destination.label}.`
+                : 'Enter the details for your remote desktop connection.'}
           </DialogDescription>
         </DialogHeader>
 
