@@ -10,6 +10,9 @@ import { MainPanel } from './components/dashboard/MainPanel';
 import { ConnectionForm } from './components/connections/ConnectionForm';
 import { QuickConnect } from './components/connections/QuickConnect';
 import { SessionView } from './components/session/SessionView';
+// Task 8.6 (Req 11.1): the persistent document tab strip, hoisted above
+// the routes so open sessions stay visible across navigation.
+import { DocumentTabs } from './components/session/DocumentTabs';
 import { SettingsPage } from './components/settings/SettingsPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastContainer } from './components/Toast';
@@ -63,14 +66,23 @@ export default function App() {
           <Sidebar />
 
           {/* Page content */}
-          <main className="flex-1 min-w-0 overflow-hidden">
-            <ErrorBoundary>
-              <Routes>
-                <Route path="/" element={<MainPanel />} />
-                <Route path="/session/:id" element={<SessionView />} />
-                <Route path="/settings" element={<SettingsPage />} />
-              </Routes>
-            </ErrorBoundary>
+          <main
+            id="main-panel"
+            tabIndex={-1}
+            className="flex flex-1 min-w-0 flex-col overflow-hidden focus:outline-none"
+          >
+            {/* Task 8.6 (Req 11.1): tabs live above the routes — visible
+                on session views, dashboards and the start view alike. */}
+            <DocumentTabs />
+            <div className="relative min-h-0 flex-1 overflow-hidden">
+              <ErrorBoundary>
+                <Routes>
+                  <Route path="/" element={<MainPanel />} />
+                  <Route path="/session/:id" element={<SessionView />} />
+                  <Route path="/settings" element={<SettingsPage />} />
+                </Routes>
+              </ErrorBoundary>
+            </div>
           </main>
         </div>
 

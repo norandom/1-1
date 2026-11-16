@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AlertTriangle } from 'lucide-react';
@@ -8,10 +8,15 @@ import { useConnectionStore } from '../../stores/connectionStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { SessionCanvas } from './SessionCanvas';
 import { SessionToolbar } from './SessionToolbar';
-import { SessionTabs } from './SessionTabs';
 import { PerformanceHUD } from './PerformanceHUD';
 import * as tauri from '../../lib/tauri';
 import { ctrlAltDelSequence } from '../../lib/input-mapper';
+import { resolveSessionView, sessionForConnection } from '../../lib/session-route';
+import {
+  createConnectController,
+  resolveUrlAction,
+  type ConnectController,
+} from '../../lib/session-attach';
 import {
   createTrailingResizeScheduler,
   type ResizeScheduler,
@@ -21,6 +26,10 @@ export function SessionView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const connections = useConnectionStore((s) => s.connections);
+  const sessions = useSessionStore((s) => s.sessions);
+  const setActive = useSessionStore((s) => s.setActive);
+  const restartRequest = useSessionStore((s) => s.restartRequest);
+  const clearRestartRequest = useSessionStore((s) => s.clearRestartRequest);
 
   const {
     sessionId,
@@ -42,7 +51,6 @@ export function SessionView() {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
-  const connectingRef = useRef(false);
   const resizeSchedulerRef = useRef<ResizeScheduler | null>(null);
   useClipboard({ sessionId });
   // The debounced resize emit captures the current sessionId; the scheduler
@@ -59,15 +67,149 @@ export function SessionView() {
     sessionId ? s.sessions.get(sessionId) : null
   );
 
-  // Connect on mount - id is always a connectionId
+  // Task 8.6 (Req 11.4, design.md L396): the route is `/session/:sessionId`
+  // and the connection is resolved THROUGH the session (D1 fix). A
+  // connection id on the route is transitional — a fresh connect whose
+  // URL is swapped for the backend session id below; anything else is
+  // stale (e.g. Back after a tab close) and falls back to `/` (11.5).
+  const resolution = useMemo(
+    () =>
+      resolveSessionView(id, sessions.values(), (cid) =>
+        connections.some((c) => c.id === cid)
+      ),
+    [id, sessions, connections]
+  );
+  const resolvedConnectionId = resolution.kind === 'stale' ? null : resolution.connectionId;
+
+  // The existing session for a transitional route's connection, if any
+  // — the input the pure swap/guard decisions below consume.
+  const existingForConnection = useMemo(
+    () =>
+      resolution.kind === 'connect'
+        ? sessionForConnection(sessions.values(), resolution.connectionId)
+        : undefined,
+    [resolution, sessions]
+  );
+
+  // URL decisions (remediation finding 1, Req 11.4/11.5): the stale
+  // redirect AND the transitional-route → session-route swap are ONE
+  // pure decision — `resolveUrlAction` (node-tested). The swap fires as
+  // soon as the connect initiated on this route has completed (the
+  // store and this hook hold the backend's session id), so
+  // `/session/:sessionId` is THE session route from the first connect
+  // on and the active-tab underline resolves while viewing the session
+  // (11.1). This replaces the previous dead swap effect, whose
+  // condition could never hold inside the `kind: 'view'` branch.
   useEffect(() => {
-    if (id && !sessionId && !connectingRef.current) {
-      connectingRef.current = true;
-      connect(id).finally(() => {
-        connectingRef.current = false;
+    const urlAction = resolveUrlAction(resolution, existingForConnection, sessionId);
+    if (urlAction.action !== 'replace') return;
+    navigate(urlAction.route, { replace: true });
+  }, [resolution, existingForConnection, sessionId, navigate]);
+
+  // Connect / adopt (remediation finding 2; round 2 findings 3+4). The
+  // node-tested `createConnectController` (session-attach.ts) IS this
+  // connect effect's body: `resolveConnectAction` content-guards the
+  // IPC so that on a transitional route the connect fires exactly once
+  // per route arrival / Connect gesture, and after it completes the
+  // store-identity churn from the session-info listener and the 1 Hz
+  // fps interval re-runs the effect but HOLDS — no reconnect loop, no
+  // repeated `update_last_connected` stamping. View resolutions adopt
+  // when this hook does not yet hold the route's session (tab switch /
+  // remount). NOTE (corrected in review): the adopt connect does NOT
+  // re-attach the frame channel — the backend reuse branch returns
+  // before attaching the new channel; frames keep flowing only because
+  // the ORIGINAL connect's channel closure writes into the shared
+  // `frameListenersRef` set in `useRdpSession.ts` — fragile, flagged in
+  // review. `update_last_connected` (commands/session.rs) runs after
+  // `create_session` returns, so EVERY real connect IPC re-stamps
+  // last-connected — fresh connects, Req 11.9 restarts, AND adopt
+  // connects (a tab switch with the hook unattached); it never runs on
+  // the Req 11.8 zero-IPC focus path of selecting an existing live
+  // session's tab.
+  const connectRequest = useSessionStore((s) => s.connectRequest);
+  // Round 2 (findings 3+4): the STATEFUL wake-up signal in the connect
+  // effect's deps — the in-repo `restartRequest` nonce pattern. When an
+  // attempt settles without a session (the hook's connectFn resolves
+  // even on failure — it swallows the rejection after setting status
+  // 'error', so the store is the failure signal), the controller bumps
+  // this nonce and the effect re-evaluates: a route queued behind the
+  // failed attempt (finding 4), or a Connect press issued while it was
+  // in flight (finding 3), connects on the woken pass. A woken pass
+  // without a NEW gesture holds — persistent failures never auto-retry.
+  const [connectWake, setConnectWake] = useState(0);
+  // Latest-ref indirection (written in effects only): the controller is
+  // created once, so a changed `connect` identity (defensively — its
+  // useCallback deps are stable zustand actions) must not strand a
+  // stale closure in it. All three effects below run in declaration
+  // order within a commit's flush: ref refresh → (once) controller
+  // creation → re-arm → evaluate.
+  const connectRef = useRef(connect);
+  const connectControllerRef = useRef<ConnectController | null>(null);
+  useEffect(() => {
+    connectRef.current = connect;
+  });
+  useEffect(() => {
+    if (connectControllerRef.current == null) {
+      connectControllerRef.current = createConnectController({
+        connect: (connectionId) => connectRef.current(connectionId),
+        sessionForConnection: (connectionId) =>
+          sessionForConnection(
+            useSessionStore.getState().sessions.values(),
+            connectionId
+          ),
+        requestReevaluation: () => setConnectWake((n) => n + 1),
+        clearRequest: () => useSessionStore.getState().clearConnectRequest(),
       });
     }
-  }, [id, sessionId, connect]);
+  }, []);
+  // A new route id may legitimately initiate its own connect: re-arm
+  // the controller's once-guard whenever the route id changes. Declared
+  // BEFORE the connect effect so the re-arm runs first on the same
+  // commit.
+  useEffect(() => {
+    connectControllerRef.current?.routeChanged();
+  }, [id]);
+  useEffect(() => {
+    connectControllerRef.current?.evaluate({
+      resolution,
+      existingSession: existingForConnection,
+      hookSessionId: sessionId,
+      request: connectRequest,
+    });
+  }, [resolution, existingForConnection, sessionId, connectRequest, connectWake]);
+
+  // Req 11.9: a Connect requested for this terminal session while its
+  // tab is already open restarts it here — same tab, same session id
+  // (7.1 restart keeps identity). Remediation finding 5: the request is
+  // single-shot — if navigation landed anywhere other than the
+  // requested session (another tab, a transitional route, a stale id),
+  // it is CONSUMED here, so a later mere tab selection can never
+  // auto-restart the terminal session: selection is not Connect.
+  // Same-tick batching invariant (round 2 pin): correctness relies on
+  // `requestRestart` + `navigate` in createConnectAction landing in ONE
+  // committed render — React 18+ automatic batching via createRoot
+  // batches the zustand store write and the router navigation raised in
+  // the same event handler. Were they split across renders, this
+  // effect's first run could miss the request (the hook-unattached view
+  // adopt-connects first), and the request arriving on the second
+  // render would fire a second, redundant connect.
+  useEffect(() => {
+    if (!restartRequest) return;
+    if (
+      resolution.kind !== 'view' ||
+      resolution.sessionId !== restartRequest.sessionId
+    ) {
+      clearRestartRequest();
+      return;
+    }
+    clearRestartRequest();
+    connectControllerRef.current?.runImmediate(resolution.connectionId);
+  }, [restartRequest, resolution, clearRestartRequest]);
+
+  // Keep the store's active session (StatusBar) aligned with the route.
+  useEffect(() => {
+    if (resolution.kind === 'view') setActive(resolution.sessionId);
+  }, [resolution, setActive]);
 
   const handleFullscreen = useCallback(() => {
     if (!document.fullscreenElement) {
@@ -126,9 +268,11 @@ export function SessionView() {
     return () => window.removeEventListener('keydown', handleKey);
   }, [status]);
 
-  const connectionInfo = connections.find(
-    (c) => c.id === id || (sessionId && c.id === id)
-  );
+  // Resolved through the session (D1): the route id never names the
+  // connection directly once a session exists.
+  const connectionInfo = resolvedConnectionId
+    ? connections.find((c) => c.id === resolvedConnectionId)
+    : undefined;
   const hostname = connectionInfo?.host ?? 'Unknown';
   const surfaceWidth = sessionResolution?.width
     ?? connectionInfo?.displayWidth
@@ -136,17 +280,18 @@ export function SessionView() {
   const surfaceHeight = sessionResolution?.height
     ?? connectionInfo?.displayHeight
     ?? 1080;
-  const resolution = `${surfaceWidth}x${surfaceHeight}`;
+  const displayResolution = `${surfaceWidth}x${surfaceHeight}`;
 
   return (
     <div className="flex flex-col h-full relative">
-      <SessionTabs />
+      {/* Task 8.6 (Req 11.1): the tab strip is hoisted to App above the
+          routes — it no longer renders inside the session view. */}
 
       <div className="relative flex-1 overflow-hidden">
         {/* Toolbar */}
         <SessionToolbar
           hostname={hostname}
-          resolution={resolution}
+          resolution={displayResolution}
           fps={fps}
           latency={latency}
           onFullscreen={handleFullscreen}
@@ -179,7 +324,7 @@ export function SessionView() {
           fps={fps}
           latency={latency}
           bandwidth={bandwidth}
-          resolution={resolution}
+          resolution={displayResolution}
         />
       </div>
 

@@ -231,7 +231,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Boundary: Dashboard integration_
   - _Depends: 7.1_
   - _Requirements: 10.5,10.6,11.5,11.6_
-- [ ] 8.6 Hoist persistent session tabs and fix routes
+- [x] 8.6 Hoist persistent session tabs and fix routes
   - Reuse session store; use session ID routes and named keyboard close controls; wire active/hover/focus states and consume backend existing-session IDs to focus the exact tab.
   - Done: Two-session tests switch/close/reconnect exactly the intended session and restore adjacent/dashboard focus.
   - _Boundary: Tab integration_

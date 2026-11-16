@@ -97,4 +97,55 @@ describe('sessionStore', () => {
     setActive('a');
     expect(useSessionStore.getState().activeSessionId).toBe('a');
   });
+
+  describe('restart request (Task 8.6, Req 11.9)', () => {
+    beforeEach(() => {
+      useSessionStore.setState({ restartRequest: null });
+    });
+
+    it('requests a restart with an increasing nonce and clears it', () => {
+      const { requestRestart, clearRestartRequest } = useSessionStore.getState();
+
+      requestRestart('session-bastion');
+      expect(useSessionStore.getState().restartRequest).toEqual({
+        sessionId: 'session-bastion',
+        nonce: 1,
+      });
+      // Re-requesting (Connect pressed again) must retrigger consumers.
+      requestRestart('session-bastion');
+      expect(useSessionStore.getState().restartRequest).toEqual({
+        sessionId: 'session-bastion',
+        nonce: 2,
+      });
+
+      clearRestartRequest();
+      expect(useSessionStore.getState().restartRequest).toBeNull();
+    });
+  });
+
+  describe('connect request (Task 8.6 remediation round 2, findings 3+4)', () => {
+    beforeEach(() => {
+      useSessionStore.setState({ connectRequest: null });
+    });
+
+    it('registers a fresh-connect gesture with an increasing nonce and clears it', () => {
+      const { requestConnect, clearConnectRequest } = useSessionStore.getState();
+
+      requestConnect('conn-bastion');
+      expect(useSessionStore.getState().connectRequest).toEqual({
+        connectionId: 'conn-bastion',
+        nonce: 1,
+      });
+      // Re-pressing Connect (e.g. after a failed connect) must produce a
+      // NEW signal so SessionView's connect effect re-evaluates.
+      requestConnect('conn-bastion');
+      expect(useSessionStore.getState().connectRequest).toEqual({
+        connectionId: 'conn-bastion',
+        nonce: 2,
+      });
+
+      clearConnectRequest();
+      expect(useSessionStore.getState().connectRequest).toBeNull();
+    });
+  });
 });

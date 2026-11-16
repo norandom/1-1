@@ -104,6 +104,13 @@ export function useRdpSession(): UseRdpSessionReturn {
         latestFpsRef.current = 0;
         latestBandwidthRef.current = 0;
 
+        // NOTE (task 8.6 review, corrected): when `tauri.connect` ADOPTS
+        // an existing session (tab switch / remount), the backend reuse
+        // branch returns BEFORE attaching this new channel — frames keep
+        // flowing only because the ORIGINAL connect's channel closure
+        // below writes into the shared `frameListenersRef` set, which
+        // lives across connects in this hook instance. Fragile: the
+        // adopt path relies on that original closure staying registered.
         const frameChannel = new Channel<FramePayload>((payload) => {
           const bytes = toFrameBytes(payload);
           byteCountRef.current += bytes.byteLength;
