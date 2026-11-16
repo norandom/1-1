@@ -205,7 +205,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 2.3,2.4,11.4_
 
 - [ ] 8. Tree, dashboard and tab UX
-- [ ] 8.1 Pin annotated interaction states as component fixtures
+- [x] 8.1 Pin annotated interaction states as component fixtures
   - Use existing Radix/shadcn and Vitest patterns; cover tree/rail/filter, focus/menus, dashboards with tabs. Avoid introducing another component system.
   - Done: UX acceptance states define expected keyboard, status and focus outcomes before component changes.
   - _Boundary: UX fixtures_

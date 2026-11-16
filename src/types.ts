@@ -132,3 +132,21 @@ export interface MouseEvent {
   eventType: 'move' | 'down' | 'up' | 'scroll';
   scrollDelta?: number;
 }
+
+// ── UX acceptance state vocabulary (task 8.1, Req 10.13/10.14/11.6/11.7) ──
+// Pure type additions backing the pinned interaction states in
+// `src/lib/ux-tree-states.ts` / `src/lib/ux-tab-states.ts` (the spec's
+// ux-acceptance.md is their human-readable contract). They match the
+// LibraryStore/main-panel contracts in design.md; no runtime behavior.
+
+/** Identity of a sidebar tree node (design.md `LibraryStore` contract). */
+export interface NodeId {
+  kind: NodeKind;
+  id: string;
+}
+
+/** Where the main panel lands after a navigation action (Req 10.5/11.5/11.6). */
+export type MainPanelView =
+  | { view: 'session'; sessionId: string }
+  | { view: 'dashboard'; node: NodeId }
+  | { view: 'start' };
