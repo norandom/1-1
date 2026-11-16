@@ -215,7 +215,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Store tests cover filter/selection; create/edit uses selected destination; QuickConnect aggregates libraries.
   - _Boundary: Tree state integration_
   - _Requirements: 10.1,10.3,10.9,10.11,1.1,1.2_
-- [ ] 8.3 Render accessible tree and context actions
+- [x] 8.3 Render accessible tree and context actions
   - Reuse Radix primitives and existing status subscriptions; implement roving focus, named status, explicit rail toggle and confirmations.
   - Done: Keyboard/component checks cover arrows/Home/End/Enter/Shift+F10, all menus, duplication and confirmation counts.
   - _Boundary: Tree UI_

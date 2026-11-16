@@ -1,11 +1,19 @@
+import { useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
+import { Library as LibraryIcon } from 'lucide-react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useLibraryStore } from '../../stores/libraryStore';
+import { statusesFromSessions } from '../../lib/tree-a11y';
+import {
+  buildRailEntries,
+  nextSidebarCollapsed,
+  railToggleButtonName,
+} from '../../lib/tree-rail';
+import { ConnectionTree } from './ConnectionTree';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   Tooltip,
   TooltipTrigger,
@@ -13,35 +21,23 @@ import {
 } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 
+/**
+ * Task 8.3 (Req 10.1/10.11): the sidebar hosts the ConnectionTree; the
+ * explicit named collapse control shrinks it to a rail of library icons
+ * with status dots (textual status stays in every accessible name).
+ * Collapsing never touches tree state — selection and saved expansion
+ * live in libraryStore and the preference persists through
+ * AppSettings.sidebarCollapsed (RAIL_STATE_PINS).
+ */
+
 const EXPANDED_WIDTH = 260;
 const COLLAPSED_WIDTH = 72;
-
-function ConnectionsIcon({ size = 20, className }: { size?: number; className?: string }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <rect x="2" y="3" width="20" height="14" rx="2" />
-      <path d="M8 21h8" />
-      <path d="M12 17v4" />
-    </svg>
-  );
-}
 
 function SettingsIcon({ size = 20, className }: { size?: number; className?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
       <path d="M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z" />
       <circle cx="12" cy="12" r="3" />
-    </svg>
-  );
-}
-
-function SessionsIcon({ size = 20, className }: { size?: number; className?: string }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <rect x="2" y="3" width="20" height="14" rx="2" />
-      <circle cx="12" cy="10" r="2" fill="currentColor" stroke="none" />
-      <path d="M8 21h8" />
-      <path d="M12 17v4" />
     </svg>
   );
 }
@@ -66,22 +62,27 @@ function CollapseRightIcon({ size = 18 }: { size?: number }) {
   );
 }
 
-const navItems = [
-  { path: '/', icon: ConnectionsIcon, label: 'Connections' },
-  { path: '/settings', icon: SettingsIcon, label: 'Settings' },
-];
-
 export function Sidebar() {
   const location = useLocation();
   const navigate = useNavigate();
-  const sessions = useSessionStore((s) => s.sessions);
   const collapsed = useSettingsStore((s) => s.settings.sidebarCollapsed);
   const updateSettings = useSettingsStore((s) => s.updateSettings);
 
-  const sessionCount = sessions.size;
+  const sessions = useSessionStore((s) => s.sessions);
+  const tree = useLibraryStore((s) => s.tree);
+  const selectNode = useLibraryStore((s) => s.selectNode);
+
+  // Rail entries carry the textual aggregate in their accessible names.
+  const statuses = useMemo(() => statusesFromSessions(sessions.values()), [sessions]);
+  const railEntries = useMemo(() => buildRailEntries(tree, statuses), [tree, statuses]);
+  const libraryHasConnected = (libraryId: string): boolean =>
+    tree.connections.some((c) => c.libraryId === libraryId && statuses[c.id] === 'connected');
+
+  const isSettingsActive = location.pathname.startsWith('/settings');
+  const toggleName = railToggleButtonName(collapsed);
 
   const toggleCollapse = () => {
-    updateSettings({ sidebarCollapsed: !collapsed });
+    updateSettings({ sidebarCollapsed: nextSidebarCollapsed(collapsed) });
   };
 
   return (
@@ -111,151 +112,95 @@ export function Sidebar() {
             </defs>
           </svg>
         </div>
-        <AnimatePresence mode="wait">
-          {!collapsed && (
-            <motion.span
-              initial={{ opacity: 0, width: 0 }}
-              animate={{ opacity: 1, width: 'auto' }}
-              exit={{ opacity: 0, width: 0 }}
-              transition={{ duration: 0.15 }}
-              className="text-[15px] font-bold text-[var(--color-text-primary)] whitespace-nowrap overflow-hidden tracking-tight"
-            >
-              Drift
-            </motion.span>
-          )}
-        </AnimatePresence>
+        {!collapsed && (
+          <span className="text-[15px] font-bold text-[var(--color-text-primary)] whitespace-nowrap overflow-hidden tracking-tight">
+            Drift
+          </span>
+        )}
       </div>
 
-      {/* Divider */}
       <Separator className="mx-4 mb-3 w-auto" />
 
-      {/* Navigation */}
-      <ScrollArea className="flex-1 px-4">
-        <nav className="flex flex-col gap-1">
-          {navItems.map((item) => {
-            const isActive =
-              item.path === '/'
-                ? location.pathname === '/'
-                : location.pathname.startsWith(item.path);
-            const Icon = item.icon;
-
-            const button = (
-              <Button
-                key={item.path}
-                variant={isActive ? 'secondary' : 'ghost'}
-                className={cn(
-                  'relative w-full justify-start gap-3.5 px-3.5 py-3 h-auto rounded-xl transition-all duration-150',
-                  isActive && 'bg-[var(--color-accent)]/10 text-[var(--color-accent)]',
-                )}
-                onClick={() => navigate(item.path)}
-              >
-                {isActive && (
-                  <motion.div
-                    layoutId="sidebar-active"
-                    className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-6 rounded-r-full bg-[var(--color-accent)]"
-                    transition={{ type: 'spring', stiffness: 500, damping: 35 }}
-                  />
-                )}
-                <Icon size={20} className="shrink-0" />
-                <AnimatePresence mode="wait">
-                  {!collapsed && (
-                    <motion.span
-                      initial={{ opacity: 0, width: 0 }}
-                      animate={{ opacity: 1, width: 'auto' }}
-                      exit={{ opacity: 0, width: 0 }}
-                      transition={{ duration: 0.15 }}
-                      className="text-[13px] font-semibold whitespace-nowrap overflow-hidden"
-                    >
-                      {item.label}
-                    </motion.span>
-                  )}
-                </AnimatePresence>
-              </Button>
-            );
-
-            if (collapsed) {
-              return (
-                <Tooltip key={item.path}>
-                  <TooltipTrigger asChild>
-                    {button}
-                  </TooltipTrigger>
-                  <TooltipContent side="right" sideOffset={8}>
-                    {item.label}
-                  </TooltipContent>
-                </Tooltip>
-              );
-            }
-
-            return button;
-          })}
-
-          {/* Active Sessions Badge */}
-          {sessionCount > 0 && (() => {
-            const sessionButton = (
+      {/* Tree (expanded) or library rail (collapsed) — same tree state */}
+      {collapsed ? (
+        <nav className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto px-2" aria-label="Libraries">
+          {railEntries.map((entry) => {
+            const connected = libraryHasConnected(entry.library.id);
+            const railButton = (
               <Button
                 variant="ghost"
-                className="w-full justify-start gap-3.5 px-3.5 py-3 h-auto rounded-xl transition-all duration-150"
-                onClick={() => {
-                  const activeId = useSessionStore.getState().activeSessionId;
-                  if (activeId) navigate(`/session/${activeId}`);
-                }}
+                aria-label={entry.accessibleName}
+                className="relative h-11 w-11 rounded-xl"
+                onClick={() => selectNode(entry.library)}
               >
-                <div className="relative shrink-0">
-                  <SessionsIcon size={20} />
-                  <Badge
-                    className="absolute -top-1.5 -right-1.5 flex items-center justify-center w-[18px] h-[18px] p-0 text-[10px] font-bold bg-[var(--color-success)] ring-2 ring-[var(--color-surface-1)]"
-                  >
-                    {sessionCount}
-                  </Badge>
-                </div>
-                <AnimatePresence mode="wait">
-                  {!collapsed && (
-                    <motion.span
-                      initial={{ opacity: 0, width: 0 }}
-                      animate={{ opacity: 1, width: 'auto' }}
-                      exit={{ opacity: 0, width: 0 }}
-                      transition={{ duration: 0.15 }}
-                      className="text-[13px] font-semibold whitespace-nowrap overflow-hidden"
-                    >
-                      Active Sessions
-                    </motion.span>
+                <LibraryIcon size={20} />
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    'absolute top-1.5 right-1.5 h-2 w-2 rounded-full',
+                    connected ? 'bg-[var(--color-success)]' : 'bg-[var(--color-text-muted)]'
                   )}
-                </AnimatePresence>
+                />
               </Button>
             );
-
-            if (collapsed) {
-              return (
-                <Tooltip key="sessions">
-                  <TooltipTrigger asChild>
-                    {sessionButton}
-                  </TooltipTrigger>
-                  <TooltipContent side="right" sideOffset={8}>
-                    Active Sessions ({sessionCount})
-                  </TooltipContent>
-                </Tooltip>
-              );
-            }
-
-            return <div key="sessions">{sessionButton}</div>;
-          })()}
+            return (
+              <Tooltip key={entry.library.id}>
+                <TooltipTrigger asChild>{railButton}</TooltipTrigger>
+                <TooltipContent side="right" sideOffset={8}>
+                  {entry.accessibleName}
+                </TooltipContent>
+              </Tooltip>
+            );
+          })}
+          <Separator className="my-1 w-8" />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                aria-label="Settings"
+                className="h-11 w-11 rounded-xl"
+                onClick={() => navigate('/settings')}
+              >
+                <SettingsIcon size={20} />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>
+              Settings
+            </TooltipContent>
+          </Tooltip>
         </nav>
-      </ScrollArea>
+      ) : (
+        <div className="min-h-0 flex-1">
+          <ConnectionTree />
+        </div>
+      )}
 
-      {/* Collapse Toggle */}
-      <div className="px-4 py-4 border-t border-[var(--color-border)]">
+      {/* Settings (expanded) + named collapse control (Req 10.11) */}
+      <div className="flex flex-col gap-1 border-t border-[var(--color-border)] px-4 py-3">
+        {!collapsed && (
+          <Button
+            variant="ghost"
+            aria-current={isSettingsActive ? 'page' : undefined}
+            className="h-auto w-full justify-start gap-3 rounded-xl px-3.5 py-2.5"
+            onClick={() => navigate('/settings')}
+          >
+            <SettingsIcon size={18} />
+            <span className="text-[13px] font-semibold">Settings</span>
+          </Button>
+        )}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
               variant="ghost"
-              className="w-full justify-center py-2.5 rounded-xl"
+              aria-label={toggleName}
+              className="w-full justify-center rounded-xl py-2.5"
               onClick={toggleCollapse}
             >
               {collapsed ? <CollapseRightIcon /> : <CollapseLeftIcon />}
             </Button>
           </TooltipTrigger>
           <TooltipContent side="right" sideOffset={8}>
-            {collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            {toggleName}
           </TooltipContent>
         </Tooltip>
       </div>
