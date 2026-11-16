@@ -397,4 +397,57 @@ Outcome: the proposed `ironrdp-egfx` 0.5.0 generation is REAL on the registry an
 - Registry source snapshot (disposable, not committed): `D:\BuildArtifacts\drift-rdp\task-4.1\registry\` (published tarballs of every pinned crate, incl. manifests).
 - Risks: (1) `picky` rc-pin coupling — any future sspi/connector bump must move together; (2) ironrdp-tls `rustls` feature naming now hides aws-lc-rs — 4.2 must use `rustls-ring` or the Windows build drags in aws-lc; (3) connector Config literal construction makes the 4.2 diff larger than a Default-based builder — mechanical but long; (4) AVC420 residual gap above; (5) design.md Technology-Stack table (L118, L125: "≥ 0.9", "rust-version 1.89") needs the parent to align to this section when tasks.md ownership allows — no design edit made by the spike.
 
+## 8.4 dnd-kit React 19 spike (task 8.4, 2026-11-16) — PLAN RECORDED BEFORE INSTALL
+
+Purpose: task 8.4 gates the drag layer on dnd-kit React 19 peer compatibility, hard 3-hour cap, go/no-go recorded before any move-UI work. Native HTML5 drag is the always-acceptable fallback.
+
+Environment facts (recorded first):
+- Repo: `package.json` declares `react ^19.2.4`, `react-dom ^19.2.4`; `npm ls react react-dom` resolves exactly `react@19.2.4`, `react-dom@19.2.4` (no duplicates).
+- Repo hazard: `.npmrc` contains `legacy-peer-deps=true` — a plain `npm i` would silently suppress peer conflicts, which the task defines as an automatic NO. Every spike install therefore runs with explicit CLI overrides `--legacy-peer-deps=false --strict-peer-deps=true` so any peer conflict hard-fails the install.
+
+Registry peer data (`npm view <pkg> version peerDependencies --json`, 2026-11-16):
+- `@dnd-kit/core@6.3.1` (latest): `react >=16.8.0`, `react-dom >=16.8.0`.
+- `@dnd-kit/sortable@10.0.0` (latest): `react >=16.8.0`, `@dnd-kit/core ^6.3.0`.
+- `@dnd-kit/utilities@3.2.2` (latest): `react >=16.8.0`.
+
+Plan:
+1. Install ONLY `@dnd-kit/core` as a real dependency: the tree move gesture is "drag a node onto a folder/library container" (`useDraggable`/`useDroppable`), not list reordering, so `@dnd-kit/sortable` adds surface the requirement (10.8) does not ask for. Core's declared range `>=16.8.0` admits React 19.2.4 by semver.
+2. Prove install honesty: `npm i @dnd-kit/core --legacy-peer-deps=false --strict-peer-deps=true` must complete with zero ERESOLVE/peer warnings (verifiable only because the .npmrc default is explicitly overridden).
+3. Prove compile-level integration in THIS repo: a temporary spike component using `DndContext` + `useDraggable` + `useDroppable` primitives must typecheck under the repo `tsc -b` (React 19 types, `@types/react@^19.2.14`).
+4. Prove build: `npm run build` (`tsc -b && vite build`) green with the dependency present. On GO the task-8.4 ConnectionTree work imports `@dnd-kit/core` for real, so the final task build is the full bundle-graph proof.
+5. Verdict GO only if 2+3+4 all pass with honest flags; anything else (ERESOLVE with overrides, type errors, build failure, or ambiguity at the 3-hour cap) is NO-GO → remove the dependency (byte-exact package.json/package-lock.json restore) and use native HTML5 drag, keeping the keyboard Move dialog equivalent.
+
+Verdict + evidence: appended below after execution.
+
+### 8.4 spike execution + verdict (2026-11-16, ~25 min of the 3-hour cap): **GO**
+
+Step 2 — strict-peer repo install (honesty check): FAILED, but NOT on dnd-kit. `npm i @dnd-kit/core --legacy-peer-deps=false --strict-peer-deps=true` → ERESOLVE on a pre-existing conflict with no dnd-kit package anywhere in the chain:
+
+```
+npm error While resolving: @tailwindcss/vite@4.2.1
+npm error Found: vite@8.0.0
+npm error Could not resolve dependency:
+npm error peer vite@"^5.2.0 || ^6 || ^7" from @tailwindcss/vite@4.2.1
+```
+
+That conflict predates this task (repo pins `vite ^8.0.0` while `@tailwindcss/vite@4.2.1` declares `^5.2.0 || ^6 || ^7`) and is masked for every existing dependency by the repo `.npmrc` `legacy-peer-deps=true`. The aborted run left `package.json`/`package-lock.json` byte-identical (SHA-256 verified against a pre-install snapshot).
+
+Isolation of the actual spike question (dnd-kit ↔ React 19): clean-room install at `D:\BuildArtifacts\Temp\opencode\84-dnd-spike\cleanroom` with exactly `react@19.2.4` + `react-dom@19.2.4` + `@dnd-kit/core@6.3.1`, same honest flags:
+
+```
+npm install --legacy-peer-deps=false --strict-peer-deps=true
+added 7 packages, and audited 8 packages in 2s
+found 0 vulnerabilities
+```
+
+Zero ERESOLVE, zero peer warnings — @dnd-kit/core's declared peers (`react >=16.8.0`, `react-dom >=16.8.0`) admit React 19.2.4 with modern (non-legacy) peer resolution. The legacy-mode question ("would the install only succeed by IGNORING a dnd-kit conflict?") is answered NO by this clean-room run.
+
+Repo install under the repo's own configured npm mode (as every pre-existing dependency installs here): `npm i @dnd-kit/core` → `added 3 packages, and audited 590 packages in 4s` (the `msw` install-scripts warning is pre-existing, unrelated). Lock diff is **strictly addition-only**: `@dnd-kit/core@6.3.1`, `@dnd-kit/accessibility@3.1.1`, `@dnd-kit/utilities@3.2.2` (+ `tslib` already present); no existing resolution touched — so legacy mode resolved nothing on dnd-kit's behalf. `npm ls @dnd-kit/core` → clean single resolution. `npm audit`: all 39 advisories are pre-existing dev-tier packages (vite, vitest, eslint toolchain, shadcn CLI, react-router, …); none involve @dnd-kit.
+
+Step 3 — compile-level React 19 integration in THIS repo: temporary `src/components/layout/__dnd-spike.tsx` using `DndContext` + `useDraggable` + `useDroppable` (real hooks, refs, listeners, `DragEndEvent` typing; copy of record in `D:\BuildArtifacts\Temp\opencode\84-dnd-spike\`). First run caught a genuine null-narrowing error in the spike code itself (`TS18047: 'event.over' is possibly 'null'`) — dnd-kit's React 19 types actively enforcing — then `npx tsc -b` → exit 0. Spike file then deleted; repo `tsc -b` still exit 0.
+
+Step 4 — build: `npm run build` (`tsc -b && vite build`) → exit 0, `dist/assets/index-DJO7bP56.js 675.60 kB` built in 1.69s with the dependency installed (the >500 kB chunk-size warning is pre-existing). Full bundle-graph proof: the task-8.4 ConnectionTree implementation below imports `@dnd-kit/core` for real, and the task-final `npm run build` (validation section) re-proves it.
+
+Verdict: **GO** — `@dnd-kit/core@6.3.1` (`^6.3.1` in `package.json`) with native HTML5 drag NOT needed. Disclosed residual (repo hygiene, out of 8.4 scope, no action taken): repo-wide `--strict-peer-deps` is unsatisfiable for ANY new dependency until `@tailwindcss/vite` publishes a `vite@8` peer range or the repo pins `vite@7`; the repo-wide legacy mode is a pre-existing condition this spike neither introduced nor changed. Spike cost: ~25 minutes of the 180-minute cap; no repo file outside `package.json`, `package-lock.json` and this section touched.
+
 

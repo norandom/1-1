@@ -220,7 +220,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Keyboard/component checks cover arrows/Home/End/Enter/Shift+F10, all menus, duplication and confirmation counts.
   - _Boundary: Tree UI_
   - _Requirements: 10.3,10.4,10.7,10.11,10.13,10.14,10.18,10.19_
-- [ ] 8.4 Add movement through one shared action
+- [x] 8.4 Add movement through one shared action
   - Gate dnd-kit on a hard-capped (3-hour) React 19 peer-compatibility spike with a recorded go/no-go before this task; on no-go, use native HTML5 drag. The keyboard Move dialog shares the same action either way, and the native fallback must retain the keyboard equivalent.
   - Done: Drag and keyboard subtree moves persist; rejected writes restore visible location and focus.
   - _Boundary: Move UI_

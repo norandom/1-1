@@ -1,6 +1,17 @@
 import { useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import type { DragEndEvent } from '@dnd-kit/core';
+import {
   ChevronDown,
   ChevronRight,
   Folder,
@@ -22,7 +33,7 @@ import { useConnectionStore } from '../../stores/connectionStore';
 import { useToastStore } from '../../stores/toastStore';
 import * as tauri from '../../lib/tauri';
 import { applyTreeKey } from '../../lib/tree-keyboard';
-import type { TreeKey } from '../../lib/ux-tree-states';
+import type { TreeA11yNode, TreeKey } from '../../lib/ux-tree-states';
 import {
   buildTreeA11yNodes,
   statusesFromSessions,
@@ -30,6 +41,8 @@ import {
   treeItemLabel,
 } from '../../lib/tree-a11y';
 import { contextMenuItems, menuActionFor } from '../../lib/tree-menu';
+import { dragEventToMove, moveDestinations, moveTreeNodes } from '../../lib/tree-move';
+import type { MoveOutcome, MoveTrigger } from '../../lib/tree-move';
 import type { DeletionCounts } from '../../lib/tree-confirm';
 import {
   buildDeletionConfirmation,
@@ -63,8 +76,11 @@ import { cn } from '@/lib/utils';
  * render layer. Deliberately thin — every keyboard/focus/menu/status/
  * confirmation decision lives in the tested pure modules (tree-keyboard,
  * tree-a11y, tree-menu, tree-confirm, tree-rail) and this component only
- * projects their results onto Radix primitives. Rendered behavior is
- * verified by the group-12 E2E tier per the design testing strategy.
+ * projects their results onto Radix primitives. Task 8.4 (Req 10.8/10.14/
+ * 10.15) adds movement: dnd-kit drag (TreeRow) and the keyboard Move
+ * dialog both funnel through the one shared action in tree-move.
+ * Rendered behavior is verified by the group-12 E2E tier per the design
+ * testing strategy.
  */
 
 const nodeKey = (n: NodeId): string => `${n.kind}:${n.id}`;
@@ -81,6 +97,177 @@ const STATUS_DOT_COLOR: Record<SessionStatus, string> = {
   disconnected: 'var(--color-text-muted)',
 };
 
+interface TreeRowProps {
+  a11y: TreeA11yNode;
+  /** Live session status — connections only; null for containers. */
+  status: SessionStatus | null;
+  isFilterActive: boolean;
+  isFocused: boolean;
+  menuOpen: boolean;
+  registerRef: (key: string, el: HTMLDivElement | null) => void;
+  focusRow: (key: string) => void;
+  onRowClick: (node: NodeId, key: string) => void;
+  onConnect: (node: NodeId) => void;
+  onOpenMenu: (node: NodeId) => void;
+  onMenuOpenChange: (open: boolean, node: NodeId) => void;
+  onMenuItemSelect: (node: NodeId, item: string) => void;
+  onToggleExpanded: (id: string) => void;
+}
+
+/**
+ * One tree row (Req 10.3/10.13/10.14) and its drag affordance (10.8):
+ * connections and folders are dnd-kit draggables, folders and libraries
+ * are droppables — both feed the ONE shared move action in tree-move.
+ * Libraries are neither draggable source nor movable (10.7); the pinned
+ * treeitem aria contract is kept (dnd-kit only adds roledescription +
+ * instructions; Space lifts via the keyboard sensor, Enter stays the
+ * tree's connect/select key per TREE_KEYBOARD_RULES).
+ */
+function TreeRow({
+  a11y,
+  status,
+  isFilterActive,
+  isFocused,
+  menuOpen,
+  registerRef,
+  focusRow,
+  onRowClick,
+  onConnect,
+  onOpenMenu,
+  onMenuOpenChange,
+  onMenuItemSelect,
+  onToggleExpanded,
+}: TreeRowProps) {
+  const key = nodeKey(a11y.node);
+  const isContainer = a11y.kind !== 'connection';
+  const canDrag = a11y.kind !== 'library';
+  const canDrop = isContainer;
+
+  // Both hooks run unconditionally (rules of hooks); `disabled` keeps
+  // libraries from dragging and connections from receiving drops.
+  const { attributes, listeners, setNodeRef: setDragRef, isDragging, transform } = useDraggable({
+    id: key,
+    disabled: !canDrag,
+  });
+  const { setNodeRef: setDropRef, isOver } = useDroppable({ id: key, disabled: !canDrop });
+
+  const setRefs = (el: HTMLDivElement | null): void => {
+    registerRef(key, el);
+    setDragRef(el);
+    setDropRef(el);
+  };
+
+  return (
+    <div
+      ref={setRefs}
+      role="treeitem"
+      aria-label={treeItemLabel(a11y)}
+      {...treeItemAria(a11y)}
+      {...(canDrag
+        ? {
+            'aria-roledescription': attributes['aria-roledescription'],
+            'aria-describedby': attributes['aria-describedby'],
+          }
+        : {})}
+      {...(canDrag ? listeners : {})}
+      tabIndex={isFocused ? 0 : -1}
+      onClick={() => onRowClick(a11y.node, key)}
+      onDoubleClick={() => {
+        if (a11y.kind === 'connection') onConnect(a11y.node);
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onOpenMenu(a11y.node);
+      }}
+      className={cn(
+        'group flex cursor-pointer items-center gap-1.5 rounded-md py-1.5 pr-1 text-[13px] outline-none',
+        'focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]',
+        a11y.selected && 'bg-[var(--color-accent)]/10 text-[var(--color-accent)]',
+        isOver && canDrop && 'ring-1 ring-[var(--color-accent)]',
+        isDragging && 'opacity-50'
+      )}
+      style={{
+        paddingLeft: (a11y.level - 1) * 14 + 6,
+        transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
+      }}
+    >
+      {isContainer && !isFilterActive && (
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-hidden="true"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleExpanded(a11y.node.id);
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="shrink-0 p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
+        >
+          {a11y.expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
+      )}
+      {isContainer && isFilterActive && <span className="w-[19px] shrink-0" />}
+      <span className="shrink-0 text-[var(--color-text-muted)]">
+        {a11y.kind === 'library' ? (
+          <LibraryIcon size={15} />
+        ) : a11y.kind === 'folder' ? (
+          a11y.expanded ? <FolderOpen size={15} /> : <Folder size={15} />
+        ) : (
+          <Monitor size={15} />
+        )}
+      </span>
+      <span className="flex-1 truncate">{a11y.name}</span>
+      <span className="flex shrink-0 items-center gap-1 text-[10px] text-[var(--color-text-muted)]">
+        {status && (
+          <span
+            aria-hidden="true"
+            className="inline-block h-1.5 w-1.5 rounded-full"
+            style={{ background: STATUS_DOT_COLOR[status] }}
+          />
+        )}
+        {a11y.statusText}
+      </span>
+      <DropdownMenu
+        open={menuOpen}
+        onOpenChange={(open) => onMenuOpenChange(open, a11y.node)}
+      >
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label={`Actions for ${a11y.name}`}
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="shrink-0 rounded p-1 text-[var(--color-text-muted)] opacity-0 focus-visible:opacity-100 group-hover:opacity-100 hover:text-[var(--color-text-secondary)]"
+          >
+            <MoreVertical size={14} />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          onCloseAutoFocus={(e) => {
+            // Pinned (ux-acceptance Row 1): closing the menu —
+            // dismissed or after selecting — returns focus to the node.
+            e.preventDefault();
+            focusRow(key);
+          }}
+        >
+          {contextMenuItems(a11y.kind).map((item) => (
+            <DropdownMenuItem
+              key={item}
+              onSelect={() => {
+                onMenuItemSelect(a11y.node, item);
+              }}
+            >
+              {item}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
 export function ConnectionTree() {
   const navigate = useNavigate();
 
@@ -94,7 +281,6 @@ export function ConnectionTree() {
   const toggleExpanded = useLibraryStore((s) => s.toggleExpanded);
   const setFilter = useLibraryStore((s) => s.setFilter);
   const fetchTree = useLibraryStore((s) => s.fetchTree);
-  const runMove = useLibraryStore((s) => s.moveNode);
 
   // Live session statuses (design.md: the tree subscribes sessionStore).
   const sessions = useSessionStore((s) => s.sessions);
@@ -135,6 +321,11 @@ export function ConnectionTree() {
     const key = nodeKey(node);
     setFocusedKey(key);
     requestAnimationFrame(() => itemRefs.current.get(key)?.focus());
+  };
+
+  const registerItemRef = (key: string, el: HTMLDivElement | null): void => {
+    if (el) itemRefs.current.set(key, el);
+    else itemRefs.current.delete(key);
   };
 
   // ── Actions (10.6 connect path today: the session view; tabs are 8.6) ──
@@ -299,57 +490,66 @@ export function ConnectionTree() {
     }
   };
 
-  // ── Move dialog (basic accessible path over the 8.2 moveNode action; ──
-  // drag-and-drop and the full shared-action refactor are task 8.4).
-  const moveDestinations = useMemo<{ node: NodeId; label: string }[]>(() => {
-    if (!moveActor) return [];
-    const excluded = new Set<string>();
-    if (moveActor.kind === 'folder') {
-      excluded.add(moveActor.id);
-      let grew = true;
-      while (grew) {
-        grew = false;
-        for (const f of tree.folders) {
-          if (f.parentId !== null && excluded.has(f.parentId) && !excluded.has(f.id)) {
-            excluded.add(f.id);
-            grew = true;
-          }
-        }
-      }
-    }
-    const libraryName = (id: string): string => tree.libraries.find((l) => l.id === id)?.name ?? id;
-    const folderChain = (folderId: string): string[] => {
-      const folder = tree.folders.find((f) => f.id === folderId);
-      if (!folder) return [];
-      return [...(folder.parentId ? folderChain(folder.parentId) : []), folder.name];
-    };
-    const destinations: { node: NodeId; label: string }[] = tree.libraries.map((l) => ({
-      node: { kind: 'library', id: l.id },
-      label: `${l.name} (root)`,
-    }));
-    for (const f of tree.folders) {
-      if (excluded.has(f.id)) continue;
-      destinations.push({
-        node: { kind: 'folder', id: f.id },
-        label: [libraryName(f.libraryId), ...folderChain(f.id)].join(' › '),
-      });
-    }
-    return destinations;
-  }, [moveActor, tree]);
+  // ── Move: ONE shared action for both triggers (task 8.4, 10.8/10.14/ ──
+  // 10.15). The dialog consumes the shared destination filtering; drag
+  // and keyboard both funnel through `moveTreeNodes`, whose outcome pins
+  // where focus goes (follows the node; restored on failure).
+  const dialogDestinations = useMemo(() => (moveActor ? moveDestinations(tree, moveActor) : []), [moveActor, tree]);
+
+  /**
+   * The shared move runner: selection + focus follow `outcome.focusAfter`
+   * in BOTH cases — after a persisted move the node sits under its
+   * destination, after a rejected/failed one the rollback kept it in its
+   * previous location, so focus returns exactly there (MOVE_STATE_PINS).
+   */
+  const runSharedMove = async (
+    trigger: MoveTrigger,
+    source: NodeId,
+    target: NodeId
+  ): Promise<MoveOutcome> => {
+    const { tree: currentTree, moveNode } = useLibraryStore.getState();
+    const outcome = await moveTreeNodes({ tree: currentTree, moveNode }, trigger, source, target);
+    selectNode(outcome.focusAfter);
+    focusNode(outcome.focusAfter);
+    return outcome;
+  };
 
   const doMove = async (destination: NodeId): Promise<void> => {
     if (!moveActor) return;
-    const actor = moveActor;
-    try {
-      // Optimistic + exact rollback; failures keep the previous tree.
-      await runMove(actor, destination);
+    const outcome = await runSharedMove('keyboard-move-dialog', moveActor, destination);
+    if (outcome.status === 'moved') {
       setMoveActor(null);
       setMoveError(null);
-      selectNode(actor);
-      focusNode(actor);
-    } catch {
-      setMoveError(useLibraryStore.getState().lastMoveError ?? 'Move failed.');
+    } else {
+      // 10.15: dialog stays open on the restored tree with the message.
+      setMoveError(outcome.message ?? 'Move failed.');
     }
+  };
+
+  // ── Drag-and-drop (10.8): dnd-kit events -> (source, target) pairs ──
+  // -> the same shared action. Space-only keyboard sensor activation so
+  // the pinned Enter behavior (connect/select) is untouched.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, {
+      keyboardCodes: { start: ['Space'], cancel: ['Escape'], end: ['Space'] },
+    })
+  );
+
+  const handleDragEnd = (event: DragEndEvent): void => {
+    const pair = dragEventToMove({
+      activeKey: String(event.active.id),
+      overKey: event.over ? String(event.over.id) : null,
+    });
+    if (!pair) return;
+    void (async () => {
+      const outcome = await runSharedMove('drag-drop', pair.source, pair.target);
+      if (outcome.status === 'restored') {
+        // 10.15 for the drag surface: toast the error; location/focus
+        // are already restored by the rollback + focusAfter above.
+        addToast({ message: outcome.message ?? 'Move failed.', type: 'error' });
+      }
+    })();
   };
 
   const confirmRename = async (): Promise<void> => {
@@ -399,136 +599,55 @@ export function ConnectionTree() {
         />
       </div>
 
-      {/* The tree (Req 10.3/10.13/10.14) */}
-      <div
-        role="tree"
-        aria-label="Connections"
-        onKeyDown={handleTreeKeyDown}
-        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
-      >
-        {isLoading && tree.libraries.length === 0 ? (
-          <p className="px-2 py-4 text-[12px] text-[var(--color-text-muted)]">Loading…</p>
-        ) : error ? (
-          <p role="alert" className="px-2 py-4 text-[12px] text-[var(--color-danger)]">{error}</p>
-        ) : isFilterActive && a11yNodes.length === 0 ? (
-          <p className="px-2 py-4 text-[12px] text-[var(--color-text-muted)]">{FILTER_EMPTY_STATE_TEXT}</p>
-        ) : a11yNodes.length === 0 ? (
-          <p className="px-2 py-4 text-[12px] text-[var(--color-text-muted)]">No libraries yet</p>
-        ) : (
-          a11yNodes.map((a11y) => {
-            const key = nodeKey(a11y.node);
-            const isContainer = a11y.kind !== 'connection';
-            const status =
-              a11y.kind === 'connection' ? (statuses[a11y.node.id] ?? 'disconnected') : null;
-            return (
-              <div
-                key={key}
-                ref={(el) => {
-                  if (el) itemRefs.current.set(key, el);
-                  else itemRefs.current.delete(key);
-                }}
-                role="treeitem"
-                aria-label={treeItemLabel(a11y)}
-                {...treeItemAria(a11y)}
-                tabIndex={key === effectiveFocusedKey ? 0 : -1}
-                onClick={() => {
-                  selectNode(a11y.node);
+      {/* The tree (Req 10.3/10.13/10.14) + drag-and-drop (10.8, 8.4):
+          every drop funnels into the same shared action as the Move
+          dialog — see tree-move and runSharedMove above. */}
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <div
+          role="tree"
+          aria-label="Connections"
+          onKeyDown={handleTreeKeyDown}
+          className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
+        >
+          {isLoading && tree.libraries.length === 0 ? (
+            <p className="px-2 py-4 text-[12px] text-[var(--color-text-muted)]">Loading…</p>
+          ) : error ? (
+            <p role="alert" className="px-2 py-4 text-[12px] text-[var(--color-danger)]">{error}</p>
+          ) : isFilterActive && a11yNodes.length === 0 ? (
+            <p className="px-2 py-4 text-[12px] text-[var(--color-text-muted)]">{FILTER_EMPTY_STATE_TEXT}</p>
+          ) : a11yNodes.length === 0 ? (
+            <p className="px-2 py-4 text-[12px] text-[var(--color-text-muted)]">No libraries yet</p>
+          ) : (
+            a11yNodes.map((a11y) => (
+              <TreeRow
+                key={nodeKey(a11y.node)}
+                a11y={a11y}
+                status={a11y.kind === 'connection' ? (statuses[a11y.node.id] ?? 'disconnected') : null}
+                isFilterActive={isFilterActive}
+                isFocused={nodeKey(a11y.node) === effectiveFocusedKey}
+                menuOpen={sameNode(menuNode, a11y.node)}
+                registerRef={registerItemRef}
+                focusRow={(key) => itemRefs.current.get(key)?.focus()}
+                onRowClick={(node, key) => {
+                  selectNode(node);
                   setFocusedKey(key);
                 }}
-                onDoubleClick={() => {
-                  if (a11y.kind === 'connection') connectNode(a11y.node);
+                onConnect={connectNode}
+                onOpenMenu={openMenu}
+                onMenuOpenChange={(open, node) => {
+                  if (open) setMenuNode(node);
+                  else if (sameNode(menuNode, node)) setMenuNode(null);
                 }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  openMenu(a11y.node);
+                onMenuItemSelect={(node, item) => {
+                  setMenuNode(null);
+                  runMenuAction(node, item);
                 }}
-                className={cn(
-                  'group flex cursor-pointer items-center gap-1.5 rounded-md py-1.5 pr-1 text-[13px] outline-none',
-                  'focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]',
-                  a11y.selected && 'bg-[var(--color-accent)]/10 text-[var(--color-accent)]'
-                )}
-                style={{ paddingLeft: (a11y.level - 1) * 14 + 6 }}
-              >
-                {isContainer && !isFilterActive && (
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    aria-hidden="true"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleExpanded(a11y.node.id);
-                    }}
-                    className="shrink-0 p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
-                  >
-                    {a11y.expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  </button>
-                )}
-                {isContainer && isFilterActive && <span className="w-[19px] shrink-0" />}
-                <span className="shrink-0 text-[var(--color-text-muted)]">
-                  {a11y.kind === 'library' ? (
-                    <LibraryIcon size={15} />
-                  ) : a11y.kind === 'folder' ? (
-                    a11y.expanded ? <FolderOpen size={15} /> : <Folder size={15} />
-                  ) : (
-                    <Monitor size={15} />
-                  )}
-                </span>
-                <span className="flex-1 truncate">{a11y.name}</span>
-                <span className="flex shrink-0 items-center gap-1 text-[10px] text-[var(--color-text-muted)]">
-                  {status && (
-                    <span
-                      aria-hidden="true"
-                      className="inline-block h-1.5 w-1.5 rounded-full"
-                      style={{ background: STATUS_DOT_COLOR[status] }}
-                    />
-                  )}
-                  {a11y.statusText}
-                </span>
-                <DropdownMenu
-                  open={sameNode(menuNode, a11y.node)}
-                  onOpenChange={(open) => {
-                    if (open) setMenuNode(a11y.node);
-                    else if (sameNode(menuNode, a11y.node)) setMenuNode(null);
-                  }}
-                >
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      aria-label={`Actions for ${a11y.name}`}
-                      onClick={(e) => e.stopPropagation()}
-                      className="shrink-0 rounded p-1 text-[var(--color-text-muted)] opacity-0 focus-visible:opacity-100 group-hover:opacity-100 hover:text-[var(--color-text-secondary)]"
-                    >
-                      <MoreVertical size={14} />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="start"
-                    onCloseAutoFocus={(e) => {
-                      // Pinned (ux-acceptance Row 1): closing the menu —
-                      // dismissed or after selecting — returns focus to the node.
-                      e.preventDefault();
-                      itemRefs.current.get(key)?.focus();
-                    }}
-                  >
-                    {contextMenuItems(a11y.kind).map((item) => (
-                      <DropdownMenuItem
-                        key={item}
-                        onSelect={() => {
-                          setMenuNode(null);
-                          runMenuAction(a11y.node, item);
-                        }}
-                      >
-                        {item}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            );
-          })
-        )}
-      </div>
+                onToggleExpanded={toggleExpanded}
+              />
+            ))
+          )}
+        </div>
+      </DndContext>
 
       {/* Deletion confirmation (10.18: exact counts) */}
       <Dialog
@@ -563,7 +682,8 @@ export function ConnectionTree() {
         </DialogContent>
       </Dialog>
 
-      {/* Move (basic keyboard-equivalent path; the shared action is 8.4) */}
+      {/* Move (10.14 keyboard equivalent): the dialog and drag share the
+          tree-move transaction; targets come from the shared filtering. */}
       <Dialog
         open={moveActor !== null}
         onOpenChange={(open) => {
@@ -581,7 +701,7 @@ export function ConnectionTree() {
             Choose a destination folder or library root.
           </p>
           <div className="flex max-h-64 flex-col gap-1 overflow-y-auto">
-            {moveDestinations.map((dest) => (
+            {dialogDestinations.map((dest) => (
               <Button
                 key={nodeKey(dest.node)}
                 variant="ghost"
