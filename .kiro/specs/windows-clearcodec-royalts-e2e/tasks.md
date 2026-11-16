@@ -250,7 +250,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Tests cover supported EGFX codecs, no-EGFX bitmap fallback and absence of AVC advertisement.
   - _Boundary: Codec policy_
   - _Requirements: 9.1,9.3,9.5_
-- [ ] 9.2 Connect upstream compositor to existing frame paths
+- [x] 9.2 Connect upstream compositor to existing frame paths
   - Reuse GraphicsPipelineClient surface lifecycle and frame acknowledgement; adapt decoded output to SharedFrame and current packets, no custom codec.
   - Done: Fixtures cover ClearCodec and allowed alternate codecs plus surface reset/resize; GPU/canvas receive matching pixels.
   - _Boundary: EGFX adapter integration_

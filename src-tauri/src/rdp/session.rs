@@ -818,6 +818,22 @@ impl SessionActor {
                             let stride = image.stride();
                             let img_data = image.data();
                             let mut guard = sf.begin_write();
+                            // Task 9.2 (Req 4.1/4.2): an EGFX graphics-output
+                            // reset resizes the decoded image upstream
+                            // (`ResetGraphics` → `reset_preserving_pointer`
+                            // inside `ActiveStage::process`). Resize the
+                            // SharedFrame with it and repaint in full so the
+                            // GPU surface and the webview canvas never see a
+                            // mixed-size buffer.
+                            if guard.width() != u32::from(image.width())
+                                || guard.height() != u32::from(image.height())
+                            {
+                                guard.update_full(
+                                    u32::from(image.width()),
+                                    u32::from(image.height()),
+                                    img_data,
+                                );
+                            }
                             for rect in &updated_regions {
                                 let x_offset = usize::from(rect.left) * 4;
                                 let y_start = usize::from(rect.top);
@@ -4331,6 +4347,536 @@ mod tests {
                 "cancel during reactivation must not error (got {statuses:?})"
             );
             assert_eq!(session.connect_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// Task 9.2 (Req 4.1/4.2/9.2/9.4) — the EGFX route through the REAL
+    /// session loop. A scripted server creates the graphics dynamic virtual
+    /// channel over DRDYNVC and sends ClearCodec frames; the tests assert the
+    /// existing frame paths (IPC packets + SharedFrame/GPU feed) receive
+    /// matching pixels, and that a graphics reset resizes the SharedFrame.
+    ///
+    /// All frames are real ironrdp_pdu encodings delivered over the
+    /// in-memory framed seam (`ConnectionOutcome::RealSessionLocal`) — no
+    /// network, no mocks of the decode path.
+    mod real_session_egfx {
+        use super::*;
+        use crate::rdp::client::ConnectionOutcome;
+        use ironrdp_core::{WriteBuf, encode_buf};
+        use ironrdp_dvc::pdu::{CreateRequestPdu, DataPdu, DrdynvcDataPdu, DrdynvcServerPdu};
+        use ironrdp_egfx::CHANNEL_NAME;
+        use ironrdp_egfx::pdu::{
+            CapabilitiesConfirmPdu, Codec1Type, CreateSurfacePdu, EndFramePdu, GfxPdu,
+            MapSurfaceToOutputPdu, PixelFormat, RawCapabilitySet, ResetGraphicsPdu, StartFramePdu,
+            Timestamp, WireToSurface1Pdu,
+        };
+        use ironrdp_graphics::zgfx::{CompressionMode, Compressor, compress_and_wrap_egfx};
+        use ironrdp_pdu::mcs::{McsMessage, SendDataIndication};
+        use ironrdp_pdu::rdp::capability_sets::SERVER_CHANNEL_ID;
+        use ironrdp_pdu::x224::X224;
+        use ironrdp_pdu::{encode_vec, geometry::ExclusiveRectangle};
+        use std::sync::Mutex as StdMutex;
+
+        /// Server-assigned DRDYNVC static channel id in the fixture.
+        const DRDYNVC_CHANNEL_ID: u16 = 1005;
+        /// Dynamic channel id the scripted server picks for EGFX.
+        const GFX_DVC_CHANNEL_ID: u32 = 7;
+        const W: u16 = 64;
+        const H: u16 = 64;
+
+        fn expected_rgba(width: u16, height: u16) -> Vec<u8> {
+            let pixels = usize::from(width) * usize::from(height);
+            let mut rgba = Vec::with_capacity(pixels * 4);
+            for n in 0..pixels {
+                rgba.extend_from_slice(&[
+                    (n % 256) as u8,
+                    100 + (n % 100) as u8,
+                    200 + (n % 55) as u8,
+                    255,
+                ]);
+            }
+            rgba
+        }
+
+        fn expected_rgba_after_resize(width: u16, height: u16) -> Vec<u8> {
+            let pixels = usize::from(width) * usize::from(height);
+            let mut rgba = Vec::with_capacity(pixels * 4);
+            for n in 0..pixels {
+                rgba.extend_from_slice(&[
+                    230 - (n % 200) as u8,
+                    5 + (n % 250) as u8,
+                    60 + (n % 177) as u8,
+                    255,
+                ]);
+            }
+            rgba
+        }
+
+        fn clearcodec_bgra(rgba: &[u8]) -> Vec<u8> {
+            let (pixels, _) = rgba.as_chunks::<4>();
+            pixels
+                .iter()
+                .flat_map(|p| [p[2], p[1], p[0], p[3]])
+                .collect()
+        }
+
+        fn dvc_frame(pdu: &DrdynvcServerPdu) -> Vec<u8> {
+            use ironrdp_pdu::rdp::vc::{ChannelControlFlags, ChannelPduHeader};
+
+            let pdu_bytes = encode_vec(pdu).expect("scripted drdynvc PDU encodes");
+            let header = encode_vec(&ChannelPduHeader {
+                length: pdu_bytes.len() as u32,
+                flags: ChannelControlFlags::FLAG_FIRST | ChannelControlFlags::FLAG_LAST,
+            })
+            .expect("channel pdu header encodes");
+            let mut user_data = Vec::with_capacity(header.len() + pdu_bytes.len());
+            user_data.extend_from_slice(&header);
+            user_data.extend_from_slice(&pdu_bytes);
+
+            encode_vec(&X224(McsMessage::SendDataIndication(SendDataIndication {
+                initiator_id: SERVER_CHANNEL_ID,
+                channel_id: DRDYNVC_CHANNEL_ID,
+                user_data: std::borrow::Cow::Owned(user_data),
+            })))
+            .expect("scripted x224 frame encodes")
+        }
+
+        fn gfx_data(pdu: &GfxPdu, compressor: &mut Compressor) -> Vec<u8> {
+            let mut buf = WriteBuf::new();
+            encode_buf(pdu, &mut buf).expect("GfxPdu encode");
+            let wrapped = compress_and_wrap_egfx(buf.filled(), compressor, CompressionMode::Never)
+                .expect("zgfx wrap");
+            dvc_frame(&DrdynvcServerPdu::Data(DrdynvcDataPdu::Data(DataPdu::new(
+                GFX_DVC_CHANNEL_ID,
+                wrapped,
+            ))))
+        }
+
+        fn full_rect(width: u16, height: u16) -> ExclusiveRectangle {
+            ExclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            }
+        }
+
+        fn clearcodec_wire(expected: &[u8], width: u16, height: u16) -> WireToSurface1Pdu {
+            WireToSurface1Pdu {
+                surface_id: 1,
+                codec_id: Codec1Type::ClearCodec,
+                pixel_format: PixelFormat::XRgb,
+                destination_rectangle: full_rect(width, height),
+                bitmap_data: ironrdp_graphics::clearcodec::ClearCodecEncoder::new().encode(
+                    &clearcodec_bgra(expected),
+                    width,
+                    height,
+                ),
+            }
+        }
+
+        /// The scripted server's full frame sequence: DVC creation handshake,
+        /// compositor surface setup, then one ClearCodec frame.
+        fn egfx_server_frames(expected: &[u8]) -> Vec<Vec<u8>> {
+            let mut compressor = Compressor::new();
+            let mut frames = vec![dvc_frame(&DrdynvcServerPdu::Create(CreateRequestPdu::new(
+                GFX_DVC_CHANNEL_ID,
+                CHANNEL_NAME.to_owned(),
+            )))];
+
+            let confirm = ironrdp_egfx::pdu::CapabilitySet::V10_7 {
+                flags: ironrdp_egfx::pdu::CapabilitiesV107Flags::AVC_DISABLED
+                    | ironrdp_egfx::pdu::CapabilitiesV107Flags::SMALL_CACHE,
+            };
+            frames.push(gfx_data(
+                &GfxPdu::CapabilitiesConfirm(CapabilitiesConfirmPdu(RawCapabilitySet::from(
+                    &confirm,
+                ))),
+                &mut compressor,
+            ));
+            frames.push(gfx_data(
+                &GfxPdu::ResetGraphics(ResetGraphicsPdu {
+                    width: u32::from(W),
+                    height: u32::from(H),
+                    monitors: Vec::new(),
+                }),
+                &mut compressor,
+            ));
+            frames.push(gfx_data(
+                &GfxPdu::CreateSurface(CreateSurfacePdu {
+                    surface_id: 1,
+                    width: W,
+                    height: H,
+                    pixel_format: PixelFormat::XRgb,
+                }),
+                &mut compressor,
+            ));
+            frames.push(gfx_data(
+                &GfxPdu::MapSurfaceToOutput(MapSurfaceToOutputPdu {
+                    surface_id: 1,
+                    output_origin_x: 0,
+                    output_origin_y: 0,
+                }),
+                &mut compressor,
+            ));
+            frames.extend(egfx_frame_frames(
+                1,
+                clearcodec_wire(expected, W, H),
+                &mut compressor,
+            ));
+            frames
+        }
+
+        /// StartFrame + WireToSurface1 + EndFrame as transport frames.
+        fn egfx_frame_frames(
+            frame_id: u32,
+            wire: WireToSurface1Pdu,
+            compressor: &mut Compressor,
+        ) -> Vec<Vec<u8>> {
+            vec![
+                gfx_data(
+                    &GfxPdu::StartFrame(StartFramePdu {
+                        timestamp: Timestamp {
+                            milliseconds: 0,
+                            seconds: 0,
+                            minutes: 0,
+                            hours: 0,
+                        },
+                        frame_id,
+                    }),
+                    compressor,
+                ),
+                gfx_data(&GfxPdu::WireToSurface1(wire), compressor),
+                gfx_data(&GfxPdu::EndFrame(EndFramePdu { frame_id }), compressor),
+            ]
+        }
+
+        /// Captured frame packets, in emission order (raw IPC bytes).
+        type CapturedPackets = Arc<StdMutex<Vec<Vec<u8>>>>;
+
+        /// Frame-capturing IPC channel: records every raw packet verbatim.
+        fn packet_capturing_channel() -> (tauri::ipc::Channel<InvokeResponseBody>, CapturedPackets)
+        {
+            let packets: CapturedPackets = Arc::new(StdMutex::new(Vec::new()));
+            let sink = Arc::clone(&packets);
+            let channel = tauri::ipc::Channel::new(move |response| {
+                if let InvokeResponseBody::Raw(bytes) = response {
+                    sink.lock().unwrap().push(bytes);
+                }
+                Ok(())
+            });
+            (channel, packets)
+        }
+
+        /// Duplex capacity for the EGFX scripted server: ClearCodec frames on
+        /// high-entropy fixture patterns encode to tens of KB each, and the
+        /// whole script is written up-front — the buffer must hold it (the
+        /// tiny reactivation frames never stressed the 64 KB default).
+        const EGFX_DUPLEX_CAPACITY: usize = 4 * 1024 * 1024;
+
+        struct EgfxTestSession {
+            session: TestSession,
+            packets: CapturedPackets,
+            shared_frame: Arc<SharedFrame>,
+        }
+
+        /// Create a real-session actor over the in-memory seam whose
+        /// ConnectionResult carries the task 9.2 EGFX wiring (the actor-seam
+        /// twin of `attempt_rdp_connection`'s connector attachment).
+        async fn create_egfx_session(
+            manager: &SessionManager,
+            tag: &str,
+            server_frames: Vec<Vec<u8>>,
+            shared_frame: Arc<SharedFrame>,
+        ) -> EgfxTestSession {
+            let (events, events_rx) = RecordedEvents::new();
+            let frame_sizes = Arc::new(StdMutex::new(Vec::new()));
+            let connect_calls = Arc::new(AtomicUsize::new(0));
+            let (channel, packets) = packet_capturing_channel();
+            let (client_end, mut server_end) = tokio::io::duplex(EGFX_DUPLEX_CAPACITY);
+
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                for frame in server_frames {
+                    server_end
+                        .write_all(&frame)
+                        .await
+                        .expect("scripted EGFX server write");
+                }
+                // Park like an idle server: the session stays live.
+                std::future::pending::<()>().await;
+            });
+
+            let scripted_once = StdMutex::new(Some(client_end));
+            let calls = Arc::clone(&connect_calls);
+            let connect: ConnectFn = Arc::new(move |_config, _password, _width, _height| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let scripted = scripted_once.lock().unwrap().take();
+                Box::pin(async move {
+                    match scripted {
+                        Some(stream) => {
+                            let mut connection_result =
+                                crate::rdp::baseline::synthetic_connection_result(W, H);
+                            crate::rdp::egfx::attach_to_stage_channels(
+                                &mut connection_result.static_channels,
+                                DRDYNVC_CHANNEL_ID,
+                            );
+                            ConnectionOutcome::RealSessionLocal {
+                                connection_result: Box::new(connection_result),
+                                framed: Box::new(ironrdp_tokio::TokioFramed::new(stream)),
+                            }
+                        }
+                        None => ConnectionOutcome::Failed(
+                            "scripted EGFX session already consumed".to_string(),
+                        ),
+                    }
+                })
+            });
+
+            let id = manager
+                .create_session_with_transport(
+                    test_config(tag),
+                    None,
+                    channel,
+                    SessionEventSink::recorded(Arc::clone(&events)),
+                    true,
+                    Some(Arc::clone(&shared_frame)),
+                    connect,
+                )
+                .await
+                .expect("scripted EGFX session creation should succeed");
+            let cmd_tx = manager
+                .get_cmd_sender(&id)
+                .await
+                .expect("session handle exists right after creation");
+            EgfxTestSession {
+                session: TestSession {
+                    id,
+                    cmd_tx,
+                    events,
+                    events_rx,
+                    frame_sizes,
+                    connect_calls,
+                },
+                packets,
+                shared_frame,
+            }
+        }
+
+        /// Poll until `pred(packet_count)` holds, bounded by a generous
+        /// paused-clock timeout (auto-advance keeps this deterministic).
+        async fn wait_for_packets(egfx: &EgfxTestSession, pred: impl Fn(usize) -> bool) -> usize {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            loop {
+                let count = egfx.packets.lock().unwrap().len();
+                if pred(count) {
+                    return count;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "timed out waiting for frame packets; recorded statuses: {:?}",
+                    statuses_of(&info_events(&egfx.session.id, &egfx.session.events))
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        /// One parsed frame packet: kind byte, surface dims, dirty rects
+        /// (left, top, width, height) and the packed RGBA payload.
+        struct ParsedPacket {
+            kind: u8,
+            width: u16,
+            height: u16,
+            rects: Vec<(u16, u16, u16, u16)>,
+            pixels: Vec<u8>,
+        }
+
+        fn parse_packet(packet: &[u8]) -> ParsedPacket {
+            let kind = packet[0];
+            let width = u16::from_le_bytes([packet[1], packet[2]]);
+            let height = u16::from_le_bytes([packet[3], packet[4]]);
+            let count = u16::from_le_bytes([packet[5], packet[6]]) as usize;
+            let mut rects = Vec::with_capacity(count);
+            let mut offset = 7;
+            for _ in 0..count {
+                rects.push((
+                    u16::from_le_bytes([packet[offset], packet[offset + 1]]),
+                    u16::from_le_bytes([packet[offset + 2], packet[offset + 3]]),
+                    u16::from_le_bytes([packet[offset + 4], packet[offset + 5]]),
+                    u16::from_le_bytes([packet[offset + 6], packet[offset + 7]]),
+                ));
+                offset += 8;
+            }
+            ParsedPacket {
+                kind,
+                width,
+                height,
+                rects,
+                pixels: packet[offset..].to_vec(),
+            }
+        }
+
+        async fn disconnect_and_wait(egfx: &EgfxTestSession) {
+            let mut rx = egfx.session.events_rx.clone();
+            egfx.session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .expect("disconnect accepted");
+            wait_for(&egfx.session.id, &egfx.session.events, &mut rx, |events| {
+                events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
+            })
+            .await;
+        }
+
+        /// The EGFX DVC route renders ClearCodec frames through the existing
+        /// packet + SharedFrame paths with matching pixels (Req 9.2, 4.1).
+        #[tokio::test(start_paused = true)]
+        async fn egfx_clearcodec_frame_reaches_packets_and_gpu_feed() {
+            let manager = SessionManager::new();
+            let expected = expected_rgba(W, H);
+            let egfx = create_egfx_session(
+                &manager,
+                "egfx-clear",
+                egfx_server_frames(&expected),
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+
+            wait_for_packets(&egfx, |n| n >= 1).await;
+            let packets = egfx.packets.lock().unwrap().clone();
+            let parsed = parse_packet(&packets[0]);
+            assert_eq!(parsed.kind, 2, "EGFX route emits bitmap kind-2 packets");
+            assert_eq!((parsed.width, parsed.height), (W, H));
+            assert_eq!(
+                parsed.rects,
+                vec![(0, 0, W, H)],
+                "full-surface refresh after the initial reset"
+            );
+            assert_eq!(
+                parsed.pixels, expected,
+                "canvas packet pixels match the decoded ClearCodec frame"
+            );
+
+            // GPU feed: the SharedFrame snapshot is exactly what
+            // GpuRenderer::render uploads to the wgpu texture.
+            let snapshot = egfx.shared_frame.publish().expect("dirty after the frame");
+            assert_eq!(snapshot.width, u32::from(W));
+            assert_eq!(snapshot.height, u32::from(H));
+            assert_eq!(snapshot.data, expected);
+
+            // No H.264 transport anywhere on this route (Req 9.4).
+            for packet in &packets {
+                assert_ne!(packet[0], 3, "no kind-3/H.264 packet may be emitted");
+            }
+
+            disconnect_and_wait(&egfx).await;
+        }
+
+        /// A server graphics reset (resize) resizes the decoded image, the
+        /// SharedFrame follows, and the next frame repaints in full (Req 4.1).
+        #[tokio::test(start_paused = true)]
+        async fn egfx_reset_graphics_resizes_shared_frame_and_repaints() {
+            let manager = SessionManager::new();
+            let expected = expected_rgba(W, H);
+            let expected2 = expected_rgba_after_resize(96, 64);
+
+            // Script: initial frame, then ResetGraphics to 96x64 + new
+            // surface + a full ClearCodec frame at the new size.
+            let mut server_frames = egfx_server_frames(&expected);
+            let mut compressor = Compressor::new();
+            server_frames.push(gfx_data(
+                &GfxPdu::ResetGraphics(ResetGraphicsPdu {
+                    width: 96,
+                    height: 64,
+                    monitors: Vec::new(),
+                }),
+                &mut compressor,
+            ));
+            server_frames.push(gfx_data(
+                &GfxPdu::CreateSurface(CreateSurfacePdu {
+                    surface_id: 1,
+                    width: 96,
+                    height: 64,
+                    pixel_format: PixelFormat::XRgb,
+                }),
+                &mut compressor,
+            ));
+            server_frames.push(gfx_data(
+                &GfxPdu::MapSurfaceToOutput(MapSurfaceToOutputPdu {
+                    surface_id: 1,
+                    output_origin_x: 0,
+                    output_origin_y: 0,
+                }),
+                &mut compressor,
+            ));
+            server_frames.extend(egfx_frame_frames(
+                2,
+                clearcodec_wire(&expected2, 96, 64),
+                &mut compressor,
+            ));
+
+            let egfx = create_egfx_session(
+                &manager,
+                "egfx-reset",
+                server_frames,
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+
+            // Wait until the post-reset packet (surface width 96) arrived.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            let resized_packet = loop {
+                let packets = egfx.packets.lock().unwrap().clone();
+                let describe = |packets: &[Vec<u8>]| {
+                    packets
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "kind={} w={} len={}",
+                                p[0],
+                                u16::from_le_bytes([p[1], p[2]]),
+                                p.len()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if let Some(p) = packets
+                    .iter()
+                    .find(|p| p.len() >= 4 && u16::from_le_bytes([p[1], p[2]]) == 96)
+                {
+                    break p.clone();
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "post-reset packet never arrived; packets so far: [{}]; recorded statuses: {:?}",
+                    describe(&packets),
+                    statuses_of(&info_events(&egfx.session.id, &egfx.session.events))
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
+
+            let parsed = parse_packet(&resized_packet);
+            assert_eq!(parsed.kind, 2);
+            assert_eq!(
+                (parsed.width, parsed.height),
+                (96, 64),
+                "packet carries the resized surface dims"
+            );
+            assert_eq!(parsed.rects, vec![(0, 0, 96, 64)]);
+            assert_eq!(parsed.pixels, expected2);
+
+            // SharedFrame resized + fully repainted at the new size.
+            let snapshot = egfx
+                .shared_frame
+                .publish()
+                .expect("dirty after the resize frame");
+            assert_eq!(snapshot.width, 96);
+            assert_eq!(snapshot.height, 64);
+            assert_eq!(snapshot.data, expected2);
+
+            disconnect_and_wait(&egfx).await;
         }
     }
 }

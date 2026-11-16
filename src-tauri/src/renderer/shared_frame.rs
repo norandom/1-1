@@ -65,6 +65,31 @@ impl WriteGuard<'_> {
         }
     }
 
+    /// Resize (when the dimensions changed) and overwrite the whole frame
+    /// buffer in one locked step (task 9.2).
+    ///
+    /// A graphics-output reset resizes the session's decoded image upstream
+    /// (`DecodedImage::reset_preserving_pointer`); the session loop calls
+    /// this so the SharedFrame the GPU renderer reads is reallocated and
+    /// fully repainted at the new size before any dirty-rect writes land.
+    ///
+    /// Returns `false` and leaves the frame untouched when `data` is shorter
+    /// than `width * height * 4` (same silent-ignore contract as
+    /// [`SharedFrame::update_full`]).
+    pub fn update_full(&mut self, width: u32, height: u32, data: &[u8]) -> bool {
+        let expected = (width as usize) * (height as usize) * 4;
+        if data.len() < expected {
+            return false;
+        }
+        if self.inner.width != width || self.inner.height != height {
+            self.inner.width = width;
+            self.inner.height = height;
+            self.inner.write_buf.resize(expected, 0);
+        }
+        self.inner.write_buf[..expected].copy_from_slice(&data[..expected]);
+        true
+    }
+
     pub fn width(&self) -> u32 {
         self.inner.width
     }
@@ -112,19 +137,12 @@ impl SharedFrame {
     /// Called by the session actor to update the entire frame.
     #[allow(dead_code)]
     pub fn update_full(&self, width: u32, height: u32, data: &[u8]) {
-        let mut inner = self.inner.lock().unwrap();
-        let expected = (width * height * 4) as usize;
-        if data.len() < expected {
-            return;
+        let mut guard = self.begin_write();
+        let applied = guard.update_full(width, height, data);
+        drop(guard);
+        if applied {
+            self.mark_dirty();
         }
-        if inner.width != width || inner.height != height {
-            inner.width = width;
-            inner.height = height;
-            inner.write_buf.resize(expected, 0);
-        }
-        inner.write_buf[..expected].copy_from_slice(&data[..expected]);
-        drop(inner);
-        self.mark_dirty();
     }
 
     /// Single rect update (for simple cases). For multiple rects, use begin_write().

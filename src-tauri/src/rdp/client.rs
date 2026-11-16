@@ -246,6 +246,12 @@ pub async fn attempt_rdp_connection(
     connector.attach_static_channel(ironrdp_cliprdr::CliprdrClient::new(Box::new(
         SessionClipboardBackend::new(),
     )));
+    // Task 9.2 (Req 9.2/9.4): register the graphics pipeline DVC on the
+    // DRDYNVC static channel — the EGFX adapter (no H.264 decoder). Without
+    // this, a real server's EGFX channel creation meets an unregistered
+    // processor even though 9.1 advertises
+    // `support_dyn_vc_gfx_protocol`.
+    crate::rdp::egfx::attach_to_connector(&mut connector);
 
     let mut framed = TokioFramed::new(tcp_stream);
 
