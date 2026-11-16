@@ -303,6 +303,205 @@ impl fmt::Display for ObservedCodec {
     }
 }
 
+/// Consecutive failed-frame observations that stop the session (Req 9.7:
+/// "three consecutive EGFX frames fail to decode").
+pub const MAX_CONSECUTIVE_DECODE_FAILURES: u32 = 3;
+
+/// Terminal codec/decode error policy for one session (task 9.3, Req
+/// 9.6/9.7) — the "Codec error policy" boundary between the EGFX pipeline
+/// and the session actor.
+///
+/// One instance per connection, shared as an [`std::sync::Arc`] between the
+/// two places the pinned upstream surface makes codec fate observable
+/// (dependency spike, research.md §"Req 9.6/9.7 hook surfaces"):
+///
+/// * the EGFX handler ([`crate::rdp::egfx::DriftGfxHandler`]) reports what
+///   the pipeline surfaces: unsupported/AVC codec arrivals via
+///   `GraphicsPipelineHandler::on_unhandled_pdu` (AVC444/AVC444v2 are
+///   forwarded there WITHOUT decoding when no H.264 decoder is configured —
+///   ironrdp-egfx 0.5.0 client.rs L1098–1107) and codec-tagged decoded
+///   deliveries via `on_bitmap_updated`;
+/// * the session loop samples the upstream decode-failure counter
+///   (`GraphicsPipelineClient::dropped_updates` — upstream deliberately
+///   CONTINUES past decode failures, counting them in `drop_update`,
+///   client.rs L1211–1230) once per processed PDU and applies the
+///   three-consecutive-strikes rule.
+///
+/// A terminal error is FINAL for the session: the actor publishes an error
+/// status and ends without reconnecting (Req 9.6 — retrying the same
+/// incompatible configuration would repeat the failure); only a fresh
+/// Connect gesture restarts it (task 7.1 admission).
+///
+/// All methods are non-blocking; handler callbacks run synchronously inside
+/// `ActiveStage::process`, the loop evaluates between PDUs, so a
+/// [`std::sync::Mutex`] is sufficient and lock hold times are trivial.
+pub struct CodecErrorPolicy {
+    state: std::sync::Mutex<PolicyState>,
+}
+
+struct PolicyState {
+    /// First terminal error wins; later observations cannot soften it.
+    terminal: Option<String>,
+    /// Decoded-bitmap deliveries since the loop's last evaluation — the
+    /// "successfully decoded frame" signal that resets the strike counter.
+    delivered_bitmaps_since_sample: u32,
+    /// Upstream `dropped_updates()` at the previous evaluation; `None`
+    /// until the first sample established the baseline.
+    dropped_baseline: Option<u64>,
+    /// Consecutive failure observations (Req 9.7).
+    consecutive_failures: u32,
+}
+
+impl Default for CodecErrorPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CodecErrorPolicy {
+    pub fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(PolicyState {
+                terminal: None,
+                delivered_bitmaps_since_sample: 0,
+                dropped_baseline: None,
+                consecutive_failures: 0,
+            }),
+        }
+    }
+
+    /// Terminal error for an unsupported observed codec: names the codec,
+    /// says why it cannot be decoded, and what to change before connecting
+    /// again (design "Error Handling": actionable, not a raw protocol code).
+    fn unsupported_codec_error(observed: &ObservedCodec) -> String {
+        match observed {
+            ObservedCodec::Avc(variant) => format!(
+                "Unsupported graphics codec {variant} (H.264/AVC) arrived on the graphics \
+                 pipeline; Drift does not decode H.264. Disable AVC/H.264 in the server's \
+                 graphics settings and connect again."
+            ),
+            other => format!(
+                "Unsupported graphics codec {other} arrived on the graphics pipeline; the \
+                 advertised set is ClearCodec, Planar, Uncompressed or RFX Progressive. \
+                 Enable one of those on the server and connect again."
+            ),
+        }
+    }
+
+    /// Terminal error for the three-consecutive decode failures (Req 9.7).
+    fn decode_failure_error() -> String {
+        format!(
+            "{MAX_CONSECUTIVE_DECODE_FAILURES} consecutive graphics frames failed to decode; \
+             the session was stopped because reconnecting would repeat the same failure. \
+             Check the server's graphics codec settings and connect again."
+        )
+    }
+
+    /// Record a terminal error; the first one wins (an earlier, more
+    /// precise codec identity is not overwritten by later observations).
+    fn set_terminal(&self, error: String) {
+        let mut state = self.state.lock().unwrap();
+        state.terminal.get_or_insert(error);
+    }
+
+    /// Handler-side: a bitmap the pipeline decoded and delivered, tagged
+    /// with the codec the server used for it.
+    ///
+    /// A supported codec marks decode success (the Req 9.7 reset signal).
+    /// An unsupported codec — any AVC variant or a codec outside the
+    /// policy's set — is terminal: Drift advertised exactly the supported
+    /// set, so the server is violating the negotiated capabilities, and
+    /// design.md L207 requires a terminal actionable error rather than
+    /// rendering foreign pixels (Req 9.6).
+    pub fn note_bitmap_delivered(&self, codec: Codec1Type) {
+        match ObservedCodec::from_wire_codec1(codec) {
+            ObservedCodec::Supported(_) => {
+                self.state.lock().unwrap().delivered_bitmaps_since_sample += 1;
+            }
+            unsupported @ (ObservedCodec::Avc(_) | ObservedCodec::Other(_)) => {
+                self.set_terminal(Self::unsupported_codec_error(&unsupported));
+            }
+        }
+    }
+
+    /// Handler-side: a PDU the pipeline could not handle. For
+    /// `WireToSurface1` this is the spike-proven AVC444/AVC444v2 arrival
+    /// path — forwarded BEFORE decode when no H.264 decoder is configured
+    /// — so the terminal fires without any decode attempt (Req 9.6
+    /// "without decoding it"). Non-bitmap PDUs are not codec arrivals and
+    /// stay non-terminal (no false session kills on benign oddities such
+    /// as a server-side QoE acknowledge).
+    pub fn note_unhandled_pdu(&self, pdu: &ironrdp_egfx::pdu::GfxPdu) {
+        if let ironrdp_egfx::pdu::GfxPdu::WireToSurface1(wire) = pdu
+            && let unsupported @ (ObservedCodec::Avc(_) | ObservedCodec::Other(_)) =
+                ObservedCodec::from_wire_codec1(wire.codec_id)
+        {
+            self.set_terminal(Self::unsupported_codec_error(&unsupported));
+        }
+    }
+
+    /// Loop-side: evaluate the decode outcome of the PDU batch the session
+    /// loop just processed, using the upstream failure counter, and return
+    /// the terminal error once the policy trips.
+    ///
+    /// Semantics (Req 9.7, "three consecutive"):
+    /// * first sample establishes the baseline (neutral);
+    /// * a rising counter means at least one update in the batch failed to
+    ///   decode — one failure observation (a mixed batch with any drop
+    ///   counts as failed, not as success);
+    /// * an unchanged counter WITH at least one decoded delivery is a
+    ///   successfully decoded frame — the strike counter resets;
+    /// * an unchanged counter with no EGFX delivery (frame boundaries,
+    ///   cache/surface commands, non-graphics PDUs) is neutral;
+    /// * three consecutive failure observations are terminal.
+    ///
+    /// `dropped_updates` is `None` while no graphics pipeline DVC is
+    /// attached (fast-path-only sessions) — then only an already-set
+    /// handler terminal can surface.
+    pub fn evaluate_decode_outcome(&self, dropped_updates: Option<u64>) -> Option<String> {
+        let mut state = self.state.lock().unwrap();
+
+        if let Some(terminal) = state.terminal.clone() {
+            return Some(terminal);
+        }
+
+        if let Some(dropped) = dropped_updates {
+            let delta = match state.dropped_baseline.replace(dropped) {
+                Some(previous) => dropped.saturating_sub(previous),
+                None => {
+                    // First sample: baseline only.
+                    state.delivered_bitmaps_since_sample = 0;
+                    return None;
+                }
+            };
+
+            if delta > 0 {
+                state.consecutive_failures += 1;
+                if state.consecutive_failures >= MAX_CONSECUTIVE_DECODE_FAILURES {
+                    let error = Self::decode_failure_error();
+                    state.terminal = Some(error.clone());
+                    return Some(error);
+                }
+            } else if state.delivered_bitmaps_since_sample > 0 {
+                state.consecutive_failures = 0;
+            }
+        }
+
+        state.delivered_bitmaps_since_sample = 0;
+        state.terminal.clone()
+    }
+
+    /// The terminal error, if the policy has tripped (first error wins).
+    ///
+    /// Consumed by the EGFX adapter's stage-level tests (task 9.3); the
+    /// session loop goes through [`Self::evaluate_decode_outcome`], which
+    /// surfaces the same terminal as part of its per-PDU evaluation.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn terminal_error(&self) -> Option<String> {
+        self.state.lock().unwrap().terminal.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,6 +809,187 @@ mod tests {
         assert!(
             lock.contains("name = \"ironrdp-egfx\""),
             "the pinned EGFX crate must stay in the locked build"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Task 9.3 (Req 9.6/9.7): terminal codec/decode error policy
+    // ------------------------------------------------------------------
+
+    use ironrdp_egfx::pdu::{EndFramePdu, WireToSurface1Pdu};
+
+    fn avc_wire_pdu(codec: Codec1Type) -> WireToSurface1Pdu {
+        WireToSurface1Pdu {
+            surface_id: 1,
+            codec_id: codec,
+            pixel_format: ironrdp_egfx::pdu::PixelFormat::XRgb,
+            destination_rectangle: ironrdp_pdu::geometry::ExclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 64,
+                bottom: 64,
+            },
+            bitmap_data: vec![0; 16],
+        }
+    }
+
+    /// Req 9.6: an AVC arrival the pipeline forwards un-decoded is terminal
+    /// with an actionable error naming the variant and the remediation.
+    #[test]
+    fn avc_arrival_is_terminal_with_actionable_error() {
+        for (codec, name) in [
+            (Codec1Type::Avc444, "avc444"),
+            (Codec1Type::Avc444v2, "avc444v2"),
+            (Codec1Type::Avc420, "avc420"),
+        ] {
+            let policy = CodecErrorPolicy::new();
+            policy.note_unhandled_pdu(&GfxPdu::WireToSurface1(avc_wire_pdu(codec)));
+            let terminal = policy.terminal_error().expect("{name} arrival is terminal");
+            assert!(
+                terminal.contains(name),
+                "error names the variant: {terminal}"
+            );
+            assert!(
+                terminal.to_lowercase().contains("h.264"),
+                "error says what the codec is: {terminal}"
+            );
+            assert!(
+                terminal.to_lowercase().contains("connect again"),
+                "error says what to do: {terminal}"
+            );
+        }
+    }
+
+    /// Req 9.6 ("unsupported codec including AVC"): a non-AVC codec outside
+    /// the advertised set is terminal too, with its wire id in the message.
+    #[test]
+    fn unsupported_non_avc_codec_classification_is_terminal() {
+        let policy = CodecErrorPolicy::new();
+        policy.note_unhandled_pdu(&GfxPdu::WireToSurface1(avc_wire_pdu(Codec1Type::RemoteFx)));
+        let terminal = policy
+            .terminal_error()
+            .expect("unsupported non-AVC codec arrival is terminal (Req 9.6)");
+        assert!(
+            terminal.contains("codec-"),
+            "error carries the observed codec id: {terminal}"
+        );
+        assert!(
+            terminal.to_lowercase().contains("connect again"),
+            "error is actionable: {terminal}"
+        );
+    }
+
+    /// Req 9.6 exactness: only UNSUPPORTED classifications terminate. A
+    /// supported delivery is a decode success (the 9.7 reset signal), and
+    /// non-bitmap unhandled PDUs (e.g. a server-side frame acknowledge)
+    /// never kill the session.
+    #[test]
+    fn supported_delivery_and_non_bitmap_pdus_stay_non_terminal() {
+        let policy = CodecErrorPolicy::new();
+        policy.note_bitmap_delivered(Codec1Type::ClearCodec);
+        policy.note_bitmap_delivered(Codec1Type::Uncompressed);
+        policy.note_bitmap_delivered(Codec1Type::Planar);
+        policy.note_unhandled_pdu(&GfxPdu::EndFrame(EndFramePdu { frame_id: 1 }));
+        assert!(
+            policy.terminal_error().is_none(),
+            "supported decodes and non-bitmap PDUs are not codec errors"
+        );
+        assert!(
+            policy.evaluate_decode_outcome(Some(0)).is_none(),
+            "an unchanged failure counter with successful decodes is not terminal"
+        );
+    }
+
+    /// Req 9.7: three consecutive failure observations terminate; a decoded
+    /// frame between failures resets the counter (fail, fail, success, fail,
+    /// fail stays alive; the third CONSECUTIVE failure terminates).
+    #[test]
+    fn three_consecutive_decode_failures_terminate_and_success_resets() {
+        let policy = CodecErrorPolicy::new();
+        // Baseline sample (channel setup, nothing decoded yet).
+        assert!(policy.evaluate_decode_outcome(Some(0)).is_none());
+
+        let strike =
+            |policy: &CodecErrorPolicy, dropped: u64| policy.evaluate_decode_outcome(Some(dropped));
+
+        // Two consecutive failures: alive.
+        assert!(
+            strike(&policy, 1).is_none(),
+            "first failure is not terminal"
+        );
+        assert!(
+            strike(&policy, 2).is_none(),
+            "second consecutive failure is not terminal"
+        );
+
+        // A successfully decoded frame resets the counter.
+        policy.note_bitmap_delivered(Codec1Type::ClearCodec);
+        assert!(
+            strike(&policy, 2).is_none(),
+            "a successful decode resets the failure counter"
+        );
+
+        // Two more failures after the reset: still alive (Req 9.7 — only
+        // CONSECUTIVE failures count).
+        assert!(strike(&policy, 3).is_none());
+        assert!(strike(&policy, 4).is_none());
+
+        // Third consecutive failure: terminal, actionable.
+        let terminal = strike(&policy, 5).expect("third consecutive failure is terminal");
+        assert!(
+            terminal.contains("decode"),
+            "decode error says what failed: {terminal}"
+        );
+        assert!(
+            terminal.to_lowercase().contains("connect again"),
+            "decode error is actionable: {terminal}"
+        );
+
+        // Terminal is final: further samples cannot revive or replace it.
+        policy.note_bitmap_delivered(Codec1Type::ClearCodec);
+        let after = strike(&policy, 4).expect("terminal is sticky");
+        assert_eq!(after, terminal, "the first terminal error wins");
+    }
+
+    /// Neutral windows (frame boundaries, non-graphics PDUs, non-rising
+    /// counter without deliveries) neither strike nor reset.
+    #[test]
+    fn neutral_windows_preserve_the_strike_counter() {
+        let policy = CodecErrorPolicy::new();
+        assert!(policy.evaluate_decode_outcome(Some(0)).is_none()); // baseline
+        assert!(policy.evaluate_decode_outcome(Some(1)).is_none()); // strike 1
+        assert!(
+            policy.evaluate_decode_outcome(Some(1)).is_none(),
+            "EndFrame-only window is neutral, not a reset"
+        );
+        assert!(
+            policy.evaluate_decode_outcome(Some(1)).is_none(),
+            "neutral windows do not strike"
+        );
+        assert!(
+            policy.evaluate_decode_outcome(Some(2)).is_none(),
+            "strike 2 after neutrals"
+        );
+        assert!(
+            policy.evaluate_decode_outcome(Some(3)).is_some(),
+            "strike 3 (the frame after the neutral windows) is terminal — \
+             neutrals preserved strikes 1 and 2"
+        );
+    }
+
+    /// Without an attached graphics pipeline DVC there is nothing to
+    /// sample; only an already-reported handler terminal can surface.
+    #[test]
+    fn evaluate_without_graphics_pipeline_reports_handler_terminal_only() {
+        let policy = CodecErrorPolicy::new();
+        assert!(
+            policy.evaluate_decode_outcome(None).is_none(),
+            "fast-path-only sessions never trip the EGFX decode policy"
+        );
+        policy.note_unhandled_pdu(&GfxPdu::WireToSurface1(avc_wire_pdu(Codec1Type::Avc444)));
+        assert!(
+            policy.evaluate_decode_outcome(None).is_some(),
+            "a handler-reported terminal surfaces even without a counter sample"
         );
     }
 }

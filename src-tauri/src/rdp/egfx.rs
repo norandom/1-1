@@ -27,24 +27,39 @@
 //! `ConnectionResult::static_channels` (`ActiveStageBuilder`), which is the
 //! #1435/#1377 shape the 4.1 probe recorded.
 
+use std::sync::Arc;
+
 use ironrdp_dvc::DrdynvcClient;
-use ironrdp_egfx::client::{GraphicsPipelineClient, GraphicsPipelineHandler};
-use ironrdp_egfx::pdu::CapabilitySet;
+use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler};
+use ironrdp_egfx::pdu::{CapabilitySet, GfxPdu};
+
+use crate::rdp::codec_policy::CodecErrorPolicy;
 
 /// Per-session EGFX handler (design "EGFX Session Handler": one instance per
 /// SessionActor, created at connection time).
 ///
 /// The handler owns the codec POLICY surface only: the advertised capability
 /// sets come from [`crate::rdp::codec_policy::CodecPolicy::egfx_caps`] (9.1's
-/// proven AVC-free set). Decoded pixels bypass the handler entirely — they
-/// surface through the upstream compositor drain inside
-/// `ActiveStage::process` — so this type intentionally carries no framebuffer
-/// state; the "SharedFrame + channel sender" fields of the design's
-/// illustrative contract live in the session loop that consumes the drain.
+/// proven AVC-free set), and the terminal codec/decode error policy (task
+/// 9.3) is reported through the shared [`CodecErrorPolicy`] — the handler is
+/// the upstream-observable side (unsupported-codec arrivals and codec-tagged
+/// decoded deliveries), the session loop the counter-sampling side. Decoded
+/// pixels bypass the handler for compositing — they surface through the
+/// upstream compositor drain inside `ActiveStage::process` — so this type
+/// intentionally carries no framebuffer state.
 ///
 /// Must never construct or reference an H.264 decoder (Req 9.1/9.5).
-#[derive(Debug, Default)]
-pub struct DriftGfxHandler;
+pub struct DriftGfxHandler {
+    policy: Arc<CodecErrorPolicy>,
+}
+
+impl DriftGfxHandler {
+    /// One handler per session, reporting to the session's shared
+    /// [`CodecErrorPolicy`] (task 9.3).
+    pub fn new(policy: Arc<CodecErrorPolicy>) -> Self {
+        Self { policy }
+    }
+}
 
 impl GraphicsPipelineHandler for DriftGfxHandler {
     /// Capability sets advertised in RDPGFX_CAPS_ADVANCE: the CodecPolicy
@@ -56,13 +71,31 @@ impl GraphicsPipelineHandler for DriftGfxHandler {
     fn capabilities(&self) -> Vec<CapabilitySet> {
         crate::rdp::codec_policy::CodecPolicy::egfx_caps()
     }
+
+    /// Codec-tagged decoded delivery: the policy's decode-success signal
+    /// for supported codecs, a terminal unsupported-codec error otherwise
+    /// (task 9.3, Req 9.6/9.7).
+    fn on_bitmap_updated(&mut self, update: &BitmapUpdate) {
+        self.policy.note_bitmap_delivered(update.codec_id);
+    }
+
+    /// Unsupported-codec arrival hook (dependency spike, research.md "Req
+    /// 9.7 hook surfaces"): AVC444/AVC444v2 `WireToSurface1` PDUs arrive
+    /// here WITHOUT being decoded whenever no H.264 decoder is configured
+    /// (ironrdp-egfx 0.5.0 client.rs L1098–1107) — the exact pre-decode
+    /// observation Req 9.6 requires. Everything else the pipeline cannot
+    /// handle also passes through; the policy classifies which arrivals
+    /// are codec-policy violations.
+    fn on_unhandled_pdu(&mut self, pdu: &GfxPdu) {
+        self.policy.note_unhandled_pdu(pdu);
+    }
 }
 
 /// Build the DRDYNVC static-channel client carrying the graphics pipeline DVC
 /// (the design's `DrdynvcClient::with_dynamic_channel` attach shape).
-fn drdynvc_with_graphics_pipeline() -> DrdynvcClient {
+fn drdynvc_with_graphics_pipeline(policy: &Arc<CodecErrorPolicy>) -> DrdynvcClient {
     DrdynvcClient::new().with_dynamic_channel(GraphicsPipelineClient::new(
-        Box::new(DriftGfxHandler),
+        Box::new(DriftGfxHandler::new(Arc::clone(policy))),
         // None: no H.264 decoder — AVC-free client (Req 9.5).
         None,
     ))
@@ -75,9 +108,14 @@ fn drdynvc_with_graphics_pipeline() -> DrdynvcClient {
 /// server-assigned channel id at finalize, and hands the whole set to the
 /// session stage through `ConnectionResult::static_channels` — from where
 /// `ActiveStage::process` routes EGFX traffic to the graphics pipeline and
-/// drains its compositor into the session image.
-pub fn attach_to_connector(connector: &mut ironrdp_connector::ClientConnector) {
-    connector.attach_static_channel(drdynvc_with_graphics_pipeline());
+/// drains its compositor into the session image. `policy` is the session's
+/// shared codec-error policy (task 9.3): the handler constructed here
+/// reports into it, the session loop reads it.
+pub fn attach_to_connector(
+    connector: &mut ironrdp_connector::ClientConnector,
+    policy: &Arc<CodecErrorPolicy>,
+) {
+    connector.attach_static_channel(drdynvc_with_graphics_pipeline(policy));
 }
 
 /// Actor-test seam twin of [`attach_to_connector`] (task 9.2): bind the same
@@ -90,8 +128,9 @@ pub fn attach_to_connector(connector: &mut ironrdp_connector::ClientConnector) {
 pub(crate) fn attach_to_stage_channels(
     static_channels: &mut ironrdp_svc::StaticChannelSet,
     drdynvc_channel_id: u16,
+    policy: &Arc<CodecErrorPolicy>,
 ) {
-    let existing = static_channels.insert(drdynvc_with_graphics_pipeline());
+    let existing = static_channels.insert(drdynvc_with_graphics_pipeline(policy));
     debug_assert!(
         existing.is_none(),
         "task 9.2: the EGFX wiring attaches the DRDYNVC channel exactly once"
@@ -101,6 +140,8 @@ pub(crate) fn attach_to_stage_channels(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use ironrdp_core::{WriteBuf, encode_buf};
     use ironrdp_dvc::pdu::{CreateRequestPdu, DataPdu, DrdynvcDataPdu, DrdynvcServerPdu};
     use ironrdp_egfx::CHANNEL_NAME;
@@ -118,7 +159,7 @@ mod tests {
     use ironrdp_session::ActiveStage;
     use ironrdp_session::image::DecodedImage;
 
-    use crate::rdp::codec_policy::CodecPolicy;
+    use crate::rdp::codec_policy::{CodecErrorPolicy, CodecPolicy};
     use crate::rdp::frame_transport::{
         PACKET_KIND_DIRTY_RECTS, PACKET_KIND_FULL_FRAME, encode_image_update_packet,
     };
@@ -356,8 +397,18 @@ mod tests {
 
     /// Build the production-shaped wired stage (the actor's seam twin).
     fn egfx_stage() -> (ActiveStage, DecodedImage) {
+        egfx_stage_with_policy(&Arc::new(CodecErrorPolicy::new()))
+    }
+
+    /// Wired stage with an explicit shared codec-error policy the test can
+    /// inspect (task 9.3).
+    fn egfx_stage_with_policy(policy: &Arc<CodecErrorPolicy>) -> (ActiveStage, DecodedImage) {
         let mut connection_result = crate::rdp::baseline::synthetic_connection_result(W, H);
-        super::attach_to_stage_channels(&mut connection_result.static_channels, DRDYNVC_CHANNEL_ID);
+        super::attach_to_stage_channels(
+            &mut connection_result.static_channels,
+            DRDYNVC_CHANNEL_ID,
+            policy,
+        );
         let stage = crate::rdp::client::active_stage_from_connection_result(connection_result);
         let image = DecodedImage::new(SessionPixelFormat::RgbA32, W, H);
         (stage, image)
@@ -557,7 +608,7 @@ mod tests {
                 .is_none(),
             "pre-attach control: no DRDYNVC channel on the connector"
         );
-        super::attach_to_connector(&mut connector);
+        super::attach_to_connector(&mut connector, &Arc::new(CodecErrorPolicy::new()));
         assert!(
             connector
                 .static_channels
@@ -620,7 +671,7 @@ mod tests {
         // The handler's advertisement IS the 9.1 codec policy — the exact
         // AVC-free set CodecPolicy pins (ClearCodec/Planar/Uncompressed/
         // RFX-Progressive selectable, no AVC variant).
-        let handler = super::DriftGfxHandler;
+        let handler = super::DriftGfxHandler::new(Arc::new(CodecErrorPolicy::new()));
         assert_eq!(
             ironrdp_egfx::client::GraphicsPipelineHandler::capabilities(&handler),
             CodecPolicy::egfx_caps()
@@ -892,5 +943,125 @@ mod tests {
             "EGFX-sourced packets must be bitmap packets (kind 1/2), got {kind}"
         );
         assert_ne!(kind, 3, "no H.264 transport packet may be produced");
+    }
+
+    // ------------------------------------------------------------------
+    // (g) Task 9.3 (Req 9.6/9.7): terminal codec/decode error policy at
+    //     the wired-stage level — the dependency-spike observables
+    //     (on_unhandled_pdu pre-decode forward, dropped_updates counter)
+    //     drive the shared CodecErrorPolicy.
+    // ------------------------------------------------------------------
+
+    /// The upstream `dropped_updates` counter of the wired graphics
+    /// pipeline, sampled exactly like the session loop samples it.
+    fn dropped_updates(stage: &mut ActiveStage) -> u64 {
+        stage
+            .get_dvc_mut::<GraphicsPipelineClient>()
+            .map(|mut gfx| gfx.processor_mut().dropped_updates())
+            .unwrap_or(0)
+    }
+
+    /// Req 9.6: an AVC444 wire update arriving on the EGFX route is
+    /// forwarded by upstream WITHOUT decoding (no H.264 decoder configured
+    /// — the spike's client.rs L1098–1107 path) and Drift's policy turns
+    /// it into a terminal actionable error: zero decode drops, terminal
+    /// set, naming the variant.
+    #[test]
+    fn avc444_arrival_is_forwarded_pre_decode_and_terminal() {
+        let policy = Arc::new(CodecErrorPolicy::new());
+        let (mut stage, mut image) = egfx_stage_with_policy(&policy);
+        let mut compressor = Compressor::new();
+        open_graphics_channel(&mut stage, &mut image, &mut compressor);
+
+        for pdu in frame_pdus(7, wire_pdu(Codec1Type::Avc444, vec![0; 16])) {
+            feed(&mut stage, &mut image, &gfx_data(&pdu, &mut compressor));
+        }
+
+        assert_eq!(
+            dropped_updates(&mut stage),
+            0,
+            "AVC444 without a decoder is forwarded pre-decode, not dropped: \
+             distinct from a decode failure"
+        );
+        let terminal = policy.terminal_error().expect("AVC444 arrival is terminal");
+        assert!(terminal.contains("avc444"), "names the variant: {terminal}");
+        assert!(
+            terminal.to_lowercase().contains("h.264"),
+            "says what the codec is: {terminal}"
+        );
+    }
+
+    /// Req 9.7 (spike observables): an undecodable supported-codec update
+    /// counts exactly one upstream decode drop and does NOT trip the
+    /// terminal by itself — the three-strike rule lives in the policy the
+    /// session loop drives.
+    #[test]
+    fn malformed_supported_codec_update_counts_one_drop_not_terminal() {
+        let policy = Arc::new(CodecErrorPolicy::new());
+        let (mut stage, mut image) = egfx_stage_with_policy(&policy);
+        let mut compressor = Compressor::new();
+        open_graphics_channel(&mut stage, &mut image, &mut compressor);
+
+        // Valid ClearCodec frame first: baseline decode success.
+        let expected = expected_rgba(W, H);
+        feed_frame(
+            &mut stage,
+            &mut image,
+            &mut compressor,
+            1,
+            wire_pdu(
+                Codec1Type::ClearCodec,
+                clearcodec_payload(&rgba_to_bgra(&expected), W, H),
+            ),
+        );
+        assert_eq!(dropped_updates(&mut stage), 0, "baseline frame decodes");
+
+        // One malformed ClearCodec update: upstream counts the drop and
+        // continues; nothing is terminal yet.
+        for pdu in frame_pdus(2, wire_pdu(Codec1Type::ClearCodec, vec![0xAB; 8])) {
+            feed(&mut stage, &mut image, &gfx_data(&pdu, &mut compressor));
+        }
+        assert_eq!(
+            dropped_updates(&mut stage),
+            1,
+            "the undecodable update is observable as exactly one decode drop"
+        );
+        assert!(
+            policy.terminal_error().is_none(),
+            "one failed frame is not terminal (Req 9.7: three consecutive)"
+        );
+    }
+
+    /// Research.md "Req 9.7 hook surfaces" recorded gap, PINNED (not
+    /// worked around): a well-formed AVC420 arrival without an H.264
+    /// decoder is silently skipped by pinned ironrdp-egfx 0.5.0
+    /// (`decode_avc420`, client.rs L1236–1239) — no handler callback, no
+    /// counter change. Drift closes AVC420 at negotiation time (9.1's
+    /// AVC-free advertisement; a compliant server never sends it) and the
+    /// policy terminates the moment ANY observable surfaces it; making the
+    /// silent skip itself observable would require re-parsing zgfx/PDU
+    /// bytes, which the task forbids. This test documents the residual so
+    /// a future crate bump that adds the hook flips it RED.
+    #[test]
+    fn wellformed_avc420_silent_skip_is_the_pinned_upstream_gap() {
+        let policy = Arc::new(CodecErrorPolicy::new());
+        let (mut stage, mut image) = egfx_stage_with_policy(&policy);
+        let mut compressor = Compressor::new();
+        open_graphics_channel(&mut stage, &mut image, &mut compressor);
+
+        for pdu in frame_pdus(9, wire_pdu(Codec1Type::Avc420, vec![0; 16])) {
+            feed(&mut stage, &mut image, &gfx_data(&pdu, &mut compressor));
+        }
+
+        assert_eq!(
+            dropped_updates(&mut stage),
+            0,
+            "pinned-gap pin: well-formed AVC420 is invisible to the drop counter"
+        );
+        assert!(
+            policy.terminal_error().is_none(),
+            "pinned-gap pin: 0.5.0 produces no handler callback for AVC420 — \
+             negotiation-time AVC_DISABLED (task 9.1) is its defense"
+        );
     }
 }

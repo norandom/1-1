@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::rdp::client::{ConnectionOutcome, SessionCommand, attempt_rdp_connection};
 use crate::rdp::clipboard::SessionClipboardBackend;
+use crate::rdp::codec_policy::CodecErrorPolicy;
 use crate::rdp::display::FrameBuffer;
 use crate::rdp::frame_transport::{encode_full_frame_packet, encode_image_update_packet};
 // Task 5.4 (Req 12.4/12.10): frame-kind spy module, compiled ONLY in
@@ -583,15 +584,28 @@ impl SessionActor {
 
         // Both real-session variants share one actor path; only the framed
         // transport differs (production TLS vs the in-memory test seam).
+        // Task 9.3: both carry the session's shared codec-error policy —
+        // created at connector attach time, reported into by the EGFX
+        // handler, sampled by the session loop below.
         let real_session = match outcome {
             ConnectionOutcome::RealSession {
                 connection_result,
                 framed,
-            } => Some((*connection_result, SessionTransport::Tls(framed))),
+                codec_policy,
+            } => Some((
+                *connection_result,
+                SessionTransport::Tls(framed),
+                codec_policy,
+            )),
             ConnectionOutcome::RealSessionLocal {
                 connection_result,
                 framed,
-            } => Some((*connection_result, SessionTransport::Local(framed))),
+                codec_policy,
+            } => Some((
+                *connection_result,
+                SessionTransport::Local(framed),
+                codec_policy,
+            )),
             ConnectionOutcome::Failed(reason) => {
                 log::info!("Session {} using mock frames (reason: {})", self.id, reason);
                 None
@@ -599,7 +613,7 @@ impl SessionActor {
         };
 
         match real_session {
-            Some((connection_result, transport)) => {
+            Some((connection_result, transport, codec_policy)) => {
                 log::info!("Session {} entered real RDP session", self.id);
                 self.state = SessionState::Connected;
                 self.connected_at = Some(Utc::now());
@@ -611,7 +625,7 @@ impl SessionActor {
 
                 // Run the real RDP session loop
                 let disconnect_reason = self
-                    .run_real_session_loop(connection_result, transport)
+                    .run_real_session_loop(connection_result, transport, codec_policy)
                     .await;
 
                 if disconnect_reason == DisconnectReason::ConnectionLost && self.auto_reconnect {
@@ -646,6 +660,7 @@ impl SessionActor {
         &mut self,
         connection_result: ironrdp_connector::ConnectionResult,
         transport: SessionTransport,
+        codec_policy: Arc<CodecErrorPolicy>,
     ) -> DisconnectReason {
         // 0.13 session API: the stage is built through the connector adapter
         // (ActiveStage::new(ConnectionResult) no longer exists upstream).
@@ -662,13 +677,25 @@ impl SessionActor {
         match transport {
             SessionTransport::Tls(framed) => {
                 let (reader, writer) = ironrdp_tokio::split_tokio_framed(*framed);
-                self.run_framed_session_loop(activation_factory, active_stage, reader, writer)
-                    .await
+                self.run_framed_session_loop(
+                    activation_factory,
+                    active_stage,
+                    reader,
+                    writer,
+                    codec_policy,
+                )
+                .await
             }
             SessionTransport::Local(framed) => {
                 let (reader, writer) = ironrdp_tokio::split_tokio_framed(*framed);
-                self.run_framed_session_loop(activation_factory, active_stage, reader, writer)
-                    .await
+                self.run_framed_session_loop(
+                    activation_factory,
+                    active_stage,
+                    reader,
+                    writer,
+                    codec_policy,
+                )
+                .await
             }
         }
     }
@@ -684,6 +711,7 @@ impl SessionActor {
         mut active_stage: ironrdp_session::ActiveStage,
         mut reader: ironrdp_tokio::Framed<SR>,
         mut writer: ironrdp_tokio::Framed<SW>,
+        codec_policy: Arc<CodecErrorPolicy>,
     ) -> DisconnectReason
     where
         SR: ironrdp_tokio::FramedRead,
@@ -732,6 +760,33 @@ impl SessionActor {
                             return DisconnectReason::ConnectionLost;
                         }
                     };
+
+                    // Task 9.3 (Req 9.6/9.7): terminal codec/decode error
+                    // check. The EGFX handler (inside the stage's graphics
+                    // pipeline) has already reported unsupported-codec
+                    // arrivals during `process` above; sample upstream's
+                    // decode-failure counter exactly like the dependency
+                    // spike proved (`dropped_updates()` deltas per processed
+                    // PDU) and apply the three-consecutive-strikes policy.
+                    // A terminal error is SESSION-TERMINAL: publish the
+                    // error and stop WITHOUT the transport-drop reconnect
+                    // path — the configuration is incompatible, retrying it
+                    // would repeat the failure (Req 9.6; transport loss
+                    // stays `ConnectionLost` for the Req 2.3 reconnect).
+                    if let Some(terminal) = codec_policy.evaluate_decode_outcome(
+                        active_stage
+                            .get_dvc_mut::<ironrdp_egfx::client::GraphicsPipelineClient>()
+                            .map(|mut gfx| gfx.processor_mut().dropped_updates()),
+                    ) {
+                        log::warn!(
+                            "Session {} terminal codec/decode error: {}",
+                            self.id, terminal
+                        );
+                        self.last_error = Some(terminal.clone());
+                        self.state = SessionState::Error(terminal);
+                        self.publish_info();
+                        return DisconnectReason::CodecTerminal;
+                    }
 
                     let mut updated_regions = Vec::new();
                     let mut deactivate_all = false;
@@ -1220,16 +1275,26 @@ impl SessionActor {
                 ConnectionOutcome::RealSession {
                     connection_result,
                     framed,
-                } => Some((*connection_result, SessionTransport::Tls(framed))),
+                    codec_policy,
+                } => Some((
+                    *connection_result,
+                    SessionTransport::Tls(framed),
+                    codec_policy,
+                )),
                 ConnectionOutcome::RealSessionLocal {
                     connection_result,
                     framed,
-                } => Some((*connection_result, SessionTransport::Local(framed))),
+                    codec_policy,
+                } => Some((
+                    *connection_result,
+                    SessionTransport::Local(framed),
+                    codec_policy,
+                )),
                 ConnectionOutcome::Failed(_reason) => None,
             };
 
             match real_session {
-                Some((connection_result, transport)) => {
+                Some((connection_result, transport, codec_policy)) => {
                     self.state = SessionState::Connected;
                     self.reconnect_attempts = 0;
                     self.last_error = None;
@@ -1243,11 +1308,16 @@ impl SessionActor {
                     );
 
                     let reason = self
-                        .run_real_session_loop(connection_result, transport)
+                        .run_real_session_loop(connection_result, transport, codec_policy)
                         .await;
                     match reason {
                         DisconnectReason::UserDisconnect => return,
                         DisconnectReason::ConnectionLost => continue,
+                        // Task 9.3: a codec/decode terminal inside a
+                        // reconnected session is still terminal — the
+                        // incompatible-configuration rule (Req 9.6) applies
+                        // per connection, not per attempt.
+                        DisconnectReason::CodecTerminal => return,
                     }
                 }
                 None => {
@@ -1266,6 +1336,9 @@ impl SessionActor {
                     match reason {
                         DisconnectReason::UserDisconnect => return,
                         DisconnectReason::ConnectionLost => continue,
+                        // Unreachable from the mock loop (no EGFX traffic),
+                        // but a terminal stays terminal by construction.
+                        DisconnectReason::CodecTerminal => return,
                     }
                 }
             }
@@ -1387,6 +1460,14 @@ impl SessionActor {
 enum DisconnectReason {
     UserDisconnect,
     ConnectionLost,
+    /// Task 9.3 (Req 9.6/9.7): a terminal codec/decode error — the session
+    /// configuration is incompatible (unsupported codec, or a stream that
+    /// repeatedly fails to decode). Distinct from `ConnectionLost` on
+    /// purpose: `run()` only auto-reconnects transport loss (Req 2.3);
+    /// retrying an incompatible configuration would repeat the failure, so
+    /// the actor ends and only a NEW Connect gesture restarts (task 7.1
+    /// admission).
+    CodecTerminal,
 }
 
 /// The framed transport a real session runs over.
@@ -4149,6 +4230,7 @@ mod tests {
                                 crate::rdp::baseline::synthetic_connection_result(64, 64),
                             ),
                             framed: Box::new(ironrdp_tokio::TokioFramed::new(stream)),
+                            codec_policy: Arc::new(CodecErrorPolicy::new()),
                         },
                         // Later dials fail like a dead endpoint so the OLD
                         // observable (DeactivateAll → backoff reconnect
@@ -4617,13 +4699,21 @@ mod tests {
                         Some(stream) => {
                             let mut connection_result =
                                 crate::rdp::baseline::synthetic_connection_result(W, H);
+                            // Task 9.3: the scripted connection wires the
+                            // SAME policy into the EGFX handler that the
+                            // actor loop samples — mirroring
+                            // `attempt_rdp_connection`'s connector-side
+                            // creation and hand-off.
+                            let codec_policy = Arc::new(CodecErrorPolicy::new());
                             crate::rdp::egfx::attach_to_stage_channels(
                                 &mut connection_result.static_channels,
                                 DRDYNVC_CHANNEL_ID,
+                                &codec_policy,
                             );
                             ConnectionOutcome::RealSessionLocal {
                                 connection_result: Box::new(connection_result),
                                 framed: Box::new(ironrdp_tokio::TokioFramed::new(stream)),
+                                codec_policy,
                             }
                         }
                         None => ConnectionOutcome::Failed(
@@ -4877,6 +4967,450 @@ mod tests {
             assert_eq!(snapshot.data, expected2);
 
             disconnect_and_wait(&egfx).await;
+        }
+
+        // ------------------------------------------------------------------
+        // Task 9.3 (Req 9.6/9.7): terminal codec/decode errors over the
+        // actor seam — unsupported AVC terminates without decode/retry,
+        // three consecutive decode failures terminate, a successful decode
+        // resets the counter, and transport-drop reconnect (Req 2.3) keeps
+        // its semantics.
+        // ------------------------------------------------------------------
+
+        /// A ClearCodec W2S1 update whose payload cannot decode — the
+        /// dependency spike's failure twin (undecodable supported codec).
+        fn malformed_clearcodec_wire() -> WireToSurface1Pdu {
+            WireToSurface1Pdu {
+                surface_id: 1,
+                codec_id: Codec1Type::ClearCodec,
+                pixel_format: PixelFormat::XRgb,
+                destination_rectangle: full_rect(W, H),
+                bitmap_data: vec![0xAB; 8],
+            }
+        }
+
+        /// An AVC444 W2S1 update — upstream forwards it to the handler
+        /// WITHOUT decoding (no H.264 decoder configured).
+        fn avc444_wire() -> WireToSurface1Pdu {
+            WireToSurface1Pdu {
+                surface_id: 1,
+                codec_id: Codec1Type::Avc444,
+                pixel_format: PixelFormat::XRgb,
+                destination_rectangle: full_rect(W, H),
+                bitmap_data: vec![0; 16],
+            }
+        }
+
+        /// Server script frames: channel open + one good ClearCodec frame
+        /// (`first_frame_id`), then the caller's extra frames.
+        fn opened_channel_frames(first_frame_id: u32, extra: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+            let mut compressor = Compressor::new();
+            let mut frames = vec![dvc_frame(&DrdynvcServerPdu::Create(CreateRequestPdu::new(
+                GFX_DVC_CHANNEL_ID,
+                CHANNEL_NAME.to_owned(),
+            )))];
+            let confirm = ironrdp_egfx::pdu::CapabilitySet::V10_7 {
+                flags: ironrdp_egfx::pdu::CapabilitiesV107Flags::AVC_DISABLED
+                    | ironrdp_egfx::pdu::CapabilitiesV107Flags::SMALL_CACHE,
+            };
+            frames.push(gfx_data(
+                &GfxPdu::CapabilitiesConfirm(CapabilitiesConfirmPdu(RawCapabilitySet::from(
+                    &confirm,
+                ))),
+                &mut compressor,
+            ));
+            frames.push(gfx_data(
+                &GfxPdu::ResetGraphics(ResetGraphicsPdu {
+                    width: u32::from(W),
+                    height: u32::from(H),
+                    monitors: Vec::new(),
+                }),
+                &mut compressor,
+            ));
+            frames.push(gfx_data(
+                &GfxPdu::CreateSurface(CreateSurfacePdu {
+                    surface_id: 1,
+                    width: W,
+                    height: H,
+                    pixel_format: PixelFormat::XRgb,
+                }),
+                &mut compressor,
+            ));
+            frames.push(gfx_data(
+                &GfxPdu::MapSurfaceToOutput(MapSurfaceToOutputPdu {
+                    surface_id: 1,
+                    output_origin_x: 0,
+                    output_origin_y: 0,
+                }),
+                &mut compressor,
+            ));
+            frames.extend(egfx_frame_frames(
+                first_frame_id,
+                clearcodec_wire(&expected_rgba(W, H), W, H),
+                &mut compressor,
+            ));
+            frames.extend(extra);
+            frames
+        }
+
+        /// Await the actor's terminal error status and return its message
+        /// (deadline-bounded: fails with the recorded statuses instead of
+        /// hanging when no terminal ever fires).
+        async fn wait_for_terminal_error(egfx: &EgfxTestSession) -> String {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            loop {
+                let terminal = info_events(&egfx.session.id, &egfx.session.events)
+                    .iter()
+                    .rev()
+                    .find(|(_, v)| status_string(v).starts_with("error:"))
+                    .map(|(_, v)| status_string(v));
+                if let Some(msg) = terminal {
+                    return msg;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "timed out waiting for a terminal codec/decode error; \
+                     recorded statuses: {:?}",
+                    statuses_of(&info_events(&egfx.session.id, &egfx.session.events))
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        /// Assert the terminal run never entered the reconnect loop: no
+        /// reconnecting status, exactly ONE dial (auto_reconnect is ON for
+        /// these sessions, so a ConnectionLost-style reason WOULD have
+        /// retried — the codec terminal must not).
+        fn assert_no_retry(egfx: &EgfxTestSession) {
+            let statuses = statuses_of(&info_events(&egfx.session.id, &egfx.session.events));
+            assert!(
+                !statuses.iter().any(|s| s == "reconnecting"),
+                "a codec/decode terminal must not enter the reconnect loop: {statuses:?}"
+            );
+            assert_eq!(
+                egfx.session.connect_calls.load(Ordering::SeqCst),
+                1,
+                "the incompatible configuration must not be re-dialed (Req 9.6 no-retry): \
+                 statuses so far {statuses:?}"
+            );
+        }
+
+        /// Req 9.6: an AVC444 wire update arriving on the EGFX route ends
+        /// the session with an actionable codec error — no decode attempt
+        /// (upstream forwards it pre-decode), no retry/reconnect, and a
+        /// subsequent Connect gesture is admitted again (task 7.1).
+        #[tokio::test(start_paused = true)]
+        async fn egfx_avc444_update_terminates_session_without_retry() {
+            let manager = SessionManager::new();
+            let mut compressor = Compressor::new();
+            let mut extra = Vec::new();
+            extra.extend(egfx_frame_frames(2, avc444_wire(), &mut compressor));
+            let egfx = create_egfx_session(
+                &manager,
+                "egfx-avc-terminal",
+                opened_channel_frames(1, extra),
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+
+            let terminal = wait_for_terminal_error(&egfx).await;
+            assert!(
+                terminal.contains("avc444"),
+                "error names the codec variant: {terminal}"
+            );
+            assert!(
+                terminal.to_lowercase().contains("h.264"),
+                "error says what the codec is: {terminal}"
+            );
+            assert!(
+                terminal.to_lowercase().contains("connect again"),
+                "error is actionable: {terminal}"
+            );
+            assert_no_retry(&egfx);
+
+            // The actor ends (final status terminal-then-disconnected, the
+            // reason survives in lastError — the recorded defect B3-8
+            // pattern) and the AVC frame itself never became pixels.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            loop {
+                let done = info_events(&egfx.session.id, &egfx.session.events)
+                    .last()
+                    .map(|(_, v)| status_string(v))
+                    .is_some_and(|s| s == "disconnected");
+                if done {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "actor never ended after the codec terminal; statuses: {:?}",
+                    statuses_of(&info_events(&egfx.session.id, &egfx.session.events))
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let recorded = info_events(&egfx.session.id, &egfx.session.events);
+            let (_, last) = recorded.last().expect("final event recorded");
+            let last_error = last["lastError"]
+                .as_str()
+                .expect("lastError set")
+                .to_string();
+            assert!(
+                last_error.contains("avc444"),
+                "lastError keeps the actionable reason: {last_error}"
+            );
+            let packets = egfx.packets.lock().unwrap().clone();
+            assert_eq!(
+                packets.len(),
+                1,
+                "only the pre-AVC good frame became pixels; the AVC update did not decode"
+            );
+
+            // Task 7.1 (Req 11.8/11.9): the terminal entry is no longer
+            // live, so a NEW Connect gesture restarts it in place.
+            let restart = manager
+                .create_session_with_transport(
+                    test_config("egfx-avc-terminal"),
+                    None,
+                    scripted_frame_channel(FrameScript::Ok, Arc::new(StdMutex::new(Vec::new()))),
+                    SessionEventSink::recorded(Arc::clone(&egfx.session.events)),
+                    true,
+                    None,
+                    scripted_connect(Arc::new(AtomicUsize::new(0))),
+                )
+                .await;
+            assert!(
+                restart.is_ok(),
+                "a terminal codec error admits a fresh Connect gesture: {restart:?}"
+            );
+            assert_eq!(
+                restart.expect("admitted"),
+                egfx.session.id,
+                "terminal entries restart in place (Req 11.9)"
+            );
+        }
+
+        /// Req 9.7: three CONSECUTIVE failed frames terminate the session
+        /// with a decode error — no retry, single dial.
+        #[tokio::test(start_paused = true)]
+        async fn egfx_three_consecutive_decode_failures_terminate() {
+            let manager = SessionManager::new();
+            let mut compressor = Compressor::new();
+            let mut extra = Vec::new();
+            for frame_id in 2..=4 {
+                extra.extend(egfx_frame_frames(
+                    frame_id,
+                    malformed_clearcodec_wire(),
+                    &mut compressor,
+                ));
+            }
+            let egfx = create_egfx_session(
+                &manager,
+                "egfx-decode-terminal",
+                opened_channel_frames(1, extra),
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+
+            let terminal = wait_for_terminal_error(&egfx).await;
+            assert!(
+                terminal.to_lowercase().contains("decode"),
+                "error says the stream failed to decode: {terminal}"
+            );
+            assert!(
+                terminal.contains("3"),
+                "error states the consecutive-failure threshold: {terminal}"
+            );
+            assert_no_retry(&egfx);
+        }
+
+        /// Req 9.7 exact counter semantics: fail, fail, SUCCESS, fail, fail
+        /// stays alive (the success reset the counter); only three
+        /// CONSECUTIVE failures terminate. Liveness is observed through the
+        /// successful frames' packets — a premature terminal would stop
+        /// the later packets.
+        #[tokio::test(start_paused = true)]
+        async fn egfx_successful_decode_resets_failure_counter() {
+            let manager = SessionManager::new();
+            let mut compressor = Compressor::new();
+            let good_wire = || clearcodec_wire(&expected_rgba(W, H), W, H);
+
+            // 1 good (channel open), then F F G F F G F F F: without the
+            // reset the second F-pair would already be strikes 3+4 and kill
+            // the session before the second good frame's packet arrives.
+            let mut extra = Vec::new();
+            for (frame_id, wire) in [
+                (2u32, malformed_clearcodec_wire()),
+                (3, malformed_clearcodec_wire()),
+                (4, good_wire()),
+                (5, malformed_clearcodec_wire()),
+                (6, malformed_clearcodec_wire()),
+                (7, good_wire()),
+                (8, malformed_clearcodec_wire()),
+                (9, malformed_clearcodec_wire()),
+                (10, malformed_clearcodec_wire()),
+            ] {
+                extra.extend(egfx_frame_frames(frame_id, wire, &mut compressor));
+            }
+
+            let egfx = create_egfx_session(
+                &manager,
+                "egfx-decode-reset",
+                opened_channel_frames(1, extra),
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+
+            // Both good frames after the failure stretches reached the
+            // packet path — THIS is the aliveness proof for "fail, fail,
+            // success, fail, fail stays alive": packet #3 is the second
+            // post-failure good frame (G7). Had the counter NOT reset at
+            // G4, strikes would have hit 3 at F5 and killed the session
+            // before G7 — packet #3 could never arrive.
+            wait_for_packets(&egfx, |n| n >= 3).await;
+
+            // The third CONSECUTIVE failure (frame 10) then terminates —
+            // after the second reset, F8/F9/F10 are strikes 1..3.
+            let terminal = wait_for_terminal_error(&egfx).await;
+            assert!(
+                terminal.to_lowercase().contains("decode"),
+                "terminal names the decode failure: {terminal}"
+            );
+            assert!(
+                terminal.contains("3"),
+                "error states the consecutive-failure threshold: {terminal}"
+            );
+            let packets = egfx.packets.lock().unwrap().clone();
+            assert_eq!(
+                packets.len(),
+                3,
+                "exactly the three good frames became pixels; failures never did"
+            );
+            assert_no_retry(&egfx);
+        }
+
+        /// Req 2.3 guard: with the terminal policy wired, an ordinary
+        /// transport drop (server EOF) still runs the reconnect loop —
+        /// codec terminals and transport loss stay distinct.
+        #[tokio::test(start_paused = true)]
+        async fn egfx_transport_drop_still_reconnects() {
+            let manager = SessionManager::new();
+            let mut server_frames = opened_channel_frames(1, Vec::new());
+
+            let (events, events_rx) = RecordedEvents::new();
+            let frame_sizes = Arc::new(StdMutex::new(Vec::new()));
+            let connect_calls = Arc::new(AtomicUsize::new(0));
+            let (channel, packets) = packet_capturing_channel();
+            let (client_end, mut server_end) = tokio::io::duplex(EGFX_DUPLEX_CAPACITY);
+
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                for frame in server_frames.drain(..) {
+                    server_end
+                        .write_all(&frame)
+                        .await
+                        .expect("scripted EGFX server write");
+                }
+                // Transport drop: the server half closes — NOT hold-open.
+            });
+
+            let scripted_once = StdMutex::new(Some(client_end));
+            let calls = Arc::clone(&connect_calls);
+            let connect: ConnectFn = Arc::new(move |_config, _password, _width, _height| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let scripted = scripted_once.lock().unwrap().take();
+                Box::pin(async move {
+                    match scripted {
+                        Some(stream) => {
+                            let mut connection_result =
+                                crate::rdp::baseline::synthetic_connection_result(W, H);
+                            let codec_policy = Arc::new(CodecErrorPolicy::new());
+                            crate::rdp::egfx::attach_to_stage_channels(
+                                &mut connection_result.static_channels,
+                                DRDYNVC_CHANNEL_ID,
+                                &codec_policy,
+                            );
+                            ConnectionOutcome::RealSessionLocal {
+                                connection_result: Box::new(connection_result),
+                                framed: Box::new(ironrdp_tokio::TokioFramed::new(stream)),
+                                codec_policy,
+                            }
+                        }
+                        None => ConnectionOutcome::Failed(
+                            "scripted EGFX session already consumed".to_string(),
+                        ),
+                    }
+                })
+            });
+
+            let id = manager
+                .create_session_with_transport(
+                    test_config("egfx-transport-drop"),
+                    None,
+                    channel,
+                    SessionEventSink::recorded(Arc::clone(&events)),
+                    true,
+                    Some(SharedFrame::new(u32::from(W), u32::from(H))),
+                    connect,
+                )
+                .await
+                .expect("scripted EGFX session creation should succeed");
+            let cmd_tx = manager
+                .get_cmd_sender(&id)
+                .await
+                .expect("session handle exists right after creation");
+            let egfx = EgfxTestSession {
+                session: TestSession {
+                    id,
+                    cmd_tx,
+                    events,
+                    events_rx,
+                    frame_sizes,
+                    connect_calls,
+                },
+                packets,
+                shared_frame: SharedFrame::new(u32::from(W), u32::from(H)),
+            };
+
+            let mut rx = egfx.session.events_rx.clone();
+            // The transport drop enters the reconnect loop (Req 2.3) —
+            // with the codec-terminal policy in place this must NOT have
+            // become a terminal.
+            wait_for(&egfx.session.id, &egfx.session.events, &mut rx, |events| {
+                events
+                    .iter()
+                    .any(|(_, v)| status_string(v) == "reconnecting")
+            })
+            .await;
+
+            // The reconnect backoff (2s paused) then re-dials: the
+            // transport-drop path runs its full retry semantics.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            while egfx.session.connect_calls.load(Ordering::SeqCst) < 2 {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "reconnect never re-dialed; statuses: {:?}",
+                    statuses_of(&info_events(&egfx.session.id, &egfx.session.events))
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+
+            let statuses = statuses_of(&info_events(&egfx.session.id, &egfx.session.events));
+            assert!(
+                !statuses
+                    .iter()
+                    .any(|s| s.starts_with("error:") && s.contains("codec")),
+                "a transport drop is not a codec terminal: {statuses:?}"
+            );
+            assert_eq!(
+                egfx.session.connect_calls.load(Ordering::SeqCst),
+                2,
+                "initial dial plus the first reconnect attempt"
+            );
+
+            egfx.session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .expect("disconnect accepted");
         }
     }
 }

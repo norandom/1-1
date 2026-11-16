@@ -255,7 +255,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Fixtures cover ClearCodec and allowed alternate codecs plus surface reset/resize; GPU/canvas receive matching pixels.
   - _Boundary: EGFX adapter integration_
   - _Requirements: 4.1,4.2,9.2,9.4_
-- [ ] 9.3 Make unsupported/decode errors terminal
+- [x] 9.3 Make unsupported/decode errors terminal
   - Use observable upstream error/unhandled hooks from dependency spike; avoid protocol parser duplication.
   - Done: Unsupported AVC terminates without retry; three failed frames terminate and successful decode resets counter.
   - _Boundary: Codec error policy_

@@ -61,6 +61,10 @@ pub enum ConnectionOutcome {
     RealSession {
         connection_result: Box<ConnectionResult>,
         framed: Box<TlsFramed>,
+        /// The session's shared codec-error policy (task 9.3): the EGFX
+        /// handler attached during this connection reports into it and the
+        /// session loop samples the upstream decode-failure counter.
+        codec_policy: std::sync::Arc<crate::rdp::codec_policy::CodecErrorPolicy>,
     },
     /// Task 7.4 characterization seam: a real session over an in-memory
     /// framed transport. Identical actor semantics to [`ConnectionOutcome::RealSession`],
@@ -72,6 +76,9 @@ pub enum ConnectionOutcome {
     RealSessionLocal {
         connection_result: Box<ConnectionResult>,
         framed: Box<ironrdp_tokio::TokioFramed<tokio::io::DuplexStream>>,
+        /// Task 9.3: the seam twin of the production `codec_policy` handle —
+        /// the scripted connection's EGFX wiring reports into it.
+        codec_policy: std::sync::Arc<crate::rdp::codec_policy::CodecErrorPolicy>,
     },
     /// Connection failed; reason provided.
     Failed(String),
@@ -246,12 +253,18 @@ pub async fn attempt_rdp_connection(
     connector.attach_static_channel(ironrdp_cliprdr::CliprdrClient::new(Box::new(
         SessionClipboardBackend::new(),
     )));
+    // Task 9.3 (Req 9.6/9.7): the session's shared codec-error policy —
+    // the EGFX handler constructed by the attach below reports
+    // unsupported-codec arrivals and decoded deliveries into it, and the
+    // returned handle carries it to the session loop, which samples the
+    // upstream decode-failure counter.
+    let codec_policy = std::sync::Arc::new(crate::rdp::codec_policy::CodecErrorPolicy::new());
     // Task 9.2 (Req 9.2/9.4): register the graphics pipeline DVC on the
     // DRDYNVC static channel — the EGFX adapter (no H.264 decoder). Without
     // this, a real server's EGFX channel creation meets an unregistered
     // processor even though 9.1 advertises
     // `support_dyn_vc_gfx_protocol`.
-    crate::rdp::egfx::attach_to_connector(&mut connector);
+    crate::rdp::egfx::attach_to_connector(&mut connector, &codec_policy);
 
     let mut framed = TokioFramed::new(tcp_stream);
 
@@ -381,6 +394,7 @@ pub async fn attempt_rdp_connection(
     ConnectionOutcome::RealSession {
         connection_result: Box::new(connection_result),
         framed: Box::new(tls_framed),
+        codec_policy,
     }
 }
 

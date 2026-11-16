@@ -1050,6 +1050,7 @@ async fn smoke_host(
         ConnectionOutcome::RealSession {
             connection_result,
             framed,
+            ..
         } => (*connection_result, *framed),
         // Task 7.4 test seam: production connectors never produce the
         // in-memory transport; the smoke only ever dials real servers.
@@ -1129,6 +1130,7 @@ async fn smoke_host(
         ConnectionOutcome::RealSession {
             connection_result: cr2,
             framed: f2,
+            ..
         } => {
             cycle2.insert(
                 "outcome".into(),
