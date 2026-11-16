@@ -11,7 +11,10 @@ use crate::rdp::client::{ConnectionOutcome, SessionCommand, attempt_rdp_connecti
 use crate::rdp::clipboard::SessionClipboardBackend;
 use crate::rdp::codec_policy::CodecErrorPolicy;
 use crate::rdp::display::FrameBuffer;
-use crate::rdp::frame_transport::{encode_full_frame_packet, encode_image_update_packet};
+use crate::rdp::frame_batch;
+use crate::rdp::frame_transport::{
+    encode_full_frame_packet, encode_full_frame_packet_from_parts, encode_image_update_packet,
+};
 // Task 5.4 (Req 12.4/12.10): frame-kind spy module, compiled ONLY in
 // test-support builds.
 #[cfg(feature = "test-support")]
@@ -724,6 +727,13 @@ impl SessionActor {
         let mut image =
             DecodedImage::new(PixelFormat::RgbA32, self.width as u16, self.height as u16);
 
+        // Task 9.4 (design L316): surface dims already delivered to the UI
+        // on this connection. `None` until the first frame — the initial
+        // delivery is a full kind-1 frame — and reset by construction on
+        // every (re)connect because this loop (and its decoded image)
+        // starts fresh per connection.
+        let mut delivered_surface: Option<(u16, u16)> = None;
+
         if let Some(text) = self.local_clipboard_text.clone()
             && self
                 .set_local_clipboard_text(&mut active_stage, &mut writer, text)
@@ -864,78 +874,117 @@ impl SessionActor {
                     }
 
                     if !updated_regions.is_empty() {
-                        let rect_start = std::time::Instant::now();
-                        let rect_count = updated_regions.len();
+                        // Task 9.4 (design L316; Reqs 4.1/4.4/9.8): merge
+                        // every dirty region drained from this processed
+                        // PDU batch into ONE bounding rectangle and choose
+                        // the packet kind — kind 1 (full frame) for the
+                        // initial delivery on this surface, a resize, or
+                        // full-surface invalidation (upstream
+                        // `widen_to_full_refresh` after a graphics reset);
+                        // otherwise kind 2 with the single merged rect. The
+                        // payload is extracted from the authoritative
+                        // composited decoded image, so unchanged pixels
+                        // inside the bounds come from the framebuffer and
+                        // accumulated dirty regions are never lost.
+                        let surface = (image.width(), image.height());
+                        if let Some(plan) =
+                            frame_batch::plan_batch(&updated_regions, surface, delivered_surface)
+                        {
+                            let rect_start = std::time::Instant::now();
+                            let region_count = updated_regions.len();
 
-                        // Write dirty rects to SharedFrame for GPU renderer (batched — one lock)
-                        if let Some(ref sf) = self.shared_frame {
-                            use ironrdp_pdu::geometry::Rectangle as _;
-                            let stride = image.stride();
-                            let img_data = image.data();
-                            let mut guard = sf.begin_write();
-                            // Task 9.2 (Req 4.1/4.2): an EGFX graphics-output
-                            // reset resizes the decoded image upstream
-                            // (`ResetGraphics` → `reset_preserving_pointer`
-                            // inside `ActiveStage::process`). Resize the
-                            // SharedFrame with it and repaint in full so the
-                            // GPU surface and the webview canvas never see a
-                            // mixed-size buffer.
-                            if guard.width() != u32::from(image.width())
-                                || guard.height() != u32::from(image.height())
-                            {
-                                guard.update_full(
-                                    u32::from(image.width()),
-                                    u32::from(image.height()),
-                                    img_data,
-                                );
-                            }
-                            for rect in &updated_regions {
-                                let x_offset = usize::from(rect.left) * 4;
-                                let y_start = usize::from(rect.top);
-                                let row_start = y_start * stride + x_offset;
-                                if row_start < img_data.len() {
-                                    guard.update_rect(
-                                        rect.left,
-                                        rect.top,
-                                        rect.width(),
-                                        rect.height(),
-                                        &img_data[row_start..],
-                                        stride,
+                            // Write the merged damage to the SharedFrame for
+                            // the GPU renderer (one lock, one rect)
+                            if let Some(ref sf) = self.shared_frame {
+                                use ironrdp_pdu::geometry::Rectangle as _;
+                                let stride = image.stride();
+                                let img_data = image.data();
+                                let mut guard = sf.begin_write();
+                                // Task 9.2 (Req 4.1/4.2): an EGFX
+                                // graphics-output reset resizes the decoded
+                                // image upstream (`ResetGraphics` →
+                                // `reset_preserving_pointer` inside
+                                // `ActiveStage::process`). Resize the
+                                // SharedFrame with it and repaint in full
+                                // so the GPU surface and the webview canvas
+                                // never see a mixed-size buffer. Task 9.4
+                                // extends the full repaint to every
+                                // full-refresh plan (initial delivery,
+                                // full-surface invalidation); partial
+                                // batches write their single merged
+                                // bounding rect — unchanged pixels inside
+                                // the bounds copy from the composited
+                                // image (identical values).
+                                if plan.full_refresh
+                                    || guard.width() != u32::from(surface.0)
+                                    || guard.height() != u32::from(surface.1)
+                                {
+                                    guard.update_full(
+                                        u32::from(surface.0),
+                                        u32::from(surface.1),
+                                        img_data,
+                                    );
+                                } else {
+                                    let row_start = usize::from(plan.rect.top) * stride
+                                        + usize::from(plan.rect.left) * 4;
+                                    if row_start < img_data.len() {
+                                        guard.update_rect(
+                                            plan.rect.left,
+                                            plan.rect.top,
+                                            plan.rect.width(),
+                                            plan.rect.height(),
+                                            &img_data[row_start..],
+                                            stride,
+                                        );
+                                    }
+                                }
+                                drop(guard);
+                                sf.mark_dirty(); // Wakes render thread via condvar
+
+                                let write_time = rect_start.elapsed();
+                                if write_time.as_millis() > 2 {
+                                    log::debug!(
+                                        "[Session {}] SharedFrame write: {} regions in {:.2}ms",
+                                        self.id, region_count, write_time.as_secs_f64() * 1000.0
+                                    );
+                                }
+
+                                // Track FPS at the session level
+                                self.metrics.frames_sent += 1;
+                                if self.metrics.frames_sent.is_multiple_of(100) {
+                                    let elapsed = self
+                                        .metrics
+                                        .started_at
+                                        .unwrap_or_else(std::time::Instant::now)
+                                        .elapsed();
+                                    let fps =
+                                        self.metrics.frames_sent as f64 / elapsed.as_secs_f64();
+                                    log::info!(
+                                        "[Session {}] RDP frames received: {} (avg {:.1} fps) | {} regions this PDU",
+                                        self.id, self.metrics.frames_sent, fps, region_count
                                     );
                                 }
                             }
-                            drop(guard);
-                            sf.mark_dirty(); // Wakes render thread via condvar
 
-                            let write_time = rect_start.elapsed();
-                            if write_time.as_millis() > 2 {
-                                log::debug!(
-                                    "[Session {}] SharedFrame write: {} rects in {:.2}ms",
-                                    self.id, rect_count, write_time.as_secs_f64() * 1000.0
-                                );
+                            // Always send via IPC — webview Canvas renders these
+                            // (wgpu renders behind the webview, not visible yet)
+                            let packet = if plan.full_refresh {
+                                encode_full_frame_packet_from_parts(
+                                    surface.0,
+                                    surface.1,
+                                    image.data(),
+                                )
+                            } else {
+                                encode_image_update_packet(
+                                    &image,
+                                    &[plan.rect],
+                                    &mut self.frame_packet_scratch,
+                                )
+                            };
+                            if self.send_frame_packet(packet).is_err() {
+                                return DisconnectReason::ConnectionLost;
                             }
-
-                            // Track FPS at the session level
-                            self.metrics.frames_sent += 1;
-                            if self.metrics.frames_sent.is_multiple_of(100) {
-                                let elapsed = self.metrics.started_at.unwrap_or_else(std::time::Instant::now).elapsed();
-                                let fps = self.metrics.frames_sent as f64 / elapsed.as_secs_f64();
-                                log::info!(
-                                    "[Session {}] RDP frames received: {} (avg {:.1} fps) | {} rects this PDU",
-                                    self.id, self.metrics.frames_sent, fps, rect_count
-                                );
-                            }
-                        }
-
-                        // Always send via IPC — webview Canvas renders these
-                        // (wgpu renders behind the webview, not visible yet)
-                        let packet = encode_image_update_packet(
-                            &image,
-                            &updated_regions,
-                            &mut self.frame_packet_scratch,
-                        );
-                        if self.send_frame_packet(packet).is_err() {
-                            return DisconnectReason::ConnectionLost;
+                            delivered_surface = Some(surface);
                         }
                     }
 
@@ -4557,6 +4606,61 @@ mod tests {
             }
         }
 
+        /// Solid-color RGBA block (task 9.4 sub-rect fixtures).
+        fn solid_rgba(width: u16, height: u16, value: [u8; 3]) -> Vec<u8> {
+            let pixels = usize::from(width) * usize::from(height);
+            let mut rgba = Vec::with_capacity(pixels * 4);
+            for _ in 0..pixels {
+                rgba.extend_from_slice(&[value[0], value[1], value[2], 255]);
+            }
+            rgba
+        }
+
+        /// ClearCodec wire for a solid-color sub-rect placed at (left, top)
+        /// (task 9.4 partial-batch fixtures).
+        fn sub_rect_clearcodec_wire(
+            value: [u8; 3],
+            left: u16,
+            top: u16,
+            width: u16,
+            height: u16,
+        ) -> WireToSurface1Pdu {
+            WireToSurface1Pdu {
+                surface_id: 1,
+                codec_id: Codec1Type::ClearCodec,
+                pixel_format: PixelFormat::XRgb,
+                destination_rectangle: ExclusiveRectangle {
+                    left,
+                    top,
+                    right: left + width,
+                    bottom: top + height,
+                },
+                bitmap_data: ironrdp_graphics::clearcodec::ClearCodecEncoder::new().encode(
+                    &clearcodec_bgra(&solid_rgba(width, height, value)),
+                    width,
+                    height,
+                ),
+            }
+        }
+
+        /// Overlay a solid block onto a full RGBA surface buffer.
+        fn overlay_solid(
+            full: &mut [u8],
+            surface_w: u16,
+            left: u16,
+            top: u16,
+            w: u16,
+            h: u16,
+            value: [u8; 3],
+        ) {
+            for y in top..top + h {
+                for x in left..left + w {
+                    let idx = (usize::from(y) * usize::from(surface_w) + usize::from(x)) * 4;
+                    full[idx..idx + 4].copy_from_slice(&[value[0], value[1], value[2], 255]);
+                }
+            }
+        }
+
         /// The scripted server's full frame sequence: DVC creation handshake,
         /// compositor surface setup, then one ClearCodec frame.
         fn egfx_server_frames(expected: &[u8]) -> Vec<Vec<u8>> {
@@ -4836,12 +4940,15 @@ mod tests {
             wait_for_packets(&egfx, |n| n >= 1).await;
             let packets = egfx.packets.lock().unwrap().clone();
             let parsed = parse_packet(&packets[0]);
-            assert_eq!(parsed.kind, 2, "EGFX route emits bitmap kind-2 packets");
+            assert_eq!(
+                parsed.kind, 1,
+                "task 9.4 (design L316): the initial frame after surface creation is a full kind-1 packet"
+            );
             assert_eq!((parsed.width, parsed.height), (W, H));
             assert_eq!(
                 parsed.rects,
                 vec![(0, 0, W, H)],
-                "full-surface refresh after the initial reset"
+                "kind 1 carries the full-surface rect"
             );
             assert_eq!(
                 parsed.pixels, expected,
@@ -4948,7 +5055,10 @@ mod tests {
             };
 
             let parsed = parse_packet(&resized_packet);
-            assert_eq!(parsed.kind, 2);
+            assert_eq!(
+                parsed.kind, 1,
+                "task 9.4 (design L316): a resize delivers a full kind-1 packet"
+            );
             assert_eq!(
                 (parsed.width, parsed.height),
                 (96, 64),
@@ -4965,6 +5075,78 @@ mod tests {
             assert_eq!(snapshot.width, 96);
             assert_eq!(snapshot.height, 64);
             assert_eq!(snapshot.data, expected2);
+
+            disconnect_and_wait(&egfx).await;
+        }
+
+        /// Task 9.4 (design L316; Reqs 4.1/4.4/9.8): the initial delivery
+        /// after surface creation is a full kind-1 frame; each subsequent
+        /// drained batch emits ONE kind-2 packet scoped to THAT batch's
+        /// own bounding rectangle (no cross-batch smearing), and the
+        /// SharedFrame ends holding the complete composited image —
+        /// disjoint updates accumulate without losing pixels.
+        #[tokio::test(start_paused = true)]
+        async fn egfx_partial_batches_keep_their_own_bounding_rects() {
+            let manager = SessionManager::new();
+            let base = expected_rgba(W, H);
+            let color_a: [u8; 3] = [9, 130, 240];
+            let color_b: [u8; 3] = [240, 9, 130];
+
+            // Script: initial full frame, then two disjoint sub-rect
+            // frames, each drained as its own processed-PDU batch.
+            let mut server_frames = egfx_server_frames(&base);
+            let mut compressor = Compressor::new();
+            server_frames.extend(egfx_frame_frames(
+                2,
+                sub_rect_clearcodec_wire(color_a, 16, 16, 32, 32),
+                &mut compressor,
+            ));
+            server_frames.extend(egfx_frame_frames(
+                3,
+                sub_rect_clearcodec_wire(color_b, 44, 6, 16, 16),
+                &mut compressor,
+            ));
+
+            let egfx = create_egfx_session(
+                &manager,
+                "egfx-batch",
+                server_frames,
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+
+            wait_for_packets(&egfx, |n| n >= 3).await;
+            let packets = egfx.packets.lock().unwrap().clone();
+            assert_eq!(packets.len(), 3, "one packet per drained batch");
+
+            // Initial delivery: kind 1, complete first image.
+            let first = parse_packet(&packets[0]);
+            assert_eq!(first.kind, 1);
+            assert_eq!((first.width, first.height), (W, H));
+            assert_eq!(first.rects, vec![(0, 0, W, H)]);
+            assert_eq!(first.pixels, base);
+
+            // Batch 2: kind 2 scoped to its own bounding rect only.
+            let second = parse_packet(&packets[1]);
+            assert_eq!(second.kind, 2);
+            assert_eq!(second.rects, vec![(16, 16, 32, 32)]);
+            assert_eq!(second.pixels, solid_rgba(32, 32, color_a));
+
+            // Batch 3: kind 2 scoped to its own rect — batch 2's damage
+            // is not re-sent and batch 3's rect is not widened by it.
+            let third = parse_packet(&packets[2]);
+            assert_eq!(third.kind, 2);
+            assert_eq!(third.rects, vec![(44, 6, 16, 16)]);
+            assert_eq!(third.pixels, solid_rgba(16, 16, color_b));
+
+            // Complete composited image in the GPU feed (Req 4.1).
+            let mut composite = base.clone();
+            overlay_solid(&mut composite, W, 16, 16, 32, 32, color_a);
+            overlay_solid(&mut composite, W, 44, 6, 16, 16, color_b);
+            let snapshot = egfx.shared_frame.publish().expect("dirty after batches");
+            assert_eq!(snapshot.width, u32::from(W));
+            assert_eq!(snapshot.height, u32::from(H));
+            assert_eq!(snapshot.data, composite);
 
             disconnect_and_wait(&egfx).await;
         }

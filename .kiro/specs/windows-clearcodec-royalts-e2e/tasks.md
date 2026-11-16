@@ -260,7 +260,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Unsupported AVC terminates without retry; three failed frames terminate and successful decode resets counter.
   - _Boundary: Codec error policy_
   - _Requirements: 9.6,9.7_
-- [ ] 9.4 Batch dirty regions without a new buffering crate
+- [x] 9.4 Batch dirty regions without a new buffering crate
   - Use existing framebuffer and rectangle math; union dirty bounds, choose rectangle/full packet at reset and initial delivery.
   - Done: Disjoint/overlapping updates and resize fixtures produce correct complete pixels.
   - _Boundary: Frame batching_

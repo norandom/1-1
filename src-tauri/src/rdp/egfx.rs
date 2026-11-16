@@ -160,6 +160,7 @@ mod tests {
     use ironrdp_session::image::DecodedImage;
 
     use crate::rdp::codec_policy::{CodecErrorPolicy, CodecPolicy};
+    use crate::rdp::frame_batch;
     use crate::rdp::frame_transport::{
         PACKET_KIND_DIRTY_RECTS, PACKET_KIND_FULL_FRAME, encode_image_update_packet,
     };
@@ -885,6 +886,251 @@ mod tests {
         assert_eq!((parsed.width, parsed.height), (96, 64));
         assert_eq!(parsed.rects, vec![(0, 0, 96, 64)]);
         assert_eq!(parsed.pixels, expected2);
+    }
+
+    // ------------------------------------------------------------------
+    // (d-batch) Task 9.4: one drained batch's regions merge into ONE
+    // bounding kind-2 rect whose pixels come complete from the composited
+    // framebuffer (design L316; Reqs 4.1/4.4/9.8).
+    // ------------------------------------------------------------------
+
+    /// Overlay a solid block onto a full RGBA surface buffer.
+    fn overlay_solid(
+        full: &mut [u8],
+        surface_w: u16,
+        left: u16,
+        top: u16,
+        w: u16,
+        h: u16,
+        value: [u8; 3],
+    ) {
+        for y in top..top + h {
+            for x in left..left + w {
+                let idx = (usize::from(y) * usize::from(surface_w) + usize::from(x)) * 4;
+                full[idx..idx + 4].copy_from_slice(&[value[0], value[1], value[2], 255]);
+            }
+        }
+    }
+
+    /// Extract one rect's packed RGBA rows from a full RGBA surface
+    /// buffer — the byte-exact expectation for the packet payload.
+    fn extract_rect_pixels(full: &[u8], surface_w: u16, rect: &InclusiveRectangle) -> Vec<u8> {
+        use ironrdp_pdu::geometry::Rectangle as _;
+        let row = usize::from(rect.width()) * 4;
+        let mut out = Vec::with_capacity(row * usize::from(rect.height()));
+        for y in rect.top..=rect.bottom {
+            let start = (usize::from(y) * usize::from(surface_w) + usize::from(rect.left)) * 4;
+            out.extend_from_slice(&full[start..start + row]);
+        }
+        out
+    }
+
+    /// DISJOINT dirty regions inside ONE drained update batch: a single
+    /// kind-2 packet carries the merged bounding rectangle, and its
+    /// payload holds the complete pixels of that rect — including the
+    /// unchanged pixels between the two regions, copied from the
+    /// composited framebuffer (they are composited there already, so
+    /// nothing accumulated is lost; Req 9.8).
+    ///
+    /// The batch shape (two GraphicsUpdate regions from one processed
+    /// PDU batch) mirrors upstream's pointer-plus-bitmap combination; the
+    /// planning and packet construction below are the production calls
+    /// the session drain makes (`frame_batch::plan_batch` +
+    /// `encode_image_update_packet` with the single merged rect).
+    #[test]
+    fn batched_disjoint_regions_emit_one_bounding_kind2_packet_with_complete_pixels() {
+        let (mut stage, mut image) = egfx_stage();
+        let mut compressor = Compressor::new();
+        open_graphics_channel(&mut stage, &mut image, &mut compressor);
+
+        let base = expected_rgba(W, H);
+        let regions1 = feed_frame(
+            &mut stage,
+            &mut image,
+            &mut compressor,
+            1,
+            wire_pdu(
+                Codec1Type::ClearCodec,
+                clearcodec_payload(&rgba_to_bgra(&base), W, H),
+            ),
+        );
+        assert_eq!(regions1, vec![full_inclusive_rect(W, H)]);
+
+        // Two disjoint sub-rect frames; their regions land in ONE drained
+        // batch (collected like the drain loop collects a batch).
+        let color_a: [u8; 3] = [9, 130, 240];
+        let color_b: [u8; 3] = [240, 9, 130];
+        let regions2 = feed_frame(
+            &mut stage,
+            &mut image,
+            &mut compressor,
+            2,
+            sub_rect_wire_pdu(
+                Codec1Type::ClearCodec,
+                clearcodec_payload(&rgba_to_bgra(&solid_rgba(16, 16, color_a)), 16, 16),
+                8,
+                8,
+                16,
+                16,
+            ),
+        );
+        let regions3 = feed_frame(
+            &mut stage,
+            &mut image,
+            &mut compressor,
+            3,
+            sub_rect_wire_pdu(
+                Codec1Type::ClearCodec,
+                clearcodec_payload(&rgba_to_bgra(&solid_rgba(16, 16, color_b)), 16, 16),
+                40,
+                48,
+                16,
+                16,
+            ),
+        );
+        assert_eq!(regions2.len(), 1);
+        assert_eq!(regions3.len(), 1);
+
+        let mut batch = regions2;
+        batch.extend(regions3);
+        let plan = frame_batch::plan_batch(&batch, (W, H), Some((W, H)))
+            .expect("disjoint regions in one batch plan");
+        assert!(
+            !plan.full_refresh,
+            "partial disjoint damage on a delivered surface stays kind 2"
+        );
+        assert_eq!(
+            plan.rect,
+            InclusiveRectangle {
+                left: 8,
+                top: 8,
+                right: 55,
+                bottom: 63
+            },
+            "bounding rectangle spans both disjoint regions"
+        );
+
+        // The composited framebuffer holds base + A + B.
+        let mut composite = base.clone();
+        overlay_solid(&mut composite, W, 8, 8, 16, 16, color_a);
+        overlay_solid(&mut composite, W, 40, 48, 16, 16, color_b);
+        assert_eq!(image.data(), composite.as_slice());
+
+        // One kind-2 packet with ONE rect; unchanged pixels inside the
+        // bounds (between the two regions) are present from the
+        // framebuffer.
+        let bounding = plan.rect;
+        let mut scratch = Vec::new();
+        let packet =
+            encode_image_update_packet(&image, std::slice::from_ref(&bounding), &mut scratch);
+        let parsed = parse_packet(&packet);
+        assert_eq!(parsed.kind, PACKET_KIND_DIRTY_RECTS);
+        assert_eq!((parsed.width, parsed.height), (W, H));
+        assert_eq!(parsed.rects, vec![(8, 8, 48, 56)]);
+        assert_eq!(parsed.pixels, extract_rect_pixels(&composite, W, &bounding));
+
+        // SharedFrame follows the production delivery sequence — the
+        // initial full frame, then the merged batch rect — and ends
+        // holding the complete composited image.
+        let sf = SharedFrame::new(u32::from(W), u32::from(H));
+        sync_shared_frame(&sf, &image, &regions1);
+        sync_shared_frame(&sf, &image, &[bounding]);
+        let snapshot = sf.publish().expect("dirty after sync");
+        assert_eq!(snapshot.data, composite);
+    }
+
+    /// OVERLAPPING dirty regions inside one drained batch: the union is
+    /// correct and the payload carries each pixel's FINAL composited
+    /// value exactly once — no double-apply artifacts.
+    #[test]
+    fn batched_overlapping_regions_union_once_with_final_pixels() {
+        let (mut stage, mut image) = egfx_stage();
+        let mut compressor = Compressor::new();
+        open_graphics_channel(&mut stage, &mut image, &mut compressor);
+
+        let base = expected_rgba(W, H);
+        let regions1 = feed_frame(
+            &mut stage,
+            &mut image,
+            &mut compressor,
+            1,
+            wire_pdu(
+                Codec1Type::ClearCodec,
+                clearcodec_payload(&rgba_to_bgra(&base), W, H),
+            ),
+        );
+
+        // B overlaps A's bottom-right corner (32..=47 x 32..=47).
+        let color_a: [u8; 3] = [9, 130, 240];
+        let color_b: [u8; 3] = [240, 9, 130];
+        let regions2 = feed_frame(
+            &mut stage,
+            &mut image,
+            &mut compressor,
+            2,
+            sub_rect_wire_pdu(
+                Codec1Type::ClearCodec,
+                clearcodec_payload(&rgba_to_bgra(&solid_rgba(32, 32, color_a)), 32, 32),
+                16,
+                16,
+                32,
+                32,
+            ),
+        );
+        let regions3 = feed_frame(
+            &mut stage,
+            &mut image,
+            &mut compressor,
+            3,
+            sub_rect_wire_pdu(
+                Codec1Type::ClearCodec,
+                clearcodec_payload(&rgba_to_bgra(&solid_rgba(16, 16, color_b)), 16, 16),
+                32,
+                32,
+                16,
+                16,
+            ),
+        );
+
+        let mut batch = regions2;
+        batch.extend(regions3);
+        let plan = frame_batch::plan_batch(&batch, (W, H), Some((W, H)))
+            .expect("overlapping regions in one batch plan");
+        assert!(!plan.full_refresh);
+        assert_eq!(
+            plan.rect,
+            InclusiveRectangle {
+                left: 16,
+                top: 16,
+                right: 47,
+                bottom: 47
+            }
+        );
+
+        let mut composite = base.clone();
+        overlay_solid(&mut composite, W, 16, 16, 32, 32, color_a);
+        overlay_solid(&mut composite, W, 32, 32, 16, 16, color_b);
+        assert_eq!(image.data(), composite.as_slice());
+
+        let mut scratch = Vec::new();
+        let packet =
+            encode_image_update_packet(&image, std::slice::from_ref(&plan.rect), &mut scratch);
+        let parsed = parse_packet(&packet);
+        assert_eq!(parsed.kind, PACKET_KIND_DIRTY_RECTS);
+        assert_eq!(parsed.rects, vec![(16, 16, 32, 32)]);
+        assert_eq!(
+            parsed.pixels,
+            extract_rect_pixels(&composite, W, &plan.rect)
+        );
+
+        // SharedFrame follows the production delivery sequence — the
+        // initial full frame, then the merged batch rect — and ends
+        // holding the complete composited image.
+        let sf = SharedFrame::new(u32::from(W), u32::from(H));
+        sync_shared_frame(&sf, &image, &regions1);
+        sync_shared_frame(&sf, &image, &[plan.rect]);
+        let snapshot = sf.publish().expect("dirty after sync");
+        assert_eq!(snapshot.data, composite);
     }
 
     // ------------------------------------------------------------------

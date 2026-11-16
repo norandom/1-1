@@ -11,20 +11,32 @@ const RECT_HEADER_LEN: usize = 2 + 2 + 2 + 2;
 const BYTES_PER_PIXEL: usize = 4;
 
 pub fn encode_full_frame_packet(frame_buffer: &FrameBuffer) -> Vec<u8> {
+    encode_full_frame_packet_from_parts(
+        frame_buffer.width as u16,
+        frame_buffer.height as u16,
+        &frame_buffer.data,
+    )
+}
+
+/// Encode a kind-1 full-frame packet from raw tightly-packed RGBA parts
+/// (the composited decoded image shape: `stride == width * 4`, verified by
+/// upstream `DecodedImage::stride`).
+///
+/// Task 9.4: extracted so the session drain can emit kind 1 from the
+/// composited decoded image without building a temporary owned
+/// `FrameBuffer`. The wire layout is the frozen kind-1 layout — byte
+/// identical to [`encode_full_frame_packet`] (pinned by test), and the
+/// kind values themselves are frozen wire constants
+/// (`packet_kind_values_are_stable_wire_constants`).
+pub fn encode_full_frame_packet_from_parts(width: u16, height: u16, rgba: &[u8]) -> Vec<u8> {
     let rect = InclusiveRectangle {
         left: 0,
         top: 0,
-        right: frame_buffer.width.saturating_sub(1) as u16,
-        bottom: frame_buffer.height.saturating_sub(1) as u16,
+        right: width.saturating_sub(1),
+        bottom: height.saturating_sub(1),
     };
 
-    encode_packet(
-        PACKET_KIND_FULL_FRAME,
-        frame_buffer.width as u16,
-        frame_buffer.height as u16,
-        &[rect],
-        &frame_buffer.data,
-    )
+    encode_packet(PACKET_KIND_FULL_FRAME, width, height, &[rect], rgba)
 }
 
 pub fn encode_image_update_packet(
@@ -220,5 +232,29 @@ mod tests {
         // unknown kinds by both sides.
         assert_eq!(PACKET_KIND_FULL_FRAME, 1);
         assert_eq!(PACKET_KIND_DIRTY_RECTS, 2);
+    }
+
+    /// Task 9.4: the parts-based kind-1 encoder (the session drain's path
+    /// from the composited decoded image) must be byte-identical to the
+    /// `FrameBuffer`-based kind-1 encoder — the frozen layout does not
+    /// change, only the input shape does.
+    #[test]
+    fn full_frame_parts_encoding_is_byte_identical_to_frame_buffer_encoding() {
+        let data: Vec<u8> = (0..5u32 * 3 * 4).map(|n| (n * 7 % 256) as u8).collect();
+        let frame = FrameBuffer {
+            width: 5,
+            height: 3,
+            data: data.clone(),
+        };
+
+        let from_frame_buffer = encode_full_frame_packet(&frame);
+        let from_parts = encode_full_frame_packet_from_parts(5, 3, &data);
+
+        assert_eq!(from_frame_buffer, from_parts);
+        assert_eq!(from_parts[0], PACKET_KIND_FULL_FRAME);
+        assert_eq!(u16::from_le_bytes([from_parts[1], from_parts[2]]), 5);
+        assert_eq!(u16::from_le_bytes([from_parts[3], from_parts[4]]), 3);
+        assert_eq!(u16::from_le_bytes([from_parts[5], from_parts[6]]), 1);
+        assert_eq!(&from_parts[15..], data.as_slice());
     }
 }
