@@ -3,9 +3,10 @@ import { Zap, Check } from 'lucide-react';
 import type { ConnectionConfig } from '../../types';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { useLibraryStore, selectNewConnectionDestination } from '../../stores/libraryStore';
+import { useLibraryStore, selectNewConnectionDestination, selectIsWriteBlocked } from '../../stores/libraryStore';
 import { useToastStore } from '../../stores/toastStore';
 import * as tauri from '../../lib/tauri';
+import { RECOVERY_BLOCKED_MESSAGE } from '../../lib/recovery';
 import {
   Dialog,
   DialogContent,
@@ -46,6 +47,9 @@ export function ConnectionForm({ connection, onClose }: Props) {
   // Task 8.2 (Req 10.1): create files into the selected library/folder
   // (a selected connection files next to it); null = backend default.
   const destination = useLibraryStore(selectNewConnectionDestination);
+  // Task 8.7 (Req 10.12): every entry point to this form is gated while
+  // write-blocked; this guard makes the save itself airtight too.
+  const mutationsBlocked = useLibraryStore(selectIsWriteBlocked);
 
   const isEdit = !!connection;
 
@@ -75,6 +79,12 @@ export function ConnectionForm({ connection, onClose }: Props) {
   };
 
   const handleSubmit = async () => {
+    // Task 8.7 (Req 10.12): no create/update may leave the client while
+    // the store is in recovery.
+    if (mutationsBlocked) {
+      addToast({ message: RECOVERY_BLOCKED_MESSAGE, type: 'error' });
+      return;
+    }
     if (!validate() || isSubmitting) return;
     const parts = resolution.split('x').map(Number);
     let w = parts[0], h = parts[1];

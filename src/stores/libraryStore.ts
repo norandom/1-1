@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { LibraryTree, NodeId } from '../types';
+import type { LibraryTree, LibraryStoreStatus, NodeId } from '../types';
 import * as tauri from '../lib/tauri';
+import { isWriteBlocked, RECOVERY_BLOCKED_MESSAGE } from '../lib/recovery';
 
 // Task 8.2 (Req 10.1/10.3/10.9/10.11): typed tree state for the Royal
 // TS-style sidebar — the design.md `LibraryStore` contract. The store owns
@@ -47,8 +48,27 @@ interface LibraryStoreState {
   isLoading: boolean;
   error: string | null;
   lastMoveError: string | null;
+  /**
+   * Task 8.7 (Req 10.12): backend store mode for the recovery UI.
+   * Transient — NEVER persisted (the backend owns it); `null` until the
+   * first `refreshStatus` resolves.
+   */
+  status: LibraryStoreStatus | null;
+  /** True while a recovery reload is in flight (banner button state). */
+  isReloading: boolean;
+  /** Last failed reload message — the store stayed blocked (Req 10.12). */
+  recoveryError: string | null;
 
   fetchTree: () => Promise<void>;
+  /** Fetch `get_library_status` into `status` (startup + reload wiring). */
+  refreshStatus: () => Promise<void>;
+  /**
+   * The one path out of write-blocked recovery (Req 10.12): re-run the
+   * load/migration via `reload_library_store`. True only when the store
+   * reloaded to ready — the tree is then refetched, which restores the
+   * normal (enabled) UI. A failure keeps the block with `recoveryError`.
+   */
+  reload: () => Promise<boolean>;
   selectNode: (id: NodeId | null) => void;
   toggleExpanded: (id: string) => void;
   setFilter: (filter: string) => void;
@@ -208,6 +228,14 @@ function optimisticMove(tree: LibraryTree, node: NodeId, target: NodeId): Librar
 
 // ── Selectors (pure; usable with `useLibraryStore(s => …)` in 8.3) ───
 
+/**
+ * Task 8.7 (Req 10.12): true while the store is write-blocked — every
+ * mutation affordance derives its disabled state from this one selector.
+ */
+export function selectIsWriteBlocked(state: Pick<LibraryStoreState, 'status'>): boolean {
+  return isWriteBlocked(state.status);
+}
+
 export function selectFilterResult(state: Pick<LibraryStoreState, 'tree' | 'filter' | 'tagsById'>): FilterResult | null {
   return applyFilter(state.tree, state.filter, state.tagsById);
 }
@@ -311,6 +339,9 @@ export const useLibraryStore = create<LibraryStoreState>()(
       isLoading: false,
       error: null,
       lastMoveError: null,
+      status: null,
+      isReloading: false,
+      recoveryError: null,
 
       fetchTree: async () => {
         set({ isLoading: true, error: null });
@@ -339,6 +370,41 @@ export const useLibraryStore = create<LibraryStoreState>()(
         }
       },
 
+      refreshStatus: async () => {
+        try {
+          const status = await tauri.getLibraryStatus();
+          set({ status });
+        } catch {
+          // The status read itself failed: keep the previous status —
+          // recovery state is backend-owned and never invented here.
+        }
+      },
+
+      reload: async () => {
+        set({ isReloading: true, recoveryError: null });
+        try {
+          const status = await tauri.reloadLibraryStore();
+          set({ status });
+          if (status.status !== 'ready') {
+            // Defensive: reload succeeded but the store still reports a
+            // blocked mode — stay blocked (the banner keeps showing it).
+            set({ isReloading: false });
+            return false;
+          }
+          // Valid data restored: refetch the tree so the UI (controls
+          // included) returns to its normal enabled state (Req 10.12).
+          set({ isReloading: false });
+          await get().fetchTree();
+          return true;
+        } catch (e) {
+          // Still broken: reload re-runs the failed load, so the
+          // rejection IS the still-blocked evidence. Keep the blocked
+          // status and surface the message in the banner.
+          set({ isReloading: false, recoveryError: e instanceof Error ? e.message : String(e) });
+          return false;
+        }
+      },
+
       selectNode: (id) => set({ selectedNodeId: id }),
 
       // Req 10.3: expansion toggles mutate the saved (persisted) map —
@@ -352,6 +418,14 @@ export const useLibraryStore = create<LibraryStoreState>()(
       setFilter: (filter) => set({ filter }),
 
       moveNode: async (node, target) => {
+        // Task 8.7 (Req 10.12): recovery gating at the store chokepoint —
+        // reject BEFORE the optimistic transform so the visible tree (and
+        // the on-disk originals) stay exactly as they were. This is the
+        // one client-side guard behind BOTH 8.4 move triggers.
+        if (isWriteBlocked(get().status)) {
+          set({ lastMoveError: RECOVERY_BLOCKED_MESSAGE });
+          throw new Error(RECOVERY_BLOCKED_MESSAGE);
+        }
         const previousTree = get().tree;
         set({ tree: optimisticMove(previousTree, node, target), lastMoveError: null });
         try {

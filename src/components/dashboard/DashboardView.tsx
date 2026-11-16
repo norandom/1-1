@@ -4,13 +4,14 @@ import { Plus, Monitor, Loader2 } from 'lucide-react';
 import type { ConnectionSummary, NodeId } from '../../types';
 import { buildDashboardModel, fetchDescendants } from '../../lib/dashboard-view';
 import { statusesFromSessions } from '../../lib/tree-a11y';
-import { useLibraryStore, selectNewConnectionDestination } from '../../stores/libraryStore';
+import { useLibraryStore, selectNewConnectionDestination, selectIsWriteBlocked } from '../../stores/libraryStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { useConnectAction } from '../../hooks/useConnectAction';
 import { ConnectionForm } from '../connections/ConnectionForm';
 import { DashboardCard } from './DashboardCard';
 import { Button } from '@/components/ui/button';
+import { RECOVERY_BLOCKED_MESSAGE } from '../../lib/recovery';
 
 /**
  * Task 8.5 (Req 10.5/10.6/11.6, design.md L395): the dashboard of the
@@ -27,6 +28,9 @@ export function DashboardView({ node }: { node: NodeId }) {
   const sessions = useSessionStore((s) => s.sessions);
   const connections = useConnectionStore((s) => s.connections);
   const destination = useLibraryStore(selectNewConnectionDestination);
+  // Task 8.7 (Req 10.12): the create CTAs are disabled while the store
+  // is write-blocked — the dashboard itself stays viewable.
+  const mutationsBlocked = useLibraryStore(selectIsWriteBlocked);
   const { connect } = useConnectAction();
 
   const [summaries, setSummaries] = useState<ConnectionSummary[] | null>(null);
@@ -84,7 +88,14 @@ export function DashboardView({ node }: { node: NodeId }) {
           </div>
           <Button
             onClick={() => setShowNewConnection(true)}
-            title={destination ? `New connection in ${destination.label}` : undefined}
+            disabled={mutationsBlocked}
+            title={
+              mutationsBlocked
+                ? RECOVERY_BLOCKED_MESSAGE
+                : destination
+                  ? `New connection in ${destination.label}`
+                  : undefined
+            }
           >
             <Plus className="size-4" strokeWidth={2.5} />
             New Connection
@@ -118,7 +129,7 @@ export function DashboardView({ node }: { node: NodeId }) {
                 ? `Add a connection to ${destination.label}`
                 : 'Add your first remote desktop connection to get started'}
             </p>
-            <Button onClick={() => setShowNewConnection(true)}>
+            <Button onClick={() => setShowNewConnection(true)} disabled={mutationsBlocked}>
               <Plus className="size-4" />
               Add Connection
             </Button>

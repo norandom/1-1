@@ -237,7 +237,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Boundary: Tab integration_
   - _Depends: 7.1_
   - _Requirements: 11.1,11.2,11.3,11.4,11.5,11.6,11.7,11.8,11.9_
-- [ ] 8.7 Expose store recovery and disable mutation controls
+- [x] 8.7 Expose store recovery and disable mutation controls
   - Bind backend recovery state to a persistent instructions view; disable CRUD/import/move/autosave without losing stored originals. Restore controls only after valid restore/reload.
   - Done: Corrupt-file startup and failed migration E2E show instructions and reject every mutation path; valid recovery reload restores the UI.
   - _Boundary: Recovery UI integration_

@@ -13,6 +13,10 @@ import { SessionView } from './components/session/SessionView';
 // Task 8.6 (Req 11.1): the persistent document tab strip, hoisted above
 // the routes so open sessions stay visible across navigation.
 import { DocumentTabs } from './components/session/DocumentTabs';
+// Task 8.7 (Req 10.12): the persistent recovery instructions view —
+// hoisted like the tab strip so it stays visible across navigation for
+// as long as the store is write-blocked (it cannot be dismissed).
+import { RecoveryBanner } from './components/layout/RecoveryBanner';
 import { SettingsPage } from './components/settings/SettingsPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastContainer } from './components/Toast';
@@ -21,7 +25,9 @@ import { useTheme } from './hooks/useTheme';
 import { useKeyboard } from './hooks/useKeyboard';
 import { useSettingsStore } from './stores/settingsStore';
 import { useConnectionStore } from './stores/connectionStore';
-import { useLibraryStore } from './stores/libraryStore';
+import { useLibraryStore, selectIsWriteBlocked } from './stores/libraryStore';
+import { useToastStore } from './stores/toastStore';
+import { RECOVERY_BLOCKED_MESSAGE } from './lib/recovery';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
 export default function App() {
@@ -30,6 +36,11 @@ export default function App() {
   // Task 8.2 (Req 10.1/10.9): the sidebar tree state — also restores the
   // persisted selection/expansion and aggregates real tags for filtering.
   const fetchTree = useLibraryStore((s) => s.fetchTree);
+  // Task 8.7 (Req 10.12): the backend store mode feeds the recovery
+  // banner and the mutation gating; the only exit is a valid reload.
+  const refreshStatus = useLibraryStore((s) => s.refreshStatus);
+  const mutationsBlocked = useLibraryStore(selectIsWriteBlocked);
+  const addToast = useToastStore((s) => s.addToast);
   const [showNewConnection, setShowNewConnection] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
 
@@ -41,12 +52,18 @@ export default function App() {
     fetchSettings();
     fetchConnections();
     fetchTree();
-  }, [fetchSettings, fetchConnections, fetchTree]);
+    refreshStatus();
+  }, [fetchSettings, fetchConnections, fetchTree, refreshStatus]);
 
   // Keyboard shortcuts
   const handleNewConnection = useCallback(() => {
+    // Task 8.7 (Req 10.12): no new mutation affordances while blocked.
+    if (mutationsBlocked) {
+      addToast({ message: RECOVERY_BLOCKED_MESSAGE, type: 'error' });
+      return;
+    }
     setShowNewConnection(true);
-  }, []);
+  }, [mutationsBlocked, addToast]);
 
   const handleShowShortcuts = useCallback(() => {
     setShowShortcuts((prev) => !prev);
@@ -71,6 +88,11 @@ export default function App() {
             tabIndex={-1}
             className="flex flex-1 min-w-0 flex-col overflow-hidden focus:outline-none"
           >
+            {/* Task 8.7 (Req 10.12): the recovery instructions view sits
+                above everything else in the panel — persistent across
+                navigation and not dismissible while the store is
+                write-blocked. */}
+            <RecoveryBanner />
             {/* Task 8.6 (Req 11.1): tabs live above the routes — visible
                 on session views, dashboards and the start view alike. */}
             <DocumentTabs />

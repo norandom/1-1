@@ -25,6 +25,7 @@ import {
   FILTER_EMPTY_STATE_TEXT,
   selectEffectiveExpansion,
   selectFilterResult,
+  selectIsWriteBlocked,
   selectVisibleNodes,
   useLibraryStore,
 } from '../../stores/libraryStore';
@@ -41,6 +42,7 @@ import {
   treeItemLabel,
 } from '../../lib/tree-a11y';
 import { contextMenuItems, menuActionFor } from '../../lib/tree-menu';
+import { isMenuActionBlocked, RECOVERY_BLOCKED_MESSAGE } from '../../lib/recovery';
 import { dragEventToMove, moveDestinations, moveTreeNodes } from '../../lib/tree-move';
 import type { MoveOutcome, MoveTrigger } from '../../lib/tree-move';
 import type { DeletionCounts } from '../../lib/tree-confirm';
@@ -106,6 +108,12 @@ interface TreeRowProps {
   isFilterActive: boolean;
   isFocused: boolean;
   menuOpen: boolean;
+  /**
+   * Task 8.7 (Req 10.12): true while the store is write-blocked — the
+   * mutating menu items and the drag source are disabled (Connect and
+   * reads stay available).
+   */
+  mutationsBlocked: boolean;
   registerRef: (key: string, el: HTMLDivElement | null) => void;
   focusRow: (key: string) => void;
   onRowClick: (node: NodeId, key: string) => void;
@@ -131,6 +139,7 @@ function TreeRow({
   isFilterActive,
   isFocused,
   menuOpen,
+  mutationsBlocked,
   registerRef,
   focusRow,
   onRowClick,
@@ -146,10 +155,12 @@ function TreeRow({
   const canDrop = isContainer;
 
   // Both hooks run unconditionally (rules of hooks); `disabled` keeps
-  // libraries from dragging and connections from receiving drops.
+  // libraries from dragging and connections from receiving drops. While
+  // write-blocked (8.7, Req 10.12) no drag can start at all — the store
+  // guard rejects any that still slips through.
   const { attributes, listeners, setNodeRef: setDragRef, isDragging, transform } = useDraggable({
     id: key,
-    disabled: !canDrag,
+    disabled: !canDrag || mutationsBlocked,
   });
   const { setNodeRef: setDropRef, isOver } = useDroppable({ id: key, disabled: !canDrop });
 
@@ -257,6 +268,9 @@ function TreeRow({
           {contextMenuItems(a11y.kind).map((item) => (
             <DropdownMenuItem
               key={item}
+              // 8.7 (Req 10.12): every mutating item disabled while
+              // write-blocked — Connect stays available.
+              disabled={mutationsBlocked && menuActionFor(item) !== 'connect'}
               onSelect={() => {
                 onMenuItemSelect(a11y.node, item);
               }}
@@ -284,6 +298,9 @@ export function ConnectionTree() {
   const toggleExpanded = useLibraryStore((s) => s.toggleExpanded);
   const setFilter = useLibraryStore((s) => s.setFilter);
   const fetchTree = useLibraryStore((s) => s.fetchTree);
+  // Task 8.7 (Req 10.12): every mutation affordance in this tree derives
+  // its disabled state from the one recovery selector.
+  const mutationsBlocked = useLibraryStore(selectIsWriteBlocked);
 
   // Live session statuses (design.md: the tree subscribes sessionStore).
   const sessions = useSessionStore((s) => s.sessions);
@@ -388,7 +405,15 @@ export function ConnectionTree() {
   const [moveError, setMoveError] = useState<string | null>(null);
 
   const runMenuAction = (node: NodeId, item: string): void => {
-    switch (menuActionFor(item)) {
+    const action = menuActionFor(item);
+    // Task 8.7 (Req 10.12): the menu's single mutation gate. Items render
+    // disabled while write-blocked; this guard covers keyboard/edge
+    // dispatch so no mutating path leaks (Connect is never blocked).
+    if (isMenuActionBlocked(useLibraryStore.getState().status, action)) {
+      addToast({ message: RECOVERY_BLOCKED_MESSAGE, type: 'error' });
+      return;
+    }
+    switch (action) {
       case 'connect':
         connectNode(node);
         break;
@@ -639,6 +664,7 @@ export function ConnectionTree() {
                 isFilterActive={isFilterActive}
                 isFocused={nodeKey(a11y.node) === effectiveFocusedKey}
                 menuOpen={sameNode(menuNode, a11y.node)}
+                mutationsBlocked={mutationsBlocked}
                 registerRef={registerItemRef}
                 focusRow={(key) => itemRefs.current.get(key)?.focus()}
                 onRowClick={(node, key) => {
