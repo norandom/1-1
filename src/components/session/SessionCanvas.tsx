@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Loader2, WifiOff } from 'lucide-react';
 
 import { parseFramePacket } from '../../lib/frame-protocol';
+import { physicalViewport } from '../../lib/viewport-size';
 import { subscribeCanvasKeyboard } from './canvas-keyboard';
 import type { FrameListener } from '../../lib/session-runtime';
 import {
@@ -224,22 +225,6 @@ export function SessionCanvas({
   }, [displayMode, surfaceWidth, surfaceHeight, updateLayout, status]);
 
   useEffect(() => {
-    let query: MediaQueryList;
-    const changed = () => {
-      query?.removeEventListener('change', changed);
-      query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
-      query.addEventListener('change', changed);
-      updateLayout();
-    };
-    changed();
-    window.addEventListener('resize', changed);
-    return () => {
-      query.removeEventListener('change', changed);
-      window.removeEventListener('resize', changed);
-    };
-  }, [updateLayout]);
-
-  useEffect(() => {
     const unsubscribe = subscribeToFrames((frame, consumed) => {
       // Decoded RGBA bitmap packets only (kinds 1/2, Req 4.4/9.4): the
       // H.264 kind-3 path was removed with its encoder/decoder (task 4.4).
@@ -276,23 +261,37 @@ export function SessionCanvas({
 
     let previousWidth = -1;
     let previousHeight = -1;
-    const observer = new ResizeObserver(() => {
+    const resized = () => {
       const container = containerRef.current;
       if (!container) return;
       updateLayout();
       // Include local scrollbars so switching modes cannot resize the server
       // and feed back into the remote surface dimensions.
-      const width = container.offsetWidth;
-      const height = container.offsetHeight;
+      const size = physicalViewport(container.offsetWidth, container.offsetHeight, window.devicePixelRatio);
+      if (!size) return;
+      const { width, height } = size;
       if (width !== previousWidth || height !== previousHeight) {
         previousWidth = width;
         previousHeight = height;
         onResize?.(width, height);
       }
-    });
-
+    };
+    let query: MediaQueryList;
+    const densityChanged = () => {
+      query?.removeEventListener('change', densityChanged);
+      query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      query.addEventListener('change', densityChanged);
+      resized();
+    };
+    const observer = new ResizeObserver(resized);
     observer.observe(containerRef.current);
-    return () => observer.disconnect();
+    densityChanged();
+    window.addEventListener('resize', densityChanged);
+    return () => {
+      observer.disconnect();
+      query.removeEventListener('change', densityChanged);
+      window.removeEventListener('resize', densityChanged);
+    };
   }, [onResize, updateLayout, status]);
 
   // Auto-focus the canvas when it mounts (so keyboard works immediately)

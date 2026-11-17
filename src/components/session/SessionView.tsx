@@ -12,6 +12,7 @@ import { PerformanceHUD } from './PerformanceHUD';
 import * as tauri from '../../lib/tauri';
 import { ctrlAltDelSequence } from '../../lib/input-mapper';
 import { normalizeHostProfile } from '../../lib/host-profile';
+import { physicalViewport } from '../../lib/viewport-size';
 import { isLocalInputTarget } from './canvas-keyboard';
 import { resolveSessionView, sessionForConnection } from '../../lib/session-route';
 import {
@@ -65,6 +66,7 @@ function SessionContent() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const resizeSchedulerRef = useRef<ResizeScheduler | null>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   useClipboard({ sessionId });
   const sessionResolution = useSessionStore((s) =>
     sessionId ? s.sessions.get(sessionId) : null
@@ -89,13 +91,17 @@ function SessionContent() {
   const profile = normalizeHostProfile(connectionInfo?.hostProfile);
   useEffect(() => {
     if (sessionId === null || profile.resizeMode === 'fixed') return;
+    const viewport = viewportRef.current;
+    const initialSize = viewport
+      ? physicalViewport(viewport.offsetWidth, viewport.offsetHeight, window.devicePixelRatio)
+      : undefined;
     const scheduler = createTrailingResizeScheduler((width, height) => {
       tauri.resizeSession(sessionId, width, height).catch(() => {});
     }, undefined, () => {
       // Recheck the committed preference at emit time as well as effect cleanup.
       const current = useConnectionStore.getState().connections.find((c) => c.id === resolvedConnectionId);
       return !!current && normalizeHostProfile(current.hostProfile).resizeMode === 'dynamic';
-    });
+    }, initialSize);
     resizeSchedulerRef.current = scheduler;
     return () => {
       scheduler.cancel();
@@ -150,6 +156,12 @@ function SessionContent() {
   const connectRef = useRef(connect);
   const restartRef = useRef(restart);
   const connectControllerRef = useRef<ConnectController | null>(null);
+  const measuredSize = useCallback((connectionId: string) => {
+    const saved = useConnectionStore.getState().connections.find((c) => c.id === connectionId);
+    const viewport = viewportRef.current;
+    if (!viewport || normalizeHostProfile(saved?.hostProfile).resizeMode === 'fixed') return undefined;
+    return physicalViewport(viewport.offsetWidth, viewport.offsetHeight, window.devicePixelRatio);
+  }, []);
   useEffect(() => {
     connectRef.current = connect;
     restartRef.current = restart;
@@ -157,8 +169,8 @@ function SessionContent() {
   useEffect(() => {
     if (connectControllerRef.current == null) {
       connectControllerRef.current = createConnectController({
-        connect: (connectionId) => connectRef.current(connectionId),
-        restart: (connectionId) => restartRef.current(connectionId),
+        connect: (connectionId) => connectRef.current(connectionId, measuredSize(connectionId)),
+        restart: (connectionId) => restartRef.current(connectionId, measuredSize(connectionId)),
         sessionForConnection: (connectionId) =>
           sessionForConnection(
             useSessionStore.getState().sessions.values(),
@@ -168,7 +180,7 @@ function SessionContent() {
         clearRequest: () => useSessionStore.getState().clearConnectRequest(),
       });
     }
-  }, []);
+  }, [measuredSize]);
   // A new route id may legitimately initiate its own connect: re-arm
   // the controller's once-guard whenever the route id changes. Declared
   // BEFORE the connect effect so the re-arm runs first on the same
@@ -291,7 +303,7 @@ function SessionContent() {
       {/* Task 8.6 (Req 11.1): the tab strip is hoisted to App above the
           routes — it no longer renders inside the session view. */}
 
-      <div className="relative flex-1 overflow-hidden">
+      <div ref={viewportRef} className="relative min-h-0 flex-1 overflow-hidden">
         {/* Canvas */}
         <SessionCanvas
           displayMode={profile.displayMode}

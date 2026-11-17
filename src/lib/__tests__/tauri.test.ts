@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { CascadedIds, ConnectionSummary, DeletionReport, Folder, Library, LibraryTree } from '../../types';
 
 import {
+  connect,
   createFolder,
   createConnection,
   updateConnection,
@@ -30,6 +31,15 @@ const invokeMock = vi.mocked(invoke);
 
 beforeEach(() => {
   invokeMock.mockReset();
+});
+
+it('connect passes optional initial physical dimensions without altering legacy callers', async () => {
+  const channel = {} as Parameters<typeof connect>[1];
+  const initialSize = { width: 1500, height: 900 };
+  await connect('host', channel, initialSize);
+  expect(invokeMock).toHaveBeenLastCalledWith('connect', { connectionId: 'host', frameChannel: channel, initialSize });
+  await connect('host', channel);
+  expect(invokeMock).toHaveBeenLastCalledWith('connect', { connectionId: 'host', frameChannel: channel });
 });
 
 it.each([false, true])('connection writes preserve fontSmoothing=%s', async (fontSmoothing) => {

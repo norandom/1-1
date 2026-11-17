@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { SessionStatus } from '../types';
+import type { ViewportSize } from '../lib/viewport-size';
 import { useSessionStore } from '../stores/sessionStore';
 import * as tauri from '../lib/tauri';
 import { connectSession, subscribeSessionFrames, reportSessionFramePresented, refreshSessionDisplay, type FrameListener } from '../lib/session-runtime';
@@ -38,10 +39,10 @@ export function useRdpSession(viewSessionId?: string) {
     if (sessionId) reportSessionFramePresented(sessionId);
   }, [sessionId]);
 
-  const open = useCallback(async (connectionId: string, restart: boolean) => {
+  const open = useCallback(async (connectionId: string, restart: boolean, initialSize?: ViewportSize) => {
     setConnectStatus('connecting');
     try {
-      const sid = await connectSession(connectionId, restart);
+      const sid = await connectSession(connectionId, restart, initialSize);
       // A close can finish while the status listener is being registered.
       if (useSessionStore.getState().sessions.has(sid)) setConnectedSessionId(sid);
     } catch (error) {
@@ -49,8 +50,8 @@ export function useRdpSession(viewSessionId?: string) {
       setConnectStatus('error');
     }
   }, []);
-  const connect = useCallback((connectionId: string) => open(connectionId, false), [open]);
-  const restart = useCallback((connectionId: string) => open(connectionId, true), [open]);
+  const connect = useCallback((connectionId: string, initialSize?: ViewportSize) => open(connectionId, false, initialSize), [open]);
+  const restart = useCallback((connectionId: string, initialSize?: ViewportSize) => open(connectionId, true, initialSize), [open]);
 
   const disconnect = useCallback(async () => {
     if (sessionId) {

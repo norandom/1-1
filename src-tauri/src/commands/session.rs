@@ -7,9 +7,37 @@ use tauri::{
 use crate::rdp::client::SessionCommand;
 use crate::rdp::session::{SessionInfo, SessionManager, admit_mock_session};
 use crate::renderer::shared_frame::SharedFrame;
+use crate::store::connections::{ConnectionConfig, ResizeMode};
 use crate::store::credentials::CredentialStore;
 use crate::store::library::LibraryStore;
 use crate::store::settings::SettingsStore;
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub struct InitialSize {
+    width: u32,
+    height: u32,
+}
+
+fn initial_config(
+    saved: &ConnectionConfig,
+    size: Option<InitialSize>,
+) -> Result<ConnectionConfig, String> {
+    let mut config = saved.clone();
+    if config.host_profile.resize_mode == ResizeMode::Dynamic
+        && let Some(size) = size
+    {
+        if size.width == 0 || size.height == 0 {
+            return Err("Initial viewport dimensions must be positive".into());
+        }
+        let (width, height) = ironrdp_displaycontrol::pdu::MonitorLayoutEntry::adjust_display_size(
+            size.width,
+            size.height,
+        );
+        config.display_width = Some(width);
+        config.display_height = Some(height);
+    }
+    Ok(config)
+}
 
 #[tauri::command]
 pub async fn frame_consumed(
@@ -33,6 +61,7 @@ pub async fn frame_consumed(
 pub async fn connect(
     connection_id: String,
     frame_channel: Channel<InvokeResponseBody>,
+    initial_size: Option<InitialSize>,
     // Task 5.3 (Req 12.2/12.10): optional command-level mock flag. Absent
     // or `false` is a normal real connection request.
     mock: Option<bool>,
@@ -60,8 +89,14 @@ pub async fn connect(
     // of environment variables; test-support builds admit the request and
     // the actor runs the synthetic no-network session (Req 12.2/12.10).
     let mock_session = admit_mock_session(config.mock, mock)?;
-    let mut config = config;
+    let mut config = initial_config(&config, initial_size)?;
     config.mock = mock_session;
+    log::info!(
+        "Initial RDP display request: {}x{} (sizing {:?})",
+        config.display_width.unwrap_or(1920),
+        config.display_height.unwrap_or(1080),
+        config.host_profile.resize_mode
+    );
 
     // Look up the password from the credential store
     let password = match cred_store.get_password(&connection_id) {
@@ -104,6 +139,79 @@ pub async fn connect(
         .map_err(|e| e.to_string())?;
 
     Ok(session_id)
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+    fn saved() -> ConnectionConfig {
+        serde_json::from_value(serde_json::json!({
+            "id":"viewport", "name":"viewport", "host":"test.invalid", "port":3389,
+            "username":"user", "domain":"", "displayWidth":1920,"displayHeight":1080,
+            "createdAt":"2026-01-01T00:00:00Z", "updatedAt":"2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn viewport_initial_request_changes_only_transient_dimensions() {
+        let saved = saved();
+        let mut expected = saved.clone();
+        expected.display_width = Some(1200);
+        expected.display_height = Some(701);
+        assert_eq!(
+            initial_config(
+                &saved,
+                Some(InitialSize {
+                    width: 1201,
+                    height: 701
+                })
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(saved.display_width, Some(1920));
+        assert_eq!(saved.display_height, Some(1080));
+        assert_eq!(initial_config(&saved, None).unwrap(), saved);
+    }
+    #[test]
+    fn viewport_fixed_preserves_saved_dimensions_and_dynamic_validates_bounds() {
+        let mut saved = saved();
+        assert!(
+            initial_config(
+                &saved,
+                Some(InitialSize {
+                    width: 0,
+                    height: 500
+                })
+            )
+            .is_err()
+        );
+        let bounded = initial_config(
+            &saved,
+            Some(InitialSize {
+                width: u32::MAX,
+                height: 1,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            (bounded.display_width, bounded.display_height),
+            (Some(8192), Some(200))
+        );
+        saved.host_profile.resize_mode = ResizeMode::Fixed;
+        assert_eq!(
+            initial_config(
+                &saved,
+                Some(InitialSize {
+                    width: 0,
+                    height: 0
+                })
+            )
+            .unwrap(),
+            saved
+        );
+        assert!(serde_json::from_str::<InitialSize>(r#"{"width":-1,"height":600}"#).is_err());
+    }
 }
 
 #[tauri::command]

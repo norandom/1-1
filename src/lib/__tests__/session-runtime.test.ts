@@ -69,6 +69,17 @@ afterEach(() => {
 });
 
 describe('session-owned frame channels (8.6 integration remediation)', () => {
+  it('uses fresh measured dimensions on connect/restart but never reconnects on attachment', async () => {
+    const first = { width: 1200, height: 700 };
+    const id = await connectSession('viewport', false, first);
+    expect(vi.mocked(tauri.connect).mock.calls[0][2]).toEqual(first);
+    await connectSession('viewport', false, { width: 1400, height: 800 });
+    expect(tauri.connect).toHaveBeenCalledTimes(1);
+    useSessionStore.getState().updateSession(id, { status: 'disconnected' });
+    const second = { width: 1600, height: 900 };
+    expect(await connectSession('viewport', true, second)).toBe(id);
+    expect(vi.mocked(tauri.connect).mock.calls[1][2]).toEqual(second);
+  });
   it('rejects binary without metadata, malformed metadata, and another session receipt', async () => {
     const id = await connectSession('ack');
     const listener = vi.fn();

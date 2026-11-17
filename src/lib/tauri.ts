@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { ViewportSize } from './viewport-size';
 import type { Channel } from '@tauri-apps/api/core';
 import type {
   CascadedIds,
@@ -87,8 +88,8 @@ export async function measureLatency(host: string, port: number): Promise<number
 
 // ── Session Management ──────────────────────────────────────────────
 
-export async function connect(connectionId: string, frameChannel: Channel<FrameMessage>): Promise<string> {
-  return await invoke<string>('connect', { connectionId, frameChannel });
+export async function connect(connectionId: string, frameChannel: Channel<FrameMessage>, initialSize?: ViewportSize): Promise<string> {
+  return await invoke<string>('connect', { connectionId, frameChannel, ...(initialSize ? { initialSize } : {}) });
 }
 
 export async function frameConsumed(sessionId: string, receipt: FrameReceipt, refresh = false): Promise<void> {

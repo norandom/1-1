@@ -6,6 +6,7 @@ import { compositeFrameRects, type CompositingSurface } from './canvas-composito
 import { parseFramePacket, toFrameBytes, type FrameMessage, type FrameDeliveryMessage } from './frame-protocol';
 import { normalizeSessionInfo } from './session-info';
 import * as tauri from './tauri';
+import type { ViewportSize } from './viewport-size';
 
 export type FrameListener = (frame: Uint8Array, consumed?: () => void) => void;
 interface SessionRuntime {
@@ -80,7 +81,7 @@ export function reportSessionFramePresented(sessionId: string) {
   if (runtime) runtime.frames++;
 }
 
-export function connectSession(connectionId: string, restart = false): Promise<string> {
+export function connectSession(connectionId: string, restart = false, initialSize?: ViewportSize): Promise<string> {
   const inflight = pending.get(connectionId);
   if (inflight) return inflight;
   const existing = [...useSessionStore.getState().sessions.values()]
@@ -90,12 +91,12 @@ export function connectSession(connectionId: string, restart = false): Promise<s
   if (existing && (!restart || ['connecting', 'connected', 'reconnecting'].includes(existing.status))) {
     return Promise.resolve(existing.id);
   }
-  const attempt = startSession(connectionId, existing).finally(() => pending.delete(connectionId));
+  const attempt = startSession(connectionId, existing, initialSize).finally(() => pending.delete(connectionId));
   pending.set(connectionId, attempt);
   return attempt;
 }
 
-async function startSession(connectionId: string, existing?: SessionInfo): Promise<string> {
+async function startSession(connectionId: string, existing?: SessionInfo, initialSize?: ViewportSize): Promise<string> {
   const old = existing ? runtimes.get(existing.id) : undefined;
   const listeners = old?.listeners ?? new Set<FrameListener>();
   if (old) dispose(old, false);
@@ -150,7 +151,7 @@ async function startSession(connectionId: string, existing?: SessionInfo): Promi
         console.error('Failed to consume session frame:', error);
       }
     });
-    id = await tauri.connect(connectionId, runtime.channel);
+    id = await tauri.connect(connectionId, runtime.channel, initialSize);
     if (runtime.disposed) {
       await tauri.disconnect(id);
       throw new Error('Session closed while connecting');

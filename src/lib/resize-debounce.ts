@@ -15,10 +15,11 @@ export function createTrailingResizeScheduler(
   emit: (width: number, height: number) => void,
   delayMs: number = RESIZE_DEBOUNCE_MS,
   enabled: () => boolean = () => true,
+  initialSize?: { width: number; height: number },
 ): ResizeScheduler {
   let timer: ReturnType<typeof setTimeout> | null = null;
 
-  return {
+  const scheduler: ResizeScheduler = {
     schedule(width: number, height: number) {
       if (timer !== null) {
         clearTimeout(timer);
@@ -37,4 +38,8 @@ export function createTrailingResizeScheduler(
       }
     },
   };
+  // Installation owns the initial request: a child ResizeObserver may already
+  // have reported and deduplicated this size before the parent's effect ran.
+  if (initialSize) scheduler.schedule(initialSize.width, initialSize.height);
+  return scheduler;
 }

@@ -62,13 +62,15 @@ export function DocumentTabs() {
   );
   const tabIds = useMemo(() => tabs.map((t) => t.tabId), [tabs]);
 
-  // No open sessions: no strip (the start view owns the panel, 11.5).
-  const hasTabs = tabs.length > 0;
+  // Reserve the final strip during the first connection's layout, before IPC
+  // measures its viewport. Dashboards without sessions still have no strip.
+  const pendingConnection = connections.find((c) => pathname === sessionRoute(c.id) && !sessions.has(c.id));
+  const hasTabs = tabs.length > 0 || !!pendingConnection;
 
   // The active tab is the session the route points at (11.2); tabs
   // stay open — just not active — over dashboards (11.6).
   const activeTabId = activeTabIdFromPath(pathname, tabIds);
-  const activeConnection = connections.find((c) => c.id === sessions.get(activeTabId ?? '')?.connectionId);
+  const activeConnection = connections.find((c) => c.id === sessions.get(activeTabId ?? '')?.connectionId) ?? pendingConnection;
   const focusedTabId =
     keyboardFocusTabId && tabIds.includes(keyboardFocusTabId) ? keyboardFocusTabId : null;
   const rovingTabId = focusedTabId ?? activeTabId ?? tabIds[0] ?? null;
@@ -208,6 +210,9 @@ export function DocumentTabs() {
           );
         })}
       </AnimatePresence>
+      {pendingConnection && !tabs.some((tab) => tab.connectionId === pendingConnection.id) && (
+        <span className="px-3 text-xs text-muted-foreground" role="status">Connecting to {pendingConnection.name}…</span>
+      )}
 
       {/* New tab button */}
       <Button

@@ -71,6 +71,24 @@ describe('createTrailingResizeScheduler (Req 3.3)', () => {
 
     expect(emit).not.toHaveBeenCalled();
   });
+
+  it('seeds a newly installed scheduler without relying on another observer notification', () => {
+    const emit = vi.fn();
+    let dynamic = true;
+    const first = createTrailingResizeScheduler(emit, 200, () => dynamic, { width: 1200, height: 800 });
+    // Fixed mode removes the old scheduler, including its seed request.
+    dynamic = false;
+    first.cancel();
+    vi.advanceTimersByTime(200);
+    expect(emit).not.toHaveBeenCalled();
+    dynamic = true;
+    const resumed = createTrailingResizeScheduler(emit, 200, () => dynamic, { width: 1600, height: 900 });
+    // The child observer already reported this same size before installation.
+    // It need not report again for fixed -> dynamic to take effect.
+    vi.advanceTimersByTime(200);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(1600, 900);
+    resumed.cancel();
+  });
 });
 
 it('does not send a queued resize after switching to fixed, and resumes with a fresh measured size', () => {
