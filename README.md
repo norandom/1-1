@@ -244,16 +244,13 @@ cargo tauri build
 
 ## Local Windows build storage
 
-Run the storage checkpoint from the repository before and after each Rust build/test batch:
+Storage reporting is optional. Run it when useful from the repository:
 
 ```powershell
 .\scripts\Invoke-BuildStorage.ps1
 ```
 
-It honors `CARGO_TARGET_DIR`, reports logical file sizes, and stops further batches above
-8 GiB of `rdp-client` artifacts or 80 GiB in the shared target (warning at 60 GiB).
-These are checkpoint limits, not filesystem quotas. Hard links and compression can
-make physical disk usage differ from the report.
+It honors `CARGO_TARGET_DIR` and reports logical file sizes. There are no build-blocking storage budgets or mandatory checkpoints. Clean up occasionally when needed; physical usage may differ from the report.
 
 When builds are idle, preview or perform package-only cleanup:
 

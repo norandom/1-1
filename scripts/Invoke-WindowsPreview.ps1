@@ -53,11 +53,6 @@ try {
     @{ build = @{ beforeBuildCommand = ''; frontendDist = $frontendDist } } |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $configPath
     if ($PrepareOnly) { return $configPath }
-    & (Join-Path $PSScriptRoot 'Invoke-BuildStorage.ps1') -Action Check
-    try {
-        & node node_modules/@tauri-apps/cli/tauri.js build --no-bundle --ci --config $configPath -- --locked
-        if ($LASTEXITCODE -ne 0) { throw 'Windows preview build failed.' }
-    } finally {
-        & (Join-Path $PSScriptRoot 'Invoke-BuildStorage.ps1') -Action Check
-    }
+    & node node_modules/@tauri-apps/cli/tauri.js build --no-bundle --ci --config $configPath -- --locked
+    if ($LASTEXITCODE -ne 0) { throw 'Windows preview build failed.' }
 } finally { Pop-Location }
