@@ -26,9 +26,10 @@ it('reclaims the row for valid pending and existing sessions but keeps normal ch
   expect(pending).toContain('fixed inset-x-0 bottom-0');
   expect(pending).toContain('aria-label="Show status bar"');
   expect(pending).toContain('data-local-input="true"');
-  // Visibility changes on hover/focus, not layout dimensions or positioning.
-  expect(pending).toContain('group-hover/status:visible');
-  expect(pending).toContain('group-focus-within/status:visible');
+  expect(pending).toContain('style="height:0"');
+  expect(pending).toContain('aria-keyshortcuts="Control+Alt+Shift+S"');
+  // Only the edge target is fixed; the row itself participates in layout.
+  expect(pending).not.toContain('absolute inset-x-0');
   useSessionStore.getInitialState().sessions = new Map([['session-id', { id: 'session-id', connectionId: 'opaque-id',
     connectionName: '', host: '', status: 'connected', fps: 0, latency: 0, bandwidth: 0, width: 940, height: 736,
     reconnectAttempts: 0, maxReconnectAttempts: 5 }]]);
@@ -40,4 +41,5 @@ it('reclaims the row for valid pending and existing sessions but keeps normal ch
   }
   useSettingsStore.getInitialState().settings = { ...defaultSettings, autoHideStatusBar: false };
   expect(render('/session/session-id')).toContain('data-status-bar-mode="visible"');
+  expect(render('/session/session-id')).toContain('style="height:28px"');
 });

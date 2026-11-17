@@ -11,6 +11,10 @@ export function isDisplayModeShortcut(e: Pick<KeyboardEvent, 'code' | 'ctrlKey' 
   return e.code === 'KeyP' && e.ctrlKey && e.altKey && e.shiftKey;
 }
 
+export function isStatusBarShortcut(e: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey'>): boolean {
+  return e.code === 'KeyS' && e.ctrlKey && e.altKey && e.shiftKey;
+}
+
 export function releaseForwardedKeys(keys: Set<string>, release: (code: string) => void): void {
   for (const code of keys) release(code);
   keys.clear();

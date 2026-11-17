@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildStatusBarText, sessionCountLabel } from '../status-bar';
+import { buildStatusBarText, sessionCountLabel, statusBarRevealReducer, statusBarRowHeight } from '../status-bar';
 import type { StatusBarSession } from '../status-bar';
 
 const session = (overrides: Partial<StatusBarSession>): StatusBarSession => ({
@@ -9,6 +9,20 @@ const session = (overrides: Partial<StatusBarSession>): StatusBarSession => ({
   height: 600,
   status: 'connected',
   ...overrides,
+});
+
+it('reserves one row while pointer or focus stays inside and only reclaims it after both leave', () => {
+  let state = { pointer: false, focus: false };
+  expect(statusBarRowHeight(true, state)).toBe(0);
+  state = statusBarRevealReducer(state, 'pointer-enter');
+  expect(statusBarRowHeight(true, state)).toBe(28);
+  expect(statusBarRevealReducer(state, 'pointer-enter')).toBe(state);
+  state = statusBarRevealReducer(state, 'focus-enter');
+  state = statusBarRevealReducer(state, 'pointer-leave');
+  expect(statusBarRowHeight(true, state)).toBe(28);
+  state = statusBarRevealReducer(state, 'focus-leave');
+  expect(statusBarRowHeight(true, state)).toBe(0);
+  expect(statusBarRowHeight(false, state)).toBe(28);
 });
 
 describe('buildStatusBarText', () => {

@@ -3,6 +3,17 @@ import type { ConnectionConfig, SessionInfo } from '../types';
 import { SESSION_STATUS_TEXT } from './ux-tree-states';
 import { isLiveSessionStatus, resolveSessionView, sessionRouteIdFromPath } from './session-route';
 
+
+export type StatusBarRevealState = { pointer: boolean; focus: boolean };
+export type StatusBarRevealEvent = 'pointer-enter' | 'pointer-leave' | 'focus-enter' | 'focus-leave';
+export function statusBarRevealReducer(state: StatusBarRevealState, event: StatusBarRevealEvent): StatusBarRevealState {
+  const next = event.startsWith('pointer') ? { ...state, pointer: event === 'pointer-enter' } : { ...state, focus: event === 'focus-enter' };
+  return next.pointer === state.pointer && next.focus === state.focus ? state : next;
+}
+export function statusBarRowHeight(autoHide: boolean, state: StatusBarRevealState): number {
+  return !autoHide || (state.pointer || state.focus) ? 28 : 0;
+}
+
 export function shouldAutoHideStatusBar(enabled: boolean, pathname: string, sessions: Iterable<SessionInfo>, connections: Pick<ConnectionConfig, 'id'>[]): boolean {
   if (!enabled) return false;
   const id = sessionRouteIdFromPath(pathname);

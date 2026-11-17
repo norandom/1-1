@@ -16,6 +16,41 @@ class Key extends Event {
 }
 afterEach(() => vi.unstubAllGlobals());
 
+it('leaves the status shortcut to the remote session when auto-hide has no reveal target', () => {
+  const target = new EventTarget();
+  const down = vi.fn();
+  const cleanup = subscribeCanvasKeyboard(target, null, down, vi.fn());
+  const chord = new Key('keydown', { code: 'KeyS', ctrlKey: true, altKey: true, shiftKey: true });
+  target.dispatchEvent(chord);
+  expect(down).toHaveBeenCalledExactlyOnceWith(chord);
+  vi.stubGlobal('KeyboardEvent', Key);
+  cleanup();
+});
+
+it.each(['CANVAS', 'BUTTON'])('reveals status bar by shortcut from %s without forwarding it or changing remote Tab', (tagName) => {
+  vi.stubGlobal('KeyboardEvent', Key);
+  const target = Object.assign(new EventTarget(), { tagName: 'CANVAS' });
+  const down = vi.fn();
+  const up = vi.fn();
+  const statusBar = Object.assign(new EventTarget(), { focus: vi.fn() });
+  const cleanup = subscribeCanvasKeyboard(target, null, down, up, statusBar);
+  for (const code of ['ControlLeft', 'AltLeft', 'ShiftLeft']) target.dispatchEvent(new Key('keydown', { code }));
+  target.tagName = tagName;
+  const shortcut = new Key('keydown', { code: 'KeyS', key: 'S', ctrlKey: true, altKey: true, shiftKey: true });
+  target.dispatchEvent(shortcut);
+  expect(shortcut.defaultPrevented).toBe(true);
+  expect(statusBar.focus).toHaveBeenCalledOnce();
+  expect(down).toHaveBeenCalledTimes(3);
+  expect(up.mock.calls.map(([event]) => event.code)).toEqual(['ControlLeft', 'AltLeft', 'ShiftLeft']);
+  target.dispatchEvent(new Key('keyup', { code: 'KeyS', ctrlKey: true, altKey: true, shiftKey: true }));
+  expect(up).toHaveBeenCalledTimes(3);
+  target.tagName = 'CANVAS';
+  const tab = new Key('keydown', { code: 'Tab', key: 'Tab' });
+  target.dispatchEvent(tab);
+  expect(down).toHaveBeenLastCalledWith(tab);
+  cleanup();
+});
+
 it.each([true, false])('focuses display size without toggling HUD regardless of listener order (%s)', (globalFirst) => {
   vi.stubGlobal('KeyboardEvent', Key);
   const target = new EventTarget();

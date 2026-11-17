@@ -1,4 +1,4 @@
-import { isDisplayModeShortcut, releaseForwardedKeys } from '../../lib/input-mapper';
+import { isDisplayModeShortcut, isStatusBarShortcut, releaseForwardedKeys } from '../../lib/input-mapper';
 
 
 export function subscribeSessionEscape(target: EventTarget, openDisconnect: () => void): () => void {
@@ -26,12 +26,19 @@ export function subscribeCanvasKeyboard(
   select: (EventTarget & { focus(): void }) | null,
   onKeyDown: (event: KeyboardEvent) => void,
   onKeyUp: (event: KeyboardEvent) => void,
+  statusBar: (EventTarget & { focus(): void }) | null = null,
 ): () => void {
   const forwardedKeys = new Set<string>();
   const releaseKeys = () => releaseForwardedKeys(forwardedKeys, (code) =>
     onKeyUp(new KeyboardEvent('keyup', { code })));
   const handleDown = (event: Event) => {
     const e = event as KeyboardEvent;
+    if (statusBar && isStatusBarShortcut(e)) {
+      e.preventDefault();
+      releaseKeys();
+      statusBar.focus();
+      return;
+    }
     if (isLocalInputTarget(e.target)) { releaseKeys(); return; }
     // Escape belongs to the session prompt or the currently open local menu.
     // Do not consume it here: the session listener must work in either order.
@@ -49,6 +56,7 @@ export function subscribeCanvasKeyboard(
 
   const handleUp = (event: Event) => {
     const e = event as KeyboardEvent;
+    if (statusBar && isStatusBarShortcut(e)) { e.preventDefault(); return; }
     if (isLocalInputTarget(e.target)) { releaseKeys(); return; }
     if (e.key === 'Escape') return;
     if (isDisplayModeShortcut(e)) return;

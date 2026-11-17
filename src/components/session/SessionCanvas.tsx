@@ -305,7 +305,7 @@ export function SessionCanvas({
   // Keyboard events — listen on window so keys work even if canvas loses focus
   useEffect(() => {
     if (inputBlocked) return;
-    return subscribeCanvasKeyboard(window, document.getElementById('session-options-trigger'), onKeyDown, onKeyUp);
+    return subscribeCanvasKeyboard(window, document.getElementById('session-options-trigger'), onKeyDown, onKeyUp, document.getElementById('status-bar-focus-target'));
   }, [onKeyDown, onKeyUp, status, inputBlocked]);
 
   const getMouseBounds = useCallback((): MouseSurfaceBounds | null => {

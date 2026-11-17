@@ -1,4 +1,5 @@
 import { Sun, Moon, MonitorCog } from 'lucide-react';
+import { useReducer } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -7,7 +8,7 @@ import { useTheme } from '../../hooks/useTheme';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
-import { buildStatusBarText, sessionCountLabel, statusBarIndicator, liveSessionCount, shouldAutoHideStatusBar } from '../../lib/status-bar';
+import { buildStatusBarText, sessionCountLabel, statusBarIndicator, liveSessionCount, shouldAutoHideStatusBar, statusBarRevealReducer, statusBarRowHeight } from '../../lib/status-bar';
 
 export function StatusBar() {
   const sessions = useSessionStore((s) => s.sessions);
@@ -23,13 +24,19 @@ export function StatusBar() {
 
   const connection = connections.find((c) => c.id === activeSession?.connectionId);
   const statusText = buildStatusBarText(activeSession ?? null, connection);
-  const hidden = shouldAutoHideStatusBar(autoHide, pathname, sessions.values(), connections);
+  const autoHideInSession = shouldAutoHideStatusBar(autoHide, pathname, sessions.values(), connections);
+  const [reveal, dispatchReveal] = useReducer(statusBarRevealReducer, { pointer: false, focus: false });
+  const rowHeight = statusBarRowHeight(autoHideInSession, reveal);
 
   return (
-    <div data-local-input data-status-bar-mode={hidden ? 'auto-hide' : 'visible'} className={hidden ? 'group/status fixed inset-x-0 bottom-0 z-40 h-1' : 'shrink-0'}>
-      {hidden && <button type="button" aria-label="Show status bar" className="absolute inset-0 w-full opacity-0 focus-visible:z-10 focus-visible:opacity-100 focus-visible:bg-primary focus-visible:outline-none" />}
+    <div id={autoHideInSession ? 'status-bar-focus-target' : undefined} role="region" aria-label="Connection status bar" aria-keyshortcuts={autoHideInSession ? 'Control+Alt+Shift+S' : undefined} tabIndex={autoHideInSession ? -1 : undefined}
+      data-local-input data-status-bar-mode={autoHideInSession ? 'auto-hide' : 'visible'} className="shrink-0 focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-[-2px]" style={{ height: rowHeight }}
+      onPointerEnter={() => dispatchReveal('pointer-enter')} onPointerLeave={() => dispatchReveal('pointer-leave')}
+      onFocusCapture={() => dispatchReveal('focus-enter')}
+      onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) dispatchReveal('focus-leave'); }}>
+      {autoHideInSession && <button type="button" aria-label="Show status bar" title="Show status bar (Ctrl+Alt+Shift+S)" className="fixed inset-x-0 bottom-0 z-40 h-1 w-full opacity-0 focus-visible:opacity-100 focus-visible:bg-primary focus-visible:outline-none" />}
     <div
-      className={`flex items-center justify-between gap-2 px-3 border-t border-[var(--color-border)] bg-[var(--color-surface-1)] text-[10px] select-none ${hidden ? 'invisible absolute inset-x-0 bottom-0 pointer-events-none group-hover/status:visible group-hover/status:pointer-events-auto group-focus-within/status:visible group-focus-within/status:pointer-events-auto' : ''}`}
+      className={`${rowHeight ? 'flex' : 'hidden'} items-center justify-between gap-2 px-3 border-t border-[var(--color-border)] bg-[var(--color-surface-1)] text-[10px] select-none`}
       style={{ height: 28 }}
     >
       {/* Left: connection status */}
