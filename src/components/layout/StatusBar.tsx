@@ -1,5 +1,5 @@
 import { Sun, Moon, MonitorCog } from 'lucide-react';
-import { useReducer } from 'react';
+import { useEffect, useMemo, useReducer } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -8,7 +8,7 @@ import { useTheme } from '../../hooks/useTheme';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
-import { buildStatusBarText, sessionCountLabel, statusBarIndicator, liveSessionCount, shouldAutoHideStatusBar, statusBarRevealReducer, statusBarRowHeight } from '../../lib/status-bar';
+import { buildStatusBarText, createStatusBarHoverReveal, sessionCountLabel, statusBarIndicator, liveSessionCount, shouldAutoHideStatusBar, statusBarRevealReducer, statusBarRowHeight } from '../../lib/status-bar';
 
 export function StatusBar() {
   const sessions = useSessionStore((s) => s.sessions);
@@ -26,12 +26,16 @@ export function StatusBar() {
   const statusText = buildStatusBarText(activeSession ?? null, connection);
   const autoHideInSession = shouldAutoHideStatusBar(autoHide, pathname, sessions.values(), connections);
   const [reveal, dispatchReveal] = useReducer(statusBarRevealReducer, { pointer: false, focus: false });
+  const hover = useMemo(() => createStatusBarHoverReveal(dispatchReveal), [dispatchReveal]);
+  // A new route or visibility mode must not inherit a pending pointer reveal.
+  // leave() remains reusable after React StrictMode's setup/cleanup rehearsal.
+  useEffect(() => () => hover.leave(), [hover, autoHideInSession, pathname]);
   const rowHeight = statusBarRowHeight(autoHideInSession, reveal);
 
   return (
     <div id={autoHideInSession ? 'status-bar-focus-target' : undefined} role="region" aria-label="Connection status bar" aria-keyshortcuts={autoHideInSession ? 'Control+Alt+Shift+S' : undefined} tabIndex={autoHideInSession ? -1 : undefined}
       data-local-input data-status-bar-mode={autoHideInSession ? 'auto-hide' : 'visible'} className="shrink-0 focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-[-2px]" style={{ height: rowHeight }}
-      onPointerEnter={() => dispatchReveal('pointer-enter')} onPointerLeave={() => dispatchReveal('pointer-leave')}
+      onPointerEnter={() => { if (autoHideInSession) hover.enter(reveal.focus); }} onPointerLeave={() => hover.leave()}
       onFocusCapture={() => dispatchReveal('focus-enter')}
       onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) dispatchReveal('focus-leave'); }}>
       {autoHideInSession && <button type="button" aria-label="Show status bar" title="Show status bar (Ctrl+Alt+Shift+S)" className="fixed inset-x-0 bottom-0 z-40 h-1 w-full opacity-0 focus-visible:opacity-100 focus-visible:bg-primary focus-visible:outline-none" />}

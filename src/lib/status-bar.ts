@@ -6,6 +6,33 @@ import { isLiveSessionStatus, resolveSessionView, sessionRouteIdFromPath } from 
 
 export type StatusBarRevealState = { pointer: boolean; focus: boolean };
 export type StatusBarRevealEvent = 'pointer-enter' | 'pointer-leave' | 'focus-enter' | 'focus-leave';
+/** Pointer dwell only: focus/keyboard reveal is handled immediately by the row. */
+export function createStatusBarHoverReveal(dispatch: (event: StatusBarRevealEvent) => void) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let revealed = false;
+  const cancel = () => {
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  const reveal = () => {
+    cancel();
+    revealed = true;
+    dispatch('pointer-enter');
+  };
+  return {
+    enter(alreadyFocused = false) {
+      if (revealed) return;
+      if (alreadyFocused) reveal();
+      else if (timer === undefined) timer = setTimeout(reveal, 1000);
+    },
+    leave() {
+      cancel();
+      revealed = false;
+      dispatch('pointer-leave');
+    },
+  };
+}
+
 export function statusBarRevealReducer(state: StatusBarRevealState, event: StatusBarRevealEvent): StatusBarRevealState {
   const next = event.startsWith('pointer') ? { ...state, pointer: event === 'pointer-enter' } : { ...state, focus: event === 'focus-enter' };
   return next.pointer === state.pointer && next.focus === state.focus ? state : next;

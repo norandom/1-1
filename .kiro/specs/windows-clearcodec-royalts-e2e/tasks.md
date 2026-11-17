@@ -1,9 +1,7 @@
 # Implementation Plan - bounded effort and crate reuse
 
 This is the approved implementation plan; phase approvals are recorded in spec.json.
-The original plan has 49 of 61 subtasks completed. Three explicit harness
-prerequisites and four user-requested professional-control tasks were added during
-integration. The four professional-control tasks are complete at the implementation boundary; harness additions and real-server acceptance remain open.
+The original plan has 49 of 61 subtasks completed. Additional harness prerequisites and user-requested professional controls were added during integration. Their individual states are recorded below; original release acceptance remains open.
 Current product name is 1-1, pronounced zero. The latest delivery focus is the
 per-host profile, compact session menu and viewport-sized initial connection.
 
@@ -302,7 +300,7 @@ User-directed priority: finish the professional controls below before resuming t
 
 - [x] 11.0g Add a persisted status-bar auto-hide setting and readable host labels. Reclaim session height when hidden; reserve layout space on reveal and resize dynamic sessions through the existing debounce to prevent overlap. Preserve fixed resolution and stable bottom-edge/keyboard access, and retain normal status display outside sessions. Verify legacy/default/false settings persistence and all lifecycle labels without internal IDs. _Boundary: Application settings and status bar. Requirements: 14.11,14.12._
 - [x] 11.0h Add supported per-host colour-depth and bulk-compression controls, with accurate scope/reconnect help, persistence/import and connector mapping. _Boundary: Host profile, connection form/session menu, connector configuration and relevant tests. Requirements: 14.13,14.14. User-directed amendment approved 2026-11-17._
-- [ ] 11.0i Delay auto-hidden status-bar pointer reveal by one second; keep keyboard reveal immediate and cancel pending timers safely. _Boundary: Status bar and focused tests. Requirements: 14.15. User request 2026-11-17._
+- [x] 11.0i Delay auto-hidden status-bar pointer reveal by one second; keep keyboard reveal immediate and cancel pending timers safely. _Boundary: Status bar and focused tests. Requirements: 14.15. User request 2026-11-17._
 - [ ] 11.0j Add reliable clipboard direction controls, active-session isolation, operational status and status-bar Resync clipboard using existing text support; handle reconnect/failures truthfully and preserve remote-input boundaries. _Boundary: Clipboard backend/session commands, shared host settings, frontend clipboard controller and status bar. Requirements: 14.16,14.17,14.19. User-approved direction 2026-11-17._
 - [ ] 11.0k Add bounded bidirectional image/screenshot clipboard transfer using supported formats and local clipboard facilities; verify repeated transfers and failure recovery. _Boundary: Clipboard conversion/backend, typed IPC and frontend/native clipboard integration. Depends: 11.0j. Requirements: 14.18,14.19. User-approved direction 2026-11-17._
 
@@ -434,3 +432,5 @@ Release-harness prerequisites (remaining):
 
 
 - 2026-11-17: 11.0h independently APPROVED; 15/16/24/32-bit bitmap requests and off/MPPC8K/64K/RDP6/RDP6.1 bulk compression persist per host, apply on reconnect, import and preserve independent presets. Independent536 frontend/310Rust4skip/docs0, actual app TypeScript/ESLint/Vite pass; implementer328 feature-tier4skip/fmt/clippy pass with two existing warnings. Native negotiation/performance not claimed. Use tsc -p tsconfig.app.json --noEmit (root references-only tsc is insufficient).
+
+- 2026-11-17: 11.0i independently APPROVED: continuous1000ms pointer dwell, immediate focus, cancel on leave/route/mode/unmount. Independent539frontend/actualappTS/ESLint pass; Vite pass. Normal-flow sizing retained; native timing/resize acceptance pending.

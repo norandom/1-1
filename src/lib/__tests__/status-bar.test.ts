@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { buildStatusBarText, sessionCountLabel, statusBarRevealReducer, statusBarRowHeight } from '../status-bar';
+import { buildStatusBarText, createStatusBarHoverReveal, sessionCountLabel, statusBarRevealReducer, statusBarRowHeight } from '../status-bar';
 import type { StatusBarSession } from '../status-bar';
 
 const session = (overrides: Partial<StatusBarSession>): StatusBarSession => ({
@@ -9,6 +9,55 @@ const session = (overrides: Partial<StatusBarSession>): StatusBarSession => ({
   height: 600,
   status: 'connected',
   ...overrides,
+});
+
+afterEach(() => vi.useRealTimers());
+
+it('requires one second of continuous pointer dwell without restarting for duplicate enters', () => {
+  vi.useFakeTimers();
+  const dispatch = vi.fn();
+  const hover = createStatusBarHoverReveal(dispatch);
+  hover.enter();
+  vi.advanceTimersByTime(999);
+  expect(dispatch).not.toHaveBeenCalled();
+  hover.enter();
+  vi.advanceTimersByTime(1);
+  expect(dispatch).toHaveBeenCalledExactlyOnceWith('pointer-enter');
+  hover.leave();
+  expect(dispatch).toHaveBeenLastCalledWith('pointer-leave');
+});
+
+it('cancels pending reveal on leave or lifecycle cleanup and requires a fresh dwell', () => {
+  vi.useFakeTimers();
+  const dispatch = vi.fn();
+  const hover = createStatusBarHoverReveal(dispatch);
+  hover.enter();
+  vi.advanceTimersByTime(600);
+  hover.leave(); // Also the component cleanup on route/mode change and unmount.
+  dispatch.mockClear();
+  vi.advanceTimersByTime(1000);
+  expect(dispatch).not.toHaveBeenCalled();
+  hover.enter();
+  vi.advanceTimersByTime(999);
+  expect(dispatch).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(1);
+  expect(dispatch).toHaveBeenCalledExactlyOnceWith('pointer-enter');
+});
+
+it('keeps keyboard reveal immediate and preserves pointer ownership of an already focused bar', () => {
+  vi.useFakeTimers();
+  let state = { pointer: false, focus: false };
+  const hover = createStatusBarHoverReveal((event) => { state = statusBarRevealReducer(state, event); });
+  hover.enter();
+  state = statusBarRevealReducer(state, 'focus-enter');
+  expect(statusBarRowHeight(true, state)).toBe(28);
+  hover.enter(true);
+  state = statusBarRevealReducer(state, 'focus-leave');
+  expect(statusBarRowHeight(true, state)).toBe(28);
+  hover.leave();
+  expect(statusBarRowHeight(true, state)).toBe(0);
+  vi.advanceTimersByTime(1000);
+  expect(statusBarRowHeight(true, state)).toBe(0);
 });
 
 it('reserves one row while pointer or focus stays inside and only reclaims it after both leave', () => {
