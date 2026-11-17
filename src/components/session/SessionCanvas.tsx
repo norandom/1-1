@@ -1,16 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Loader2, WifiOff } from 'lucide-react';
 
 import { parseFramePacket } from '../../lib/frame-protocol';
+import { isDisplayModeShortcut, releaseForwardedKeys } from '../../lib/input-mapper';
 import type { FrameListener } from '../../lib/session-runtime';
 import {
   compositeFrameRects,
-  fitSurfaceToContainer,
+  layoutSurface,
+  type DisplayMode,
   unionDirtyRect,
   type DirtyRect,
 } from '../../lib/canvas-compositor';
 import type { SessionStatus } from '../../types';
+import { subscribeCanvasWheel } from './canvas-wheel';
 
 interface MouseSurfaceBounds {
   rect: DOMRect;
@@ -65,11 +68,16 @@ export function SessionCanvas({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const displayModeSelectRef = useRef<HTMLSelectElement>(null);
   const surfaceRef = useRef<SurfaceBuffer | null>(null);
   const renderScheduledRef = useRef(false);
   const pendingConsumptionRef = useRef<(() => void) | undefined>(undefined);
   const animationFrameRef = useRef<number | null>(null);
+  const [displayMode, setDisplayMode] = useState<DisplayMode>('fit');
+  const displayModeRef = useRef<DisplayMode>('fit');
   const [displaySize, setDisplaySize] = useState(() => ({
+    left: 0,
+    top: 0,
     width: surfaceWidth,
     height: surfaceHeight,
   }));
@@ -120,7 +128,7 @@ export function SessionCanvas({
     scheduleDrawRef.current();
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const draw = () => {
       if (renderScheduledRef.current) {
         return;
@@ -177,7 +185,7 @@ export function SessionCanvas({
     scheduleDrawRef.current = draw;
   }, [onFramePresented]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const surface = ensureSurface(surfaceWidth, surfaceHeight);
     surface.dirty = unionDirtyRect(surface.dirty, {
       x: 0,
@@ -186,22 +194,44 @@ export function SessionCanvas({
       height: surface.height,
     });
     scheduleDraw();
-  }, [ensureSurface, scheduleDraw, surfaceHeight, surfaceWidth]);
+  }, [ensureSurface, scheduleDraw, surfaceHeight, surfaceWidth, status]);
+
+  const updateLayout = useCallback(() => {
+    const container = containerRef.current;
+    const surface = surfaceRef.current;
+    if (!container || !surface) return;
+    const rect = container.getBoundingClientRect();
+    setDisplaySize(layoutSurface({
+      width: container.clientWidth, height: container.clientHeight,
+      left: rect.left, top: rect.top,
+      scrollLeft: container.scrollLeft, scrollTop: container.scrollTop,
+    }, surface.width, surface.height, displayModeRef.current, window.devicePixelRatio));
+  }, []);
+
+  useLayoutEffect(() => {
+    displayModeRef.current = displayMode;
+    if (containerRef.current) {
+      containerRef.current.scrollLeft = 0;
+      containerRef.current.scrollTop = 0;
+    }
+    updateLayout();
+  }, [displayMode, surfaceWidth, surfaceHeight, updateLayout, status]);
 
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) {
-      return;
-    }
-
-    const nextSize = fitSurfaceToContainer(
-      container.clientWidth,
-      container.clientHeight,
-      surfaceWidth,
-      surfaceHeight
-    );
-    setDisplaySize(nextSize);
-  }, [surfaceHeight, surfaceWidth]);
+    let query: MediaQueryList;
+    const changed = () => {
+      query?.removeEventListener('change', changed);
+      query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      query.addEventListener('change', changed);
+      updateLayout();
+    };
+    changed();
+    window.addEventListener('resize', changed);
+    return () => {
+      query.removeEventListener('change', changed);
+      window.removeEventListener('resize', changed);
+    };
+  }, [updateLayout]);
 
   useEffect(() => {
     const unsubscribe = subscribeToFrames((frame, consumed) => {
@@ -217,17 +247,7 @@ export function SessionCanvas({
       }
 
       const surface = ensureSurface(packet.surfaceWidth, packet.surfaceHeight);
-      const container = containerRef.current;
-      if (container) {
-        setDisplaySize(
-          fitSurfaceToContainer(
-            container.clientWidth,
-            container.clientHeight,
-            packet.surfaceWidth,
-            packet.surfaceHeight
-          )
-        );
-      }
+      updateLayout();
 
       compositeFrameRects(surface, packet.rects);
       pendingConsumptionRef.current = consumed;
@@ -243,30 +263,31 @@ export function SessionCanvas({
       renderScheduledRef.current = false;
       surfaceRef.current = null;
     };
-  }, [ensureSurface, onFramePresented, scheduleDraw, subscribeToFrames]);
+  }, [ensureSurface, onFramePresented, scheduleDraw, subscribeToFrames, updateLayout]);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        const currentSurface = surfaceRef.current;
-        setDisplaySize(
-          fitSurfaceToContainer(
-            width,
-            height,
-            currentSurface?.width ?? surfaceWidth,
-            currentSurface?.height ?? surfaceHeight
-          )
-        );
-        onResize?.(Math.round(width), Math.round(height));
+    let previousWidth = -1;
+    let previousHeight = -1;
+    const observer = new ResizeObserver(() => {
+      const container = containerRef.current;
+      if (!container) return;
+      updateLayout();
+      // Include local scrollbars so switching modes cannot resize the server
+      // and feed back into the remote surface dimensions.
+      const width = container.offsetWidth;
+      const height = container.offsetHeight;
+      if (width !== previousWidth || height !== previousHeight) {
+        previousWidth = width;
+        previousHeight = height;
+        onResize?.(width, height);
       }
     });
 
     observer.observe(containerRef.current);
     return () => observer.disconnect();
-  }, [onResize, surfaceHeight, surfaceWidth]);
+  }, [onResize, updateLayout, status]);
 
   // Auto-focus the canvas when it mounts (so keyboard works immediately)
   useEffect(() => {
@@ -274,33 +295,49 @@ export function SessionCanvas({
     if (canvas) {
       canvas.focus();
     }
-  }, []);
+  }, [status]);
 
   // Keyboard events — listen on window so keys work even if canvas loses focus
   useEffect(() => {
+    const forwardedKeys = new Set<string>();
+    const releaseKeys = () => releaseForwardedKeys(forwardedKeys, (code) =>
+      onKeyUp(new KeyboardEvent('keyup', { code })));
     const handleDown = (e: globalThis.KeyboardEvent) => {
+      if (isDisplayModeShortcut(e)) {
+        e.preventDefault();
+        releaseKeys();
+        displayModeSelectRef.current?.focus();
+        return;
+      }
       // Only capture when the session view is active (not typing in a dialog/input)
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       e.preventDefault();
+      forwardedKeys.add(e.code);
       onKeyDown(e);
     };
 
     const handleUp = (e: globalThis.KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
+      if (isDisplayModeShortcut(e)) return;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       e.preventDefault();
+      forwardedKeys.delete(e.code);
       onKeyUp(e);
     };
 
     window.addEventListener('keydown', handleDown);
     window.addEventListener('keyup', handleUp);
+    const select = displayModeSelectRef.current;
+    select?.addEventListener('focus', releaseKeys);
 
     return () => {
       window.removeEventListener('keydown', handleDown);
       window.removeEventListener('keyup', handleUp);
+      select?.removeEventListener('focus', releaseKeys);
+      releaseKeys();
     };
-  }, [onKeyDown, onKeyUp]);
+  }, [onKeyDown, onKeyUp, status]);
 
   const getMouseBounds = useCallback((): MouseSurfaceBounds | null => {
     const canvas = canvasRef.current;
@@ -347,16 +384,18 @@ export function SessionCanvas({
     [getMouseBounds, onMouseUp]
   );
 
-  const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
-      e.preventDefault();
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    // React wheel handlers are passive; use a native non-passive listener so
+    // forwarding a remote wheel cannot also pan the local native-pixel view.
+    return subscribeCanvasWheel(canvas, (event) => {
       const bounds = getMouseBounds();
       if (bounds) {
-        onWheel(e.nativeEvent, bounds);
+        onWheel(event, bounds);
       }
-    },
-    [getMouseBounds, onWheel]
-  );
+    });
+  }, [getMouseBounds, onWheel, status]);
 
   if (status === 'connecting') {
     return (
@@ -393,23 +432,45 @@ export function SessionCanvas({
   }
 
   return (
+    <div className="flex flex-col w-full h-full bg-black">
+      <label className="flex shrink-0 items-center justify-end gap-2 px-3 py-1 text-xs text-white bg-[var(--color-surface-1)]">
+        Display size
+        <select
+          ref={displayModeSelectRef}
+          aria-label="Display size"
+          aria-keyshortcuts="Control+Alt+Shift+P"
+          title="Display size (Ctrl+Alt+Shift+P)"
+          className="rounded bg-[var(--color-surface-2)] px-2 py-1 focus-visible:outline-2 focus-visible:outline-white"
+          value={displayMode}
+          onChange={(event) => setDisplayMode(event.target.value as DisplayMode)}
+          onKeyDown={(event) => event.stopPropagation()}
+          onKeyUp={(event) => event.stopPropagation()}
+        >
+          <option value="fit">Fit to window</option>
+          <option value="native">Native pixels (1:1)</option>
+        </select>
+      </label>
     <div
       ref={containerRef}
-      className="relative w-full h-full bg-black overflow-hidden"
+      className="relative flex-1 min-h-0 w-full"
+      style={{ overflow: displayMode === 'native' ? 'auto' : 'hidden' }}
+      onScroll={updateLayout}
       onContextMenu={(e) => e.preventDefault()}
     >
       <canvas
         ref={canvasRef}
         tabIndex={0}
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 cursor-default outline-none"
+        className="absolute cursor-default outline-none"
         style={{
+          left: displaySize.left,
+          top: displaySize.top,
+          imageRendering: displayMode === 'native' ? 'pixelated' : 'auto',
           width: `${displaySize.width}px`,
           height: `${displaySize.height}px`,
         }}
         onMouseMove={handleMouseMove}
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
-        onWheel={handleWheel}
       />
       {displayStalled && (
         <div role="alert" className="absolute top-3 left-3 right-3 flex items-center justify-between gap-3 rounded bg-amber-950 px-4 py-3 text-white">
@@ -442,6 +503,7 @@ export function SessionCanvas({
           </div>
         </motion.div>
       )}
+    </div>
     </div>
   );
 }

@@ -271,7 +271,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Boundary: Frame acknowledgement integration_
   - _Requirements: 9.8,4.1,4.3_
 
-- [ ] 10. Font smoothing and display fidelity
+- [x] 10. Font smoothing and display fidelity
 - [x] 10.1 Persist and import the smoothing preference
   - Reuse serde default and mirrored types, form and existing RDP parser; preserve explicit false and legacy default true.
   - Done: Import/save/reload/migration tests pass for missing/true/false preferences.
@@ -282,7 +282,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Both flag states verified; help explains policy override and next-connect application.
   - _Boundary: Font smoothing integration_
   - _Requirements: 14.2,14.4_
-- [ ] 10.3 Implement native-pixel and fit coordinates
+- [x] 10.3 Implement native-pixel and fit coordinates
   - Reuse SessionCanvas and input mapper; handle devicePixelRatio, viewport scrolling and DPI changes once.
   - Done: Text fixtures match decoded pixels in native mode; pointer/scroll mapping passes at four DPIs in both modes.
   - _Boundary: Display integration_
@@ -351,6 +351,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,7.3,8.1,8.2,8.3,8.4,8.5,8.6,12.1,12.6,12.8,12.9,13.1,13.2,13.3,13.4_
 
 ## Implementation Notes
+- 2026-11-17: 10.3 independently APPROVED after fixing passive wheel handling. Native dimensions use DPR once; fit preserves aspect ratio; shared canvas bounds account for scrolling. Persistent display control preserves remote Tab and releases forwarded keys before local focus. Non-passive wheel subscription cancels local scrolling and forwards once, with cleanup coverage. VERIFIED implementation: 463 frontend tests, lint/typecheck/build; group backend regression 307 test-support tests passed (four existing skips), native test binary built. Four-DPI full/dirty RGBA, input, and wheel lifecycle evidence: `D:/BuildArtifacts/drift-rdp/group10/pixel-*.log`. Native UI launch was rejected by automatic approval policy ("blocked by policy", no further reason); no app or Computer Use session started. Native UI smoke, actual canvas readback and physical/server text-quality acceptance remain pending in 11.x. Group 10 checkpoint: 49/61 original subtasks complete; no release GO.
 - 2026-11-17: 10.2 independently APPROVED. Connector sets/clears upstream ENABLE_FONT_SMOOTHING from saved preference; XOR test proves only that performance bit changes. Accessible form help describes next connection and server override. VERIFIED: 445 frontend/289 Rust tests (four existing skips), lint/typecheck/build/fmt/doctests and Clippy with two existing warnings. No ClearType/server-acceptance claim. Original RED transcript copied to `D:/BuildArtifacts/drift-rdp/group10/flags-red-transcript.txt`.
 - 2026-11-17: 10.1 independently APPROVED. Default-on serde/read models and form switch preserve explicit false through `.rdp` import, create/update, restart, v1 migration, v2 load and duplicate. VERIFIED: 445 frontend/288 default Rust tests (four existing skips), lint/typecheck/build/fmt/doctests; test-support Clippy passes with two existing warnings. Prior ConnectionForm tree-refresh fix is preserved in this commit. Protocol application/help remain 10.2; native integrated UI verification follows 10.3. Evidence: `D:/BuildArtifacts/drift-rdp/group10/preference-*.log`.
 - 2026-11-17: 9.5 independently APPROVED after reactivation remediation. One in-flight receipt plus accumulated damage; ordered same-channel metadata keeps binary bytes unchanged; active canvas acknowledges after painting, background runtime after compositing. Five-second stall/full-refresh recovery and smaller/same-size reactivation are covered by real actor pixel tests. VERIFIED: 443 frontend tests, 286 default Rust and 304 test-support Rust tests (four existing skips each), lint/typecheck/build/fmt/doctests, Clippy with two existing warnings. Final native test-support smoke verified dashboard return, two-session rendering and adjacent close; two explicit connects/two actors. Artifacts: `D:/BuildArtifacts/drift-rdp/task95`. Group 9 checkpoint; next 10.1. Native synthetic evidence is not real-server text-quality acceptance.

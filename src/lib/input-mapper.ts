@@ -6,6 +6,16 @@ export interface MouseSurfaceBounds {
   surfaceHeight: number;
 }
 
+/** Local display-control escape; ordinary Tab remains a remote key. */
+export function isDisplayModeShortcut(e: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey'>): boolean {
+  return e.code === 'KeyP' && e.ctrlKey && e.altKey && e.shiftKey;
+}
+
+export function releaseForwardedKeys(keys: Set<string>, release: (code: string) => void): void {
+  for (const code of keys) release(code);
+  keys.clear();
+}
+
 interface ScancodeMapping {
   scancode: number;
   extended?: boolean;

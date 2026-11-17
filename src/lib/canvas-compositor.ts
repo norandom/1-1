@@ -22,6 +22,33 @@ export interface CompositingSurface {
   dirty: DirtyRect | null;
 }
 
+export type DisplayMode = 'fit' | 'native';
+
+export function layoutSurface(
+  viewport: { width: number; height: number; left: number; top: number; scrollLeft: number; scrollTop: number },
+  surfaceWidth: number,
+  surfaceHeight: number,
+  mode: DisplayMode,
+  dpr: number,
+) {
+  const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  const native = mode === 'native';
+  const size = native
+    ? { width: surfaceWidth / ratio, height: surfaceHeight / ratio }
+    : fitSurfaceToContainer(viewport.width, viewport.height, surfaceWidth, surfaceHeight);
+  const centeredLeft = Math.max(0, (viewport.width - size.width) / 2);
+  const centeredTop = Math.max(0, (viewport.height - size.height) / 2);
+  // Snap the screen origin, including ancestor offsets and scrolling. Ceil
+  // keeps the leading pixel inside the scrollable content at its origin.
+  const align = (offset: number, origin: number, scroll: number) =>
+    Math.ceil((origin + offset - scroll) * ratio) / ratio - origin + scroll;
+  return {
+    ...size,
+    left: native ? align(centeredLeft, viewport.left, viewport.scrollLeft) : centeredLeft,
+    top: native ? align(centeredTop, viewport.top, viewport.scrollTop) : centeredTop,
+  };
+}
+
 export function fitSurfaceToContainer(
   containerWidth: number,
   containerHeight: number,
@@ -41,8 +68,8 @@ export function fitSurfaceToContainer(
   );
 
   return {
-    width: Math.max(1, Math.floor(surfaceWidth * scale)),
-    height: Math.max(1, Math.floor(surfaceHeight * scale)),
+    width: surfaceWidth * scale,
+    height: surfaceHeight * scale,
   };
 }
 

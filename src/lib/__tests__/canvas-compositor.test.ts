@@ -37,8 +37,8 @@ describe('fitSurfaceToContainer', () => {
     });
   });
 
-  it('floors fractional scales and never returns a zero dimension', () => {
-    expect(fitSurfaceToContainer(100, 100, 3, 2)).toEqual({ width: 100, height: 66 });
+  it('preserves aspect ratio at fractional scales', () => {
+    expect(fitSurfaceToContainer(100, 100, 3, 2)).toEqual({ width: 100, height: 200 / 3 });
     expect(fitSurfaceToContainer(1, 1, 1000, 1000)).toEqual({ width: 1, height: 1 });
   });
 
