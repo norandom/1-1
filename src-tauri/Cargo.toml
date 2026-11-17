@@ -1,6 +1,6 @@
 [package]
 name = "rdp-client"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 description = "1-1 is a remote desktop client for Windows, macOS, and Linux."
 authors = ["you"]
 license = "MIT"
@@ -32,6 +32,7 @@ serde = { version = "1", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.10.3", features = ["tray-icon"] }
 tauri-plugin-log = "2"
+tauri-plugin-updater = "=2.9.0"
 tauri-plugin-clipboard-manager = "=2.3.0"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
@@ -101,3 +102,4 @@ incremental = false
 [profile.test.package.rdp-client]
 debug = 0
 incremental = false
+

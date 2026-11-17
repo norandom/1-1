@@ -302,3 +302,16 @@ export async function clipboardLocalAcquire(sessionId: string, epoch: string): P
 export async function clipboardLocalRelease(lease: string): Promise<void> { return invoke('clipboard_local_release', { lease }); }
 export async function clipboardLocalRead(lease: string): Promise<import('../types').ClipboardPayload> { return invoke('clipboard_local_read', { lease }); }
 export async function clipboardLocalWrite(lease: string, payload: import('../types').ClipboardPayload): Promise<void> { return invoke('clipboard_local_write', { lease, payload }); }
+
+export interface UpdateInfo { version: string; notes: string | null }
+export interface UpdateCheck { currentVersion: string; update: UpdateInfo | null }
+export interface UpdateProgress { downloaded: number; total: number | null; phase: 'downloading' | 'installing' }
+export async function checkForUpdates(): Promise<UpdateCheck> {
+  return invoke<UpdateCheck>('check_for_updates');
+}
+export async function installUpdate(onProgress: (progress: UpdateProgress) => void): Promise<void> {
+  const { Channel: ProgressChannel } = await import('@tauri-apps/api/core');
+  const progress = new ProgressChannel<UpdateProgress>();
+  progress.onmessage = onProgress;
+  return invoke<void>('install_update', { progress });
+}

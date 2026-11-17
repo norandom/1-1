@@ -279,3 +279,22 @@ MIT
 <p align="center">
   <sub>Built with Rust, shipped with love.</sub>
 </p>
+
+## Preview installer and updates
+
+Build the per-user Windows NSIS installer with `./scripts/Invoke-WindowsPreview.ps1 -Installer`.
+Use `-Target aarch64-pc-windows-msvc` for Windows ARM64 after installing that Rust target and the ARM64 MSVC build tools.
+The helper keeps frontend assets under D:/BuildArtifacts and embeds them through a relative path.
+The updater checks the preview feed once per launch and from Settings. Installation is explicit and blocked while sessions are active; it never silently interrupts remote work.
+
+Release builds require TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD.
+Local builds can use the persistent private key and DPAPI-protected password under `%LOCALAPPDATA%/1-1/release-signing`.
+Back up the key securely; losing it breaks updates for installed clients. Never commit or publish it.
+GitHub Actions holds the same values as repository secrets. These update signatures are separate from Authenticode/macOS signing and do not guarantee download reputation.
+
+Version tags trigger `.github/workflows/preview-build.yml`: Windows x64/ARM64 NSIS, macOS Apple Silicon DMG/app archive, and Linux x64 AppImage through Dagger.
+Those jobs build artifacts; runtime validation currently covers Windows x64 only.
+Stage each successful signed installer, its `.sig` and generated `build-info.json` in a folder named `windows-x86_64`, `windows-aarch64`, `darwin-aarch64`, or `linux-x86_64`.
+Run `node scripts/update-manifest.mjs VERSION ASSET_DIRECTORY OUTPUT_JSON` to create the feed, checking version/target/filename/hash and listing only available signed platforms.
+Upload immutable installer assets to the matching version release first, then publish the verified manifest as `latest.json` on the `preview-channel` prerelease.
+Do not replace a published installer under an existing version. Check its uploaded digest before updating the feed.

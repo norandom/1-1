@@ -1,3 +1,4 @@
+import { useUpdateStore } from './stores/updateStore';
 import { useEffect, useState, useCallback } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { AnimatePresence } from 'framer-motion';
@@ -43,6 +44,8 @@ export default function App() {
   const addToast = useToastStore((s) => s.addToast);
   const [showNewConnection, setShowNewConnection] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+
+  useEffect(() => { void useUpdateStore.getState().check(true); }, []);
 
   // Initialize theme
   useTheme();

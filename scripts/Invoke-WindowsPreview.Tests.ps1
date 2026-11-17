@@ -13,6 +13,10 @@ if ([IO.Path]::IsPathRooted($config.build.frontendDist) -or $config.build.fronte
 $resolved = [IO.Path]::GetFullPath((Join-Path (Join-Path $repo 'src-tauri') $config.build.frontendDist))
 if ($resolved -ne (Join-Path $fixture 'frontend')) { throw 'Relative frontendDist resolves to the wrong directory.' }
 if ($config.build.beforeBuildCommand -ne '') { throw 'Preview must not invoke the default repository dist build.' }
+if ($config.bundle.createUpdaterArtifacts) { throw 'Portable preview must not require signing keys.' }
+$installerConfigPath = & (Join-Path $PSScriptRoot 'Invoke-WindowsPreview.ps1') -PrepareOnly -Installer -OutputDirectory $fixture
+$installerConfig = Get-Content -LiteralPath $installerConfigPath -Raw | ConvertFrom-Json
+if (-not $installerConfig.bundle.createUpdaterArtifacts) { throw 'Installer must generate signed updater artifacts.' }
 foreach ($bad in @('D:\', 'D:\BuildArtifacts', 'D:\BuildArtifacts\drift-rdp\releases', 'D:\BuildArtifacts\drift-rdp\releases\', 'C:\outside-preview', 'https://example.test/frontend', (Join-Path $fixture 'missing'))) {
     $rejected = $false
     try { & (Join-Path $PSScriptRoot 'Invoke-WindowsPreview.ps1') -PrepareOnly -OutputDirectory $bad | Out-Null }

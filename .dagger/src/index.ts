@@ -52,7 +52,7 @@
  * Windows/macOS build environments and their results never substitute for
  * native Windows or macOS validation.
  */
-import { dag, Container, Directory, File, object, func, ReturnType } from "@dagger.io/dagger"
+import { dag, Container, Directory, File, Secret, object, func, ReturnType } from "@dagger.io/dagger"
 import { pins, contract, cacheVolumeIds } from "./pins"
 
 /** In-container JUnit artifact paths (task 2.1 contract; also mirrored in
@@ -487,6 +487,18 @@ export class Drift {
   async linuxBuild(source: Directory): Promise<Directory> {
     const done = await this.linuxBundleBuildContainer(source)
     return done.directory("/test-results")
+  }
+
+  /** Sign the verified Linux AppImage for preview updates; no runtime test. */
+  @func()
+  async linuxPreview(source: Directory, signingKey: Secret, signingPassword: Secret): Promise<Directory> {
+    const done = await this.linuxBundleBuildContainer(source)
+    const signed = done
+      .withSecretVariable("TAURI_SIGNING_PRIVATE_KEY", signingKey)
+      .withSecretVariable("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", signingPassword)
+      .withExec(["sh", "-c", 'set -e; for asset in /test-results/bundle/appimage/*.AppImage; do node node_modules/@tauri-apps/cli/tauri.js signer sign "$asset"; test -s "$asset.sig"; node scripts/write-build-info.mjs x86_64-unknown-linux-gnu "$asset"; done'])
+    await signed.sync()
+    return signed.directory("/test-results/bundle/appimage")
   }
 
   /**

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "1-1",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "identifier": "com.drift.app",
   "build": {
     "frontendDist": "../dist",
@@ -45,7 +45,24 @@
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
       }
+    },
+    "createUpdaterArtifacts": false,
+    "useLocalToolsDir": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/norandom/1-1/releases/download/preview-channel/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      },
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4MEIzMjY3MzJBMDE1REUKUldUZUZhQXlaeklMR0U3dUNaWC9zSk81d1JjcTY1bjJFekxVNWVlNURUVC9IVXlQTmRKbU5OWGsK"
     }
   }
 }

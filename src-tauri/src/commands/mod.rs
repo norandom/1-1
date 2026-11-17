@@ -9,3 +9,4 @@ pub mod settings;
 /// in `test-support` builds; production builds never see this module.
 #[cfg(feature = "test-support")]
 pub mod test_support;
+pub mod updater;

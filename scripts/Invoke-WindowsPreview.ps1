@@ -3,7 +3,9 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = '',
-    [switch]$PrepareOnly
+    [switch]$PrepareOnly,
+    [switch]$Installer,
+    [ValidateSet('', 'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc')][string]$Target = ''
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
@@ -50,9 +52,40 @@ try {
     if ([IO.Path]::IsPathRooted($frontendDist) -or $frontendDist -match '^[a-zA-Z][a-zA-Z0-9+.-]*:') {
         throw 'Frontend distribution must be a relative directory, never a URL.'
     }
-    @{ build = @{ beforeBuildCommand = ''; frontendDist = $frontendDist } } |
+    $override = @{ build = @{ beforeBuildCommand = ''; frontendDist = $frontendDist }; bundle = @{ createUpdaterArtifacts = [bool]$Installer } }
+    $override |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $configPath
     if ($PrepareOnly) { return $configPath }
-    & node node_modules/@tauri-apps/cli/tauri.js build --no-bundle --ci --config $configPath -- --locked
-    if ($LASTEXITCODE -ne 0) { throw 'Windows preview build failed.' }
+    $oldKey = $env:TAURI_SIGNING_PRIVATE_KEY
+    $oldPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+    try {
+        if ($Installer -and -not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            $keyDir = Join-Path $env:LOCALAPPDATA '1-1/release-signing'
+            $env:TAURI_SIGNING_PRIVATE_KEY = Join-Path $keyDir 'updater.key'
+            if (-not (Test-Path -LiteralPath $env:TAURI_SIGNING_PRIVATE_KEY)) { throw 'Installer requires the persistent updater signing key or TAURI_SIGNING_PRIVATE_KEY.' }
+            $secure = (Get-Content -LiteralPath (Join-Path $keyDir 'password.dpapi') -Raw).Trim() | ConvertTo-SecureString
+            $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = [Net.NetworkCredential]::new('', $secure).Password
+        }
+        $buildArgs = @('build', '--ci', '--config', $configPath)
+        if ($Installer) { $buildArgs += @('--bundles', 'nsis') } else { $buildArgs += '--no-bundle' }
+        if ($Target) { $buildArgs += @('--target', $Target) }
+        & node node_modules/@tauri-apps/cli/tauri.js @buildArgs -- --locked
+        if ($LASTEXITCODE -ne 0) { throw 'Windows preview build failed.' }
+        if ($Installer) {
+            $actualTarget = $Target
+            if (-not $actualTarget) { $actualTarget = (& rustc -vV | Select-String '^host: ').ToString().Substring(6).Trim() }
+            $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $tauriDir 'target' }
+            if ($Target) { $targetDir = Join-Path $targetDir $Target }
+            $bundleDir = Join-Path $targetDir 'release/bundle/nsis'
+            $arch = if ($actualTarget -eq 'aarch64-pc-windows-msvc') { 'arm64' } else { 'x64' }
+            $signed = @(Get-ChildItem -LiteralPath $bundleDir -Filter "*_${version}_${arch}-setup.exe.sig")
+            if ($signed.Count -ne 1) { throw 'Expected exactly one signed installer for this version and architecture.' }
+            $installerPath = $signed[0].FullName.Substring(0, $signed[0].FullName.Length - 4)
+            & node scripts/write-build-info.mjs $actualTarget $installerPath
+            if ($LASTEXITCODE -ne 0) { throw 'Installer build metadata failed.' }
+        }
+    } finally {
+        $env:TAURI_SIGNING_PRIVATE_KEY = $oldKey
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $oldPassword
+    }
 } finally { Pop-Location }

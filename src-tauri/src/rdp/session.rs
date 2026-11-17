@@ -1943,6 +1943,21 @@ impl SessionManager {
         }
     }
 
+    /// Execute the final updater action under the same lock as session admission.
+    /// A terminal tab is safe only once its actor has actually stopped; Error
+    /// can otherwise be a transient publication before automatic reconnect.
+    pub async fn run_when_idle<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let state = self.state.lock().await;
+        if state.handles.values().any(|handle| {
+            !handle.task_handle.is_finished() || session_is_live(&handle.info_rx.borrow().status)
+        }) {
+            return Err("Disconnect active sessions before installing an update.".into());
+        }
+        action()
+    }
     /// Map entry count. Task 7.1 moved the session cap into the atomic
     /// admission path (`create_session_with_transport`), so this is
     /// introspection used by the lifecycle tests.
@@ -2014,14 +2029,18 @@ impl SessionManager {
             .find(|handle| handle.info_rx.borrow().connection_id == config.id)
             .map(|handle| {
                 let info = handle.info_rx.borrow();
-                (info.id.clone(), info.status.clone())
+                (
+                    info.id.clone(),
+                    info.status.clone(),
+                    handle.task_handle.is_finished(),
+                )
             });
 
         let session_id = match existing {
             // Req 11.8: a live connecting/connected/reconnecting session
             // already exists — return its identity instead of starting
             // another actor (the caller focuses its tab).
-            Some((id, status)) if session_is_live(&status) => {
+            Some((id, status, _)) if session_is_live(&status) => {
                 log::info!(
                     "Connection {} already has live session {}; reusing it",
                     config.id,
@@ -2031,7 +2050,12 @@ impl SessionManager {
             }
             // Req 11.9: a terminal (error/disconnected) entry keeps its
             // slot; restart in place with the same session/tab identity.
-            Some((id, status)) => {
+            Some((_id, _status, false)) => {
+                return Err(
+                    "Previous session actor is still stopping; retry connection shortly.".into(),
+                );
+            }
+            Some((id, status, true)) => {
                 log::info!(
                     "Connection {} has terminal session {:?}; restarting as session {}",
                     config.id,
@@ -2115,19 +2139,37 @@ impl SessionManager {
         Ok(session_id)
     }
 
-    /// Send a disconnect command and remove the session handle.
+    /// Keep the actor tracked until its bounded shutdown completes. The shared
+    /// admission lock prevents updater installation or replacement during teardown.
     pub async fn remove_session(&self, session_id: &str) -> Result<(), String> {
         let mut state = self.state.lock().await;
-        if let Some(handle) = state.handles.remove(session_id) {
-            // Send disconnect command (ignore error if actor already stopped)
-            let _ = handle.cmd_tx.send(SessionCommand::Disconnect).await;
-            log::info!("Session {} removed", session_id);
-            Ok(())
-        } else {
-            Err(format!("Session '{}' not found", session_id))
+        let handle = state
+            .handles
+            .get_mut(session_id)
+            .ok_or_else(|| format!("Session '{session_id}' not found"))?;
+        let deadline = tokio::time::Instant::now() + DELETION_STOP_TIMEOUT;
+        if tokio::time::timeout_at(deadline, handle.cmd_tx.send(SessionCommand::Disconnect))
+            .await
+            .is_err()
+        {
+            return Err(
+                "Session disconnect timed out; actor remains tracked. Retry shortly.".into(),
+            );
+        }
+        match tokio::time::timeout_at(deadline, &mut handle.task_handle).await {
+            Ok(joined) => {
+                if let Err(error) = joined {
+                    log::warn!("Session {session_id} actor ended with {error}");
+                }
+                state.handles.remove(session_id);
+                log::info!("Session {session_id} removed");
+                Ok(())
+            }
+            Err(_) => {
+                Err("Session shutdown timed out; actor remains tracked. Retry shortly.".into())
+            }
         }
     }
-
     /// Task 7.3 (Req 10.17, design "Destructive actions and identity"):
     /// begin a coordinated deletion for the given connections. Under the
     /// SAME lock as task 7.1 admission this:
@@ -2669,6 +2711,114 @@ mod tests {
         .await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_updater_install_gate_blocks_live_sessions_and_holds_admission_lock() {
+        let manager = Arc::new(SessionManager::new());
+        manager
+            .run_when_idle(|| {
+                assert!(
+                    manager.state.try_lock().is_err(),
+                    "admission lock must cover installation"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let session = create_scripted(&manager, "update-gate", false, FrameScript::Ok).await;
+        for status in [
+            SessionState::Connecting,
+            SessionState::Connected,
+            SessionState::Reconnecting,
+            SessionState::Disconnected,
+            SessionState::Error("terminal".into()),
+        ] {
+            let mut info = manager.get_session_info(&session.id).await.unwrap();
+            info.status = status;
+            let (_tx, rx) = watch::channel(info);
+            manager
+                .state
+                .lock()
+                .await
+                .handles
+                .get_mut(&session.id)
+                .unwrap()
+                .info_rx = rx;
+            let mut called = false;
+            let result = manager
+                .run_when_idle(|| {
+                    called = true;
+                    Ok(())
+                })
+                .await;
+            assert!(
+                result.is_err(),
+                "A terminal-looking watch status must not permit installation while the actor is still running"
+            );
+            assert!(!called);
+        }
+        // A retained terminal tab becomes safe only after the actual actor exits.
+        {
+            let mut state = manager.state.lock().await;
+            let handle = state.handles.get_mut(&session.id).unwrap();
+            handle.task_handle.abort();
+            let _ = (&mut handle.task_handle).await;
+            assert!(handle.task_handle.is_finished());
+        }
+        manager.run_when_idle(|| Ok(())).await.unwrap();
+        manager.state.lock().await.handles.remove(&session.id);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn test_updater_tracks_actor_until_bounded_disconnect_finishes() {
+        let manager = Arc::new(SessionManager::new());
+        let session = create_scripted(&manager, "update-stop", false, FrameScript::Ok).await;
+        {
+            let mut state = manager.state.lock().await;
+            let handle = state.handles.get_mut(&session.id).unwrap();
+            handle.task_handle.abort();
+            let _ = (&mut handle.task_handle).await;
+            // A stuck shutdown must remain accounted for even after its command receiver closes.
+            handle.task_handle = tokio::spawn(std::future::pending());
+        }
+        assert!(manager.remove_session(&session.id).await.is_err());
+        assert_eq!(manager.session_count().await, 1);
+        assert!(manager.run_when_idle(|| Ok(())).await.is_err());
+        // A terminal-looking actor may also not be detached by replacement admission.
+        {
+            let mut state = manager.state.lock().await;
+            let handle = state.handles.get_mut(&session.id).unwrap();
+            let mut info = handle.info_rx.borrow().clone();
+            info.status = SessionState::Error("reconnect transition".into());
+            let (_tx, rx) = watch::channel(info);
+            handle.info_rx = rx;
+        }
+        let (events, _) = RecordedEvents::new();
+        assert!(
+            manager
+                .create_session_with_transport(
+                    test_config("update-stop"),
+                    None,
+                    Channel::new(|_| Ok(())),
+                    SessionEventSink::recorded(events),
+                    false,
+                    None,
+                    scripted_connect(Arc::new(AtomicUsize::new(0))),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(manager.session_count().await, 1);
+        manager
+            .state
+            .lock()
+            .await
+            .handles
+            .get(&session.id)
+            .unwrap()
+            .task_handle
+            .abort();
+        manager.remove_session(&session.id).await.unwrap();
+        manager.run_when_idle(|| Ok(())).await.unwrap();
+    }
     // ── Task 7.1 (Req 2.2/11.4/11.8/11.9): idempotent connect admission ──
 
     /// Classification behind the admission decision: only

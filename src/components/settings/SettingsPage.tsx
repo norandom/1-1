@@ -1,3 +1,4 @@
+import { UpdateSettings } from './UpdateSettings';
 import { useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Sun, Moon, MonitorCog } from 'lucide-react';
@@ -46,6 +47,8 @@ export function SettingsPage() {
               Configure your preferences
             </p>
           </div>
+
+          <UpdateSettings />
 
           {/* General */}
           <Card>

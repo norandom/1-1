@@ -1,0 +1,100 @@
+name: Preview installers
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Version tag to build
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+          - os: windows-2025
+            target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: darwin-aarch64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '22.23.4'
+      - name: Toolchain and caches
+        run: |
+          if ($IsWindows) {
+            New-Item -ItemType Directory -Force D:/BuildArtifacts/1-1-preview | Out-Null
+            'CARGO_TARGET_DIR=D:/BuildArtifacts/1-1-preview/target' >> $env:GITHUB_ENV
+            'CARGO_HOME=D:/BuildArtifacts/1-1-preview/cargo' >> $env:GITHUB_ENV
+            'npm_config_cache=D:/BuildArtifacts/1-1-preview/npm' >> $env:GITHUB_ENV
+            $env:npm_config_cache = 'D:/BuildArtifacts/1-1-preview/npm'
+          }
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          rustup default 1.98.1
+          rustup target add ${{ matrix.target }}
+          npm ci
+      - name: Build signed updater installer (no runtime test)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if (!$env:TAURI_SIGNING_PRIVATE_KEY) { throw 'Updater signing secret is required' }
+          if ($IsWindows) {
+            ./scripts/Invoke-WindowsPreview.ps1 -Installer -Target '${{ matrix.target }}'
+            $bundle = Join-Path $env:CARGO_TARGET_DIR '${{ matrix.target }}/release/bundle/nsis'
+          } else {
+            '{"bundle":{"createUpdaterArtifacts":true}}' | Set-Content "$env:RUNNER_TEMP/preview-config.json"
+            node node_modules/@tauri-apps/cli/tauri.js build --target '${{ matrix.target }}' --bundles dmg,app --config "$env:RUNNER_TEMP/preview-config.json" -- --locked
+            if ($LASTEXITCODE -ne 0) { throw 'macOS build failed' }
+            $bundle = 'src-tauri/target/${{ matrix.target }}/release/bundle'
+          }
+          New-Item -ItemType Directory -Force preview-assets | Out-Null
+          Get-ChildItem $bundle -Recurse -File | Where-Object { $_.Name -match '\.(exe|sig|dmg|tar\.gz)$' } | Copy-Item -Destination preview-assets
+          if (!(Get-ChildItem preview-assets -Filter '*.sig')) { throw 'Updater signatures missing' }
+          $signature = @(Get-ChildItem preview-assets -Filter '*.sig')
+          if ($signature.Count -ne 1) { throw 'Expected exactly one updater signature' }
+          $installer = $signature[0].FullName.Substring(0, $signature[0].FullName.Length - 4)
+          node scripts/write-build-info.mjs '${{ matrix.target }}' $installer
+          if ($LASTEXITCODE -ne 0) { throw 'Build metadata failed' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ${{ matrix.platform }}
+          path: preview-assets/
+          if-no-files-found: error
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Linux x64 signed AppImage via Dagger (no runtime test)
+        uses: dagger/dagger-for-github@27b130bf0f79a7f6fbbbe0fbca6760dc9bb40a77
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          version: '0.21.11'
+          module: .dagger
+          call: linux-preview --source . --signing-key env:TAURI_SIGNING_PRIVATE_KEY --signing-password env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD export --path preview-assets
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: linux-x86_64
+          path: preview-assets/
+          if-no-files-found: error
+

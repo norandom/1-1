@@ -26,6 +26,8 @@ pub fn run() {
         .expect("Failed to install rustls crypto provider");
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(commands::updater::UpdateState::default())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(commands::native_clipboard::NativeClipboardState::default())
         .plugin(
@@ -210,6 +212,8 @@ pub fn run() {
             commands::session::resize_session,
             commands::session::get_frame,
             commands::session::cancel_reconnect,
+            commands::updater::check_for_updates,
+            commands::updater::install_update,
             // Settings commands
             commands::settings::get_settings,
             commands::settings::update_settings,
