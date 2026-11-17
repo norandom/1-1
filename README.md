@@ -288,7 +288,7 @@ The helper keeps frontend assets under D:/BuildArtifacts and embeds them through
 The updater checks the preview feed once per launch and from Settings. Installation is explicit and blocked while sessions are active; it never silently interrupts remote work.
 
 Release builds require TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD.
-Local builds can use the persistent private key and DPAPI-protected password under `%LOCALAPPDATA%/1-1/release-signing`.
+Local builds can use the persistent private key and DPAPI-protected password under `%LOCALAPPDATA%/1-1-release-signing`.
 Back up the key securely; losing it breaks updates for installed clients. Never commit or publish it.
 GitHub Actions holds the same values as repository secrets. These update signatures are separate from Authenticode/macOS signing and do not guarantee download reputation.
 

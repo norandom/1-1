@@ -60,7 +60,7 @@ try {
     $oldPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
     try {
         if ($Installer -and -not $env:TAURI_SIGNING_PRIVATE_KEY) {
-            $keyDir = Join-Path $env:LOCALAPPDATA '1-1/release-signing'
+            $keyDir = Join-Path $env:LOCALAPPDATA '1-1-release-signing'
             $env:TAURI_SIGNING_PRIVATE_KEY = Join-Path $keyDir 'updater.key'
             if (-not (Test-Path -LiteralPath $env:TAURI_SIGNING_PRIVATE_KEY)) { throw 'Installer requires the persistent updater signing key or TAURI_SIGNING_PRIVATE_KEY.' }
             $secure = (Get-Content -LiteralPath (Join-Path $keyDir 'password.dpapi') -Raw).Trim() | ConvertTo-SecureString

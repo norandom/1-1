@@ -1,3 +1,4 @@
+import { version } from '../../../package.json';
 import { UpdateSettings } from './UpdateSettings';
 import { useEffect } from 'react';
 import { motion } from 'framer-motion';
@@ -306,7 +307,7 @@ export function SettingsPage() {
                     1-1
                   </h4>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Pronounced “zero” · Version 0.1.0
+                    Pronounced “zero” · Version {version}
                   </p>
                   <p className="text-xs text-muted-foreground mt-2 leading-relaxed">
                     1-1 is a remote desktop client for Windows, macOS, and Linux.
