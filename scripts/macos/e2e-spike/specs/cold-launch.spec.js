@@ -11,7 +11,7 @@ import process from 'node:process'
 
 const evidenceDir = process.env.DRIFT_EVIDENCE_DIR
 
-describe('built Drift app — macOS cold launch via the Tauri-service embedded driver', () => {
+describe('built 1-1 app — macOS cold launch via the Tauri-service embedded driver', () => {
   it('the embedded driver connects and exposes the app window', async () => {
     const handles = await browser.getWindowHandles()
     assert.ok(
@@ -19,7 +19,7 @@ describe('built Drift app — macOS cold launch via the Tauri-service embedded d
       `expected at least one window handle, got ${handles.length}`,
     )
     const title = await browser.getTitle()
-    assert.equal(title, 'Drift', `document title was ${JSON.stringify(title)}`)
+    assert.equal(title, '1-1', `document title was ${JSON.stringify(title)}`)
   })
 
   it('reaches first usable state (rendered UI under #root)', async () => {

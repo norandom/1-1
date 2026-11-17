@@ -18,7 +18,7 @@ export function Titlebar() {
     >
       {/* Left: Traffic light space (macOS native) + Logo */}
       <div className="flex items-center gap-2.5 no-drag" style={{ paddingLeft: isMac ? 78 : 16 }}>
-        {/* Drift logo */}
+        {/* 1-1 logo */}
         <svg width="20" height="20" viewBox="0 0 32 32" fill="none">
           <rect width="32" height="32" rx="8" fill="url(#drift-tb)" />
           <path d="M9 16C9 12.134 12.134 9 16 9C19.866 9 23 12.134 23 16" stroke="white" strokeWidth="2" strokeLinecap="round" opacity="0.4" />
@@ -35,7 +35,7 @@ export function Titlebar() {
           </defs>
         </svg>
         <span className="text-sm font-bold tracking-tight text-[var(--color-text-primary)]">
-          Drift
+          1-1
         </span>
       </div>
 
@@ -68,3 +68,4 @@ export function Titlebar() {
     </div>
   );
 }
+

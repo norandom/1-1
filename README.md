@@ -2,10 +2,12 @@
   <img src="src-tauri/icons/128x128@2x.png" width="80" />
 </p>
 
-<h1 align="center">Drift</h1>
+<h1 align="center">1-1</h1>
 
 <p align="center">
-  <strong>A fast, beautiful remote desktop client for macOS & Linux.</strong>
+  <strong>1-1 is a remote desktop client for Windows, macOS, and Linux.</strong>
+  <br />
+  Pronounced “zero.”
   <br />
   Built with Rust, Tauri, React, and IronRDP.
 </p>
@@ -21,14 +23,14 @@
 <br />
 
 <p align="center">
-  <img src=".github/assets/drift-session.png" width="800" alt="Drift — connected to a Windows machine" />
+  <img src=".github/assets/drift-session.png" width="800" alt="1-1 — connected to a Windows machine" />
 </p>
 
 <br />
 
-## Why Drift?
+## About 1-1
 
-Most RDP clients on macOS are either slow, ugly, or abandoned. Drift is none of those.
+Connect to remote desktops, manage saved hosts, and work with several sessions in one window.
 
 - **Native performance** &mdash; GPU-rendered frames via wgpu (Metal/Vulkan). No Electron, no browser overhead.
 - **Real RDP protocol** &mdash; Full IronRDP implementation with TLS + CredSSP/NLA authentication.
@@ -81,7 +83,7 @@ Most RDP clients on macOS are either slow, ugly, or abandoned. Drift is none of 
 # Or build from source (see below)
 ```
 
-> **Note:** Drift is in active development. Pre-built binaries will be available once v0.2.0 ships.
+> **Note:** 1-1 is in active development. Pre-built binaries will be available once v0.2.0 ships.
 
 ## Building from Source
 
@@ -114,7 +116,7 @@ cargo tauri build      # Production binary
 ## Architecture
 
 ```
-                    Drift Architecture
+                    1-1 Architecture
     ================================================
 
     ┌─────────── Tauri Window ───────────────────┐

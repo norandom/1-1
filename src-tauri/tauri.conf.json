@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Drift",
+  "productName": "1-1",
   "version": "0.1.0",
   "identifier": "com.drift.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Drift",
+        "title": "1-1",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -40,8 +40,8 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "shortDescription": "Beautiful Remote Desktop Client",
-    "longDescription": "Drift — A stunning, high-performance remote desktop client for Mac & Linux.",
+    "shortDescription": "Remote desktop client",
+    "longDescription": "1-1 is a remote desktop client for Windows, macOS, and Linux.",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

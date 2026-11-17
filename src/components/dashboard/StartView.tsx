@@ -27,7 +27,7 @@ export function StartView() {
   return (
     <div className="flex h-full flex-col items-center justify-center px-6">
       <div className="w-full max-w-xl text-center">
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">Drift</h1>
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">1-1</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Connect to a machine to start a session
         </p>

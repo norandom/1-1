@@ -115,7 +115,7 @@ export function Sidebar() {
         </div>
         {!collapsed && (
           <span className="text-[15px] font-bold text-[var(--color-text-primary)] whitespace-nowrap overflow-hidden tracking-tight">
-            Drift
+            1-1
           </span>
         )}
       </div>

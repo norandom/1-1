@@ -289,14 +289,13 @@ export function SettingsPage() {
                 </div>
                 <div>
                   <h4 className="text-sm font-bold text-foreground">
-                    Drift
+                    1-1
                   </h4>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Version 0.1.0
+                    Pronounced “zero” · Version 0.1.0
                   </p>
                   <p className="text-xs text-muted-foreground mt-2 leading-relaxed">
-                    A beautiful, high-performance remote desktop client.
-                    Built with Tauri, React, and IronRDP.
+                    1-1 is a remote desktop client for Windows, macOS, and Linux.
                   </p>
                 </div>
               </div>
