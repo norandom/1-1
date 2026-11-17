@@ -217,9 +217,14 @@ export function ConnectionForm({ connection, onClose }: Props) {
             <Input id="tags" value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} placeholder="production, web-server" />
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <Label htmlFor="font-smoothing">Font smoothing</Label>
-            <Switch id="font-smoothing" checked={fontSmoothing} onCheckedChange={setFontSmoothing} />
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="font-smoothing">Font smoothing</Label>
+              <Switch id="font-smoothing" aria-describedby="font-smoothing-help" checked={fontSmoothing} onCheckedChange={setFontSmoothing} />
+            </div>
+            <p id="font-smoothing-help" className="text-xs text-muted-foreground">
+              Requests smoother remote text on your next connection. Server policy can override this preference.
+            </p>
           </div>
 
           {/* Resolution */}

@@ -123,11 +123,17 @@ pub(crate) fn build_connector_config(
         Some(config.domain.clone())
     };
 
-    let performance_flags = PerformanceFlags::DISABLE_WALLPAPER
+    let mut performance_flags = PerformanceFlags::DISABLE_WALLPAPER
         | PerformanceFlags::DISABLE_FULLWINDOWDRAG
         | PerformanceFlags::DISABLE_MENUANIMATIONS
         | PerformanceFlags::DISABLE_THEMING
         | PerformanceFlags::DISABLE_CURSOR_SHADOW;
+    // A client request for the next connection, independent of codec support.
+    // Server policy can override this; it is not evidence of ClearType acceptance.
+    performance_flags.set(
+        PerformanceFlags::ENABLE_FONT_SMOOTHING,
+        config.font_smoothing,
+    );
 
     // connector 0.12's Config has no `Default` — all fields are pub and the
     // literal is constructed explicitly (task 4.1 probe C8a shape). Values for
@@ -647,6 +653,57 @@ mod tests {
             connector.platform, expected,
             "connector must advertise the build OS as its platform capability (Req 8.3)"
         );
+    }
+
+    #[test]
+    fn connector_config_requests_saved_font_smoothing_only() {
+        use ironrdp_pdu::rdp::client_info::PerformanceFlags;
+
+        // Build from a persisted preference, through the real outgoing-config path.
+        let mut saved = serde_json::json!({
+            "id": "smoothing", "name": "Smoothing", "host": "127.0.0.1",
+            "port": 3389, "username": "user", "domain": "", "tags": [],
+            "createdAt": "2026-11-17T00:00:00Z", "updatedAt": "2026-11-17T00:00:00Z",
+            "fontSmoothing": true
+        });
+        let enabled: ConnectionConfig = serde_json::from_value(saved.clone()).unwrap();
+        saved["fontSmoothing"] = serde_json::json!(false);
+        let disabled: ConnectionConfig = serde_json::from_value(saved).unwrap();
+        let on = build_connector_config(&enabled, "pw", 1280, 720);
+        let off = build_connector_config(&disabled, "pw", 1280, 720);
+        assert!(
+            on.performance_flags
+                .contains(PerformanceFlags::ENABLE_FONT_SMOOTHING)
+        );
+        assert!(
+            !off.performance_flags
+                .contains(PerformanceFlags::ENABLE_FONT_SMOOTHING)
+        );
+        assert_eq!(
+            on.performance_flags ^ off.performance_flags,
+            PerformanceFlags::ENABLE_FONT_SMOOTHING,
+            "changing smoothing must change only its upstream performance bit"
+        );
+        assert_eq!(
+            off.performance_flags,
+            PerformanceFlags::DISABLE_WALLPAPER
+                | PerformanceFlags::DISABLE_FULLWINDOWDRAG
+                | PerformanceFlags::DISABLE_MENUANIMATIONS
+                | PerformanceFlags::DISABLE_THEMING
+                | PerformanceFlags::DISABLE_CURSOR_SHADOW
+        );
+        assert_eq!(
+            on.support_dyn_vc_gfx_protocol,
+            off.support_dyn_vc_gfx_protocol
+        );
+        let on_bitmap = on.bitmap.unwrap();
+        let off_bitmap = off.bitmap.unwrap();
+        assert_eq!(on_bitmap.color_depth, off_bitmap.color_depth);
+        assert_eq!(on_bitmap.lossy_compression, off_bitmap.lossy_compression);
+        assert_eq!(on_bitmap.codecs, off_bitmap.codecs);
+        assert_eq!(on.enable_tls, off.enable_tls);
+        assert_eq!(on.enable_credssp, off.enable_credssp);
+        assert_eq!(on.desktop_size, off.desktop_size);
     }
 
     // Task 9.1 (Req 9.1/9.3): the connector consumes CodecPolicy as the
