@@ -242,6 +242,37 @@ cargo check
 cargo tauri build
 ```
 
+## Local Windows build storage
+
+Run the storage checkpoint from the repository before and after each Rust build/test batch:
+
+```powershell
+.\scripts\Invoke-BuildStorage.ps1
+```
+
+It honors `CARGO_TARGET_DIR`, reports logical file sizes, and stops further batches above
+8 GiB of `rdp-client` artifacts or 80 GiB in the shared target (warning at 60 GiB).
+These are checkpoint limits, not filesystem quotas. Hard links and compression can
+make physical disk usage differ from the report.
+
+When builds are idle, preview or perform package-only cleanup:
+
+```powershell
+.\scripts\Invoke-BuildStorage.ps1 -Action CleanProject -WhatIf
+.\scripts\Invoke-BuildStorage.ps1 -Action CleanProject
+.\scripts\Invoke-BuildStorage.ps1
+```
+
+The script uses `cargo clean --package rdp-client`; it refuses unsafe target paths
+and active build tools or target executables. It does not clean other projects,
+registry downloads, evidence logs, or user data. No background cleanup is installed.
+Avoid a blanket `cargo clean` against the shared target.
+
+App dev/test profiles disable debug symbols and incremental compilation by default.
+Use a deliberate temporary profile override for debugger investigations, then remove
+that build variant. Reuse the existing target, toolchain, and feature combinations;
+keep only the current and previous runnable test binary outside Cargo's cache.
+
 ## License
 
 MIT
