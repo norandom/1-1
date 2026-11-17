@@ -43,15 +43,16 @@ export function DashboardView({ node }: { node: NodeId }) {
   const [error, setError] = useState<string | null>(null);
   const [showNewConnection, setShowNewConnection] = useState(false);
 
-  // Req 10.5: the authoritative listing is the backend descendants
-  // command. MainPanel keys this view by node, so one instance fetches
-  // exactly once for its node (setState happens only in the async
-  // callbacks; the initial state shows the loading spinner).
+  // Refresh the backend listing after tree mutations as well as selection.
+  // Cancel stale responses when a move or save changes membership again.
   useEffect(() => {
     let cancelled = false;
     fetchDescendants(node)
       .then((result) => {
-        if (!cancelled) setSummaries(result);
+        if (!cancelled) {
+          setSummaries(result);
+          setError(null);
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -59,7 +60,7 @@ export function DashboardView({ node }: { node: NodeId }) {
     return () => {
       cancelled = true;
     };
-  }, [node]);
+  }, [node, tree]);
 
   const statuses = useMemo(() => statusesFromSessions(sessions.values()), [sessions]);
   const model = buildDashboardModel({

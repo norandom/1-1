@@ -1,15 +1,11 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Minus, Square, X } from 'lucide-react';
 import { usePlatformLabel } from '../../hooks/usePlatformLabel';
 
 export function Titlebar() {
   const { isMac } = usePlatformLabel();
 
-  const appWindow = getCurrentWindow();
-
-  const handleMinimize = () => appWindow.minimize();
-  const handleMaximize = () => appWindow.toggleMaximize();
-  const handleClose = () => appWindow.close();
+  // Windows/Linux use the native decorated title bar. Only macOS needs
+  // content beneath its overlay title bar and space for the traffic lights.
+  if (!isMac) return null;
 
   return (
     <div
@@ -17,8 +13,8 @@ export function Titlebar() {
       style={{ height: 52, borderBottom: '1px solid var(--color-border)' }}
     >
       {/* Left: Traffic light space (macOS native) + Logo */}
-      <div className="flex items-center gap-2.5 no-drag" style={{ paddingLeft: isMac ? 78 : 16 }}>
-        {/* 1-1 logo */}
+      <div className="flex items-center gap-2.5 no-drag" style={{ paddingLeft: 78 }}>
+        {/* App logo */}
         <svg width="20" height="20" viewBox="0 0 32 32" fill="none">
           <rect width="32" height="32" rx="8" fill="url(#drift-tb)" />
           <path d="M9 16C9 12.134 12.134 9 16 9C19.866 9 23 12.134 23 16" stroke="white" strokeWidth="2" strokeLinecap="round" opacity="0.4" />
@@ -42,30 +38,6 @@ export function Titlebar() {
       {/* Center: drag region */}
       <div className="flex-1" />
 
-      {/* Right: Window controls for Linux/Windows (macOS uses native traffic lights) */}
-      {!isMac && (
-        <div className="flex items-center h-full no-drag">
-          <button
-            onClick={handleMinimize}
-            className="flex items-center justify-center w-[46px] h-full hover:bg-[var(--color-surface-3)] transition-colors"
-          >
-            <Minus size={14} className="text-[var(--color-text-muted)]" />
-          </button>
-          <button
-            onClick={handleMaximize}
-            className="flex items-center justify-center w-[46px] h-full hover:bg-[var(--color-surface-3)] transition-colors"
-          >
-            <Square size={11} className="text-[var(--color-text-muted)]" />
-          </button>
-          <button
-            onClick={handleClose}
-            className="flex items-center justify-center w-[46px] h-full hover:bg-[var(--color-danger)] transition-colors group"
-          >
-            <X size={14} className="text-[var(--color-text-muted)] group-hover:text-white" />
-          </button>
-        </div>
-      )}
     </div>
   );
 }
-

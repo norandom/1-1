@@ -112,7 +112,8 @@
 }
 
 /* ── Base ── */
-* { margin: 0; padding: 0; box-sizing: border-box; }
+/* Tailwind's base layer owns the reset. An unlayered reset here would
+   override utility margins and padding throughout the app. */
 
 html, body, #root {
   height: 100%; width: 100%; overflow: hidden;
