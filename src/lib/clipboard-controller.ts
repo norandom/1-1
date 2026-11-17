@@ -1,11 +1,11 @@
-import type { HostProfile } from '../types';
+import type { ClipboardPayload, HostProfile } from '../types';
 
 export type ClipboardState = { kind: 'idle' | 'busy' | 'accepted' | 'copied' | 'error'; message: string };
 type Dependencies = {
   direction: HostProfile['clipboardDirection'];
-  read(): Promise<string>;
-  write(text: string): Promise<void>;
-  publish(text: string): Promise<void>;
+  read(): Promise<ClipboardPayload>;
+  write(text: ClipboardPayload): Promise<void>;
+  publish(text: ClipboardPayload): Promise<void>;
   request(): Promise<void>;
   paste(): Promise<void>;
   allowIncoming?(): boolean;
@@ -40,7 +40,7 @@ export function createClipboardController(deps: Dependencies) {
       try {
         const text = await bounded(deps.read());
         if (disposed || current !== revision) return;
-        if (new TextEncoder().encode(text).length > 1024 * 1024) throw new Error('Clipboard text exceeds the 1 MiB limit.');
+        validateClipboardPayload(text);
         report('busy', 'Waiting for remote clipboard acknowledgement…');
         await bounded(deps.publish(text));
         if (disposed || current !== revision) return;
@@ -54,27 +54,35 @@ export function createClipboardController(deps: Dependencies) {
       if (!receivesClipboard(deps.direction)) { report('error', 'Receiving clipboard is disabled for this session.'); return; }
       busy = true; receiving = true;
       report('busy', 'Requesting remote clipboard…');
-      const applied = new Promise<void>((resolve, reject) => { received = resolve; receiveFailed = () => reject(new Error('Cannot write the local clipboard. Focus 1-1 and retry resync from remote.')); });
+      const applied = new Promise<void>((resolve, reject) => { received = resolve; receiveFailed = () => reject(new Error('Cannot write the local clipboard. Retry resync from remote.')); });
       try { await bounded(Promise.all([deps.request(), applied])); }
       catch (error) { report('error', error instanceof Error ? error.message : typeof error === 'string' ? error : 'Remote clipboard request failed.'); }
       finally { busy = false; receiving = false; received = undefined; receiveFailed = undefined; }
     },
-    async receive(text: string) {
+    async receive(text: ClipboardPayload) {
       if (disposed || !receivesClipboard(deps.direction)) return;
       if (!receiving && deps.allowIncoming && !deps.allowIncoming()) return;
       // A remote event during local publication must not overwrite what is being sent.
       if (sending) return;
       const current = ++revision;
       try {
-        if (new TextEncoder().encode(text).length > 1024 * 1024) throw new Error('Remote clipboard text exceeds the 1 MiB limit.');
+        validateClipboardPayload(text);
         const write = writeTail.then(async () => { if (!disposed && current === revision) await deps.write(text); });
         writeTail = write.catch(() => {});
         await bounded(write);
-        if (!disposed && current === revision) { report('copied', 'Remote text copied to local clipboard.'); received?.(); }
-      } catch { if (current === revision) { receiveFailed?.(); report('error', 'Cannot write the local clipboard. Focus 1-1 and retry resync from remote.'); } }
+        if (!disposed && current === revision) { report('copied', 'Remote content copied to local clipboard.'); received?.(); }
+      } catch { if (current === revision) { receiveFailed?.(); report('error', 'Cannot write the local clipboard. Retry resync from remote.'); } }
     },
     fail(message: string) { report('error', message); },
     dispose() { disposed = true; revision++; },
   };
 }
 export type ClipboardController = ReturnType<typeof createClipboardController>;
+
+function validateClipboardPayload(payload: ClipboardPayload) {
+  if (typeof payload === 'string') {
+    if (new TextEncoder().encode(payload).length > 1024 * 1024) throw new Error('Clipboard text exceeds the 1 MiB limit.');
+  } else if (typeof payload?.png !== 'string' || payload.png.length > Math.ceil(16 * 1024 * 1024 / 3) * 4) {
+    throw new Error('Clipboard image exceeds the 16 MiB PNG limit.');
+  }
+}

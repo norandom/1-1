@@ -192,8 +192,8 @@ export async function importSshConfig(
 export async function clipboardPaste(sessionId: string, epoch: string): Promise<void> {
   await invoke('clipboard_paste', { sessionId, epoch });
 }
-export async function clipboardSync(sessionId: string, epoch: string, text: string | null): Promise<void> {
-  await invoke('clipboard_sync', { sessionId, epoch, text });
+export async function clipboardSync(sessionId: string, epoch: string, payload: import('../types').ClipboardPayload | null): Promise<void> {
+  await invoke('clipboard_sync', { sessionId, epoch, payload });
 }
 export async function clipboardContext(sessionId: string): Promise<{epoch: string; direction: import('../types').HostProfile['clipboardDirection']}> {
   return invoke('clipboard_context', { sessionId });
@@ -297,3 +297,8 @@ export async function getLibraryStatus(): Promise<LibraryStoreStatus> {
 export async function reloadLibraryStore(): Promise<LibraryStoreStatus> {
   return await invoke<LibraryStoreStatus>('reload_library_store');
 }
+
+export async function clipboardLocalAcquire(sessionId: string, epoch: string): Promise<string> { return invoke('clipboard_local_acquire', { sessionId, epoch }); }
+export async function clipboardLocalRelease(lease: string): Promise<void> { return invoke('clipboard_local_release', { lease }); }
+export async function clipboardLocalRead(lease: string): Promise<import('../types').ClipboardPayload> { return invoke('clipboard_local_read', { lease }); }
+export async function clipboardLocalWrite(lease: string, payload: import('../types').ClipboardPayload): Promise<void> { return invoke('clipboard_local_write', { lease, payload }); }

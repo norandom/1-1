@@ -1,4 +1,6 @@
+use super::clipboard_payload::ClipboardPayload;
 use std::{collections::VecDeque, env};
+const PNG_FORMAT: ClipboardFormatId = ClipboardFormatId(0xC001);
 
 use crate::store::connections::ClipboardDirection;
 use ironrdp_cliprdr::{
@@ -21,8 +23,10 @@ pub struct ClipboardContext {
 pub struct SessionClipboardBackend {
     temporary_directory: String,
     pending_messages: VecDeque<ClipboardMessage>,
-    local_text: Option<String>,
-    remote_text_update: Option<String>,
+    local_payload: Option<ClipboardPayload>,
+    remote_payload_update: Option<ClipboardPayload>,
+    remote_png_format: Option<ClipboardFormatId>,
+    pending_png: bool,
     pending_remote_format: Option<ClipboardFormatId>,
     direction: ClipboardDirection,
     local_waiter: Option<ClipboardReply>,
@@ -44,8 +48,10 @@ impl SessionClipboardBackend {
         Self {
             temporary_directory: env::temp_dir().to_string_lossy().into_owned(),
             pending_messages: VecDeque::new(),
-            local_text: None,
-            remote_text_update: None,
+            local_payload: None,
+            remote_payload_update: None,
+            remote_png_format: None,
+            pending_png: false,
             pending_remote_format: None,
             direction,
             local_waiter: None,
@@ -60,6 +66,14 @@ impl SessionClipboardBackend {
     }
 
     pub fn begin_local(&mut self, text: String, reply: ClipboardReply) {
+        self.begin_payload(ClipboardPayload::Text(text), reply);
+    }
+
+    pub fn begin_payload(&mut self, payload: ClipboardPayload, reply: ClipboardReply) {
+        if let Err(error) = payload.validate() {
+            let _ = reply.send(Err(error));
+            return;
+        }
         let error = if self.blocked {
             Some("Clipboard channel needs a reconnect.")
         } else if self.bootstrap_pending {
@@ -68,8 +82,6 @@ impl SessionClipboardBackend {
             Some(
                 "Sending clipboard is disabled for this session. Reconnect after changing host settings.",
             )
-        } else if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
-            Some("Clipboard text exceeds the 1 MiB limit.")
         } else if self.local_waiter.is_some() {
             Some(
                 "A clipboard announcement is still awaiting acknowledgement. Retry after it completes, or reconnect.",
@@ -82,7 +94,7 @@ impl SessionClipboardBackend {
             return;
         }
         self.local_waiter = Some(reply);
-        self.set_local_text(text);
+        self.set_local_payload(payload);
     }
 
     pub fn begin_remote(&mut self, reply: ClipboardReply) {
@@ -97,7 +109,9 @@ impl SessionClipboardBackend {
                 "A remote clipboard response is still outstanding. Retry after it arrives, or reconnect.",
             )
         } else if self.remote_format.is_none() {
-            Some("No remote text format is available. Copy text on the remote desktop and retry.")
+            Some(
+                "No supported remote text or image format is available. Copy text or an image and retry.",
+            )
         } else {
             None
         };
@@ -116,6 +130,7 @@ impl SessionClipboardBackend {
             && let Some(format) = self.remote_format
         {
             self.pending_remote_format = Some(format);
+            self.pending_png = self.remote_png_format == Some(format);
             self.pending_revision = self.remote_revision;
             self.pending_messages
                 .push_back(ClipboardMessage::SendInitiatePaste(format));
@@ -138,23 +153,50 @@ impl SessionClipboardBackend {
         self.failure.take()
     }
 
+    #[cfg(test)]
     pub fn set_local_text(&mut self, text: String) {
-        if !self.direction.sends() || text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+        self.set_local_payload(ClipboardPayload::Text(text));
+    }
+    fn local_formats(&self) -> Vec<ClipboardFormat> {
+        if !self.direction.sends() {
+            return vec![];
+        }
+        match &self.local_payload {
+            Some(ClipboardPayload::Text(_)) => {
+                vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]
+            }
+            Some(ClipboardPayload::Image { .. }) => vec![
+                ClipboardFormat::new(PNG_FORMAT)
+                    .with_name(ironrdp_cliprdr::pdu::ClipboardFormatName::new("PNG")),
+                ClipboardFormat::new(ClipboardFormatId::CF_DIB),
+            ],
+            None => vec![],
+        }
+    }
+    fn set_local_payload(&mut self, payload: ClipboardPayload) {
+        if !self.direction.sends() || payload.validate().is_err() {
             return;
         }
-        self.local_text = Some(text);
+        self.local_payload = Some(payload);
         self.pending_messages
-            .push_back(ClipboardMessage::SendInitiateCopy(vec![
-                ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT),
-            ]));
+            .push_back(ClipboardMessage::SendInitiateCopy(self.local_formats()));
     }
-
     pub fn take_pending_messages(&mut self) -> Vec<ClipboardMessage> {
         self.pending_messages.drain(..).collect()
     }
 
+    pub fn take_remote_payload_update(&mut self) -> Option<ClipboardPayload> {
+        self.remote_payload_update.take()
+    }
+
+    #[cfg(test)]
     pub fn take_remote_text_update(&mut self) -> Option<String> {
-        self.remote_text_update.take()
+        self.remote_payload_update
+            .take()
+            .and_then(|payload| match payload {
+                ClipboardPayload::Text(text) => Some(text),
+                _ => None,
+            })
     }
 }
 
@@ -210,11 +252,7 @@ impl CliprdrBackend for SessionClipboardBackend {
             return;
         }
         self.bootstrap_pending = true;
-        let formats = if self.direction.sends() && self.local_text.is_some() {
-            vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]
-        } else {
-            Vec::new()
-        };
+        let formats = self.local_formats();
         self.pending_messages
             .push_back(ClipboardMessage::SendInitiateCopy(formats));
     }
@@ -226,38 +264,61 @@ impl CliprdrBackend for SessionClipboardBackend {
     }
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
-        let preferred_format = available_formats
+        self.remote_png_format = available_formats
             .iter()
-            .find(|format| format.id() == ClipboardFormatId::CF_UNICODETEXT)
-            .map(|format| format.id())
-            .or_else(|| {
-                available_formats
-                    .iter()
-                    .find(|format| format.id() == ClipboardFormatId::CF_TEXT)
-                    .map(|format| format.id())
-            });
-
+            .find(|format| {
+                format.id().is_registered()
+                    && format.name().is_some_and(|name| {
+                        name.value().eq_ignore_ascii_case("PNG")
+                            || name.value().eq_ignore_ascii_case("image/png")
+                    })
+            })
+            .map(|format| format.id());
+        let preferred_format = self.remote_png_format.or_else(|| {
+            [
+                ClipboardFormatId::CF_DIBV5,
+                ClipboardFormatId::CF_DIB,
+                ClipboardFormatId::CF_UNICODETEXT,
+                ClipboardFormatId::CF_TEXT,
+            ]
+            .into_iter()
+            .find(|id| available_formats.iter().any(|format| format.id() == *id))
+        });
+        if preferred_format.is_none() && self.direction.receives() {
+            self.failure =
+                Some("Remote clipboard contains no supported text or image format.".into());
+        }
         self.remote_revision = self.remote_revision.wrapping_add(1);
         self.remote_format = preferred_format;
         self.request_remote();
     }
 
     fn on_format_data_request(&mut self, request: FormatDataRequest) {
-        let response = match (
-            request.format,
-            self.local_text
-                .as_deref()
-                .filter(|_| self.direction.sends()),
-        ) {
-            (ClipboardFormatId::CF_UNICODETEXT, Some(text)) => {
-                FormatDataResponse::new_unicode_string(text).into_owned()
+        let response = if !self.direction.sends() {
+            FormatDataResponse::new_error().into_owned()
+        } else {
+            match (request.format, &self.local_payload) {
+                (ClipboardFormatId::CF_UNICODETEXT, Some(ClipboardPayload::Text(text))) => {
+                    FormatDataResponse::new_unicode_string(text).into_owned()
+                }
+                (ClipboardFormatId::CF_TEXT, Some(ClipboardPayload::Text(text))) => {
+                    FormatDataResponse::new_string(text).into_owned()
+                }
+                (format, Some(payload @ ClipboardPayload::Image { .. })) => {
+                    let bytes = if format == PNG_FORMAT {
+                        payload.png_bytes()
+                    } else if format == ClipboardFormatId::CF_DIB {
+                        payload.to_dib()
+                    } else {
+                        Err("Unsupported image format".into())
+                    };
+                    bytes
+                        .map(|bytes| FormatDataResponse::new_data(bytes).into_owned())
+                        .unwrap_or_else(|_| FormatDataResponse::new_error().into_owned())
+                }
+                _ => FormatDataResponse::new_error().into_owned(),
             }
-            (ClipboardFormatId::CF_TEXT, Some(text)) => {
-                FormatDataResponse::new_string(text).into_owned()
-            }
-            _ => FormatDataResponse::new_error().into_owned(),
         };
-
         self.pending_messages
             .push_back(ClipboardMessage::SendFormatData(response));
     }
@@ -279,26 +340,36 @@ impl CliprdrBackend for SessionClipboardBackend {
             .remote_waiter
             .as_ref()
             .is_some_and(|reply| reply.is_closed());
-        let text = if response.is_error()
-            || response.data().len() > MAX_CLIPBOARD_TEXT_BYTES * 2
+        let payload: Result<ClipboardPayload, String> = if response.is_error()
+            || response.data().len() > super::clipboard_payload::MAX_WIRE_BYTES
             || expired
         {
-            None
+            Err("Remote clipboard transfer failed, expired, or exceeded its size limit. Copy again and retry resync.".into())
+        } else if self.pending_png {
+            ClipboardPayload::from_png(response.data())
         } else {
-            match Some(format) {
-                Some(ClipboardFormatId::CF_UNICODETEXT) => response.to_unicode_string().ok(),
-                Some(ClipboardFormatId::CF_TEXT) => response.to_string().ok(),
-                _ => None,
+            match format {
+                ClipboardFormatId::CF_DIB | ClipboardFormatId::CF_DIBV5 => {
+                    ClipboardPayload::from_dib(response.data())
+                }
+                ClipboardFormatId::CF_UNICODETEXT
+                    if response.data().len() <= MAX_CLIPBOARD_TEXT_BYTES * 2 =>
+                {
+                    response
+                        .to_unicode_string()
+                        .map(ClipboardPayload::Text)
+                        .map_err(|_| "Remote clipboard text is invalid.".into())
+                }
+                ClipboardFormatId::CF_TEXT if response.data().len() <= MAX_CLIPBOARD_TEXT_BYTES => {
+                    response
+                        .to_string()
+                        .map(ClipboardPayload::Text)
+                        .map_err(|_| "Remote clipboard text is invalid.".into())
+                }
+                _ => Err("Unsupported remote clipboard format or text size limit exceeded.".into()),
             }
         };
-        let result = if text.is_some() {
-            Ok(())
-        } else {
-            Err(
-                "Remote clipboard transfer failed or expired. Copy again and retry resync."
-                    .to_string(),
-            )
-        };
+        let result = payload.as_ref().map(|_| ()).map_err(Clone::clone);
         if let Some(reply) = self.remote_waiter.take() {
             let _ = reply.send(result.clone());
         }
@@ -306,8 +377,8 @@ impl CliprdrBackend for SessionClipboardBackend {
             self.failure = Some(error);
         }
 
-        if let Some(text) = text {
-            self.remote_text_update = Some(text);
+        if let Ok(payload) = payload {
+            self.remote_payload_update = Some(payload);
         }
     }
 
@@ -327,6 +398,83 @@ impl CliprdrBackend for SessionClipboardBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipboard_images_replace_text_and_serve_standard_and_registered_formats() {
+        let image = ClipboardPayload::from_rgba(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+        let mut backend = SessionClipboardBackend::new();
+        backend.set_local_text("old text".into());
+        backend.take_pending_messages();
+        let (reply, mut result) = tokio::sync::oneshot::channel();
+        backend.begin_payload(image.clone(), reply);
+        let messages = backend.take_pending_messages();
+        let ClipboardMessage::SendInitiateCopy(formats) = &messages[0] else {
+            panic!("expected image advertisement")
+        };
+        assert_eq!(formats.len(), 2);
+        assert!(
+            formats
+                .iter()
+                .all(|format| format.id() != ClipboardFormatId::CF_UNICODETEXT)
+        );
+        assert!(result.try_recv().is_err());
+        backend.on_format_list_response(true);
+        assert!(result.try_recv().unwrap().is_ok());
+        for format in [PNG_FORMAT, ClipboardFormatId::CF_DIB] {
+            backend.on_format_data_request(FormatDataRequest { format });
+            let messages = backend.take_pending_messages();
+            let ClipboardMessage::SendFormatData(response) = &messages[0] else {
+                panic!("expected image data")
+            };
+            let decoded = if format == PNG_FORMAT {
+                ClipboardPayload::from_png(response.data())
+            } else {
+                ClipboardPayload::from_dib(response.data())
+            }
+            .unwrap();
+            assert_eq!(decoded.rgba().unwrap(), image.rgba().unwrap());
+        }
+        backend.on_format_data_request(FormatDataRequest {
+            format: ClipboardFormatId::CF_UNICODETEXT,
+        });
+        assert!(
+            matches!(&backend.take_pending_messages()[0], ClipboardMessage::SendFormatData(response) if response.is_error())
+        );
+        backend.set_local_text("new text".into());
+        let messages = backend.take_pending_messages();
+        assert!(
+            matches!(&messages[0], ClipboardMessage::SendInitiateCopy(formats) if formats.len() == 1 && formats[0].id() == ClipboardFormatId::CF_UNICODETEXT)
+        );
+    }
+    #[test]
+    fn clipboard_remote_images_obey_format_revision_and_direction() {
+        let image = ClipboardPayload::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
+        let dib = image.to_dib().unwrap();
+        let png_id = ClipboardFormatId(0xC008);
+        let formats = vec![
+            ClipboardFormat::new(png_id)
+                .with_name(ironrdp_cliprdr::pdu::ClipboardFormatName::new("PNG")),
+        ];
+        let mut backend = SessionClipboardBackend::new();
+        backend.on_remote_copy(&formats);
+        backend.take_pending_messages();
+        backend.on_format_data_response(FormatDataResponse::new_data(image.png_bytes().unwrap()));
+        assert_eq!(backend.take_remote_payload_update().unwrap(), image);
+        backend.on_remote_copy(&[ClipboardFormat::new(ClipboardFormatId::CF_DIB)]);
+        backend.take_pending_messages();
+        backend.on_remote_copy(&[ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]);
+        backend.on_format_data_response(FormatDataResponse::new_data(dib));
+        assert!(backend.take_remote_payload_update().is_none());
+        assert!(
+            matches!(&backend.take_pending_messages()[0], ClipboardMessage::SendInitiatePaste(format) if *format == ClipboardFormatId::CF_UNICODETEXT)
+        );
+        backend.on_format_data_response(FormatDataResponse::new_unicode_string("latest"));
+        assert_eq!(backend.take_remote_text_update().as_deref(), Some("latest"));
+        let mut disabled = SessionClipboardBackend::with_direction(ClipboardDirection::Off);
+        disabled.on_remote_copy(&formats);
+        assert!(disabled.take_pending_messages().is_empty());
+        disabled.on_format_data_response(FormatDataResponse::new_data(image.png_bytes().unwrap()));
+        assert!(disabled.take_remote_payload_update().is_none());
+    }
     use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackend};
     use ironrdp_cliprdr::pdu::{ClipboardFormat, ClipboardFormatId, FormatDataRequest};
 

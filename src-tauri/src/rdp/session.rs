@@ -343,11 +343,14 @@ impl SessionActor {
         }
     }
 
-    fn publish_remote_clipboard(&mut self, text: String) {
-        let _ = self.clipboard_tx.send(Some(text.clone()));
+    fn publish_remote_clipboard(
+        &mut self,
+        payload: crate::rdp::clipboard_payload::ClipboardPayload,
+    ) {
+        let _ = self.clipboard_tx.send(payload.text().map(str::to_owned));
         if let Err(error) = self.events.emit(
             &format!("clipboard-{}", self.id),
-            serde_json::json!({"epoch": self.clipboard_epoch, "text": text}),
+            serde_json::json!({"epoch": self.clipboard_epoch, "payload": payload}),
         ) {
             log::warn!(
                 "Failed to emit clipboard event for session {}: {}",
@@ -509,7 +512,7 @@ impl SessionActor {
 
             (
                 backend.take_pending_messages(),
-                backend.take_remote_text_update(),
+                backend.take_remote_payload_update(),
                 backend.take_failure(),
             )
         };
@@ -1244,14 +1247,14 @@ impl SessionActor {
                             }
                         }
                         Some(SessionCommand::ClipboardContext { reply }) => { let _ = reply.send(crate::rdp::clipboard::ClipboardContext { epoch: self.clipboard_epoch.clone(), direction: self.config.host_profile.clipboard_direction }); }
-                        Some(SessionCommand::ClipboardSync { epoch, text, reply }) => {
+                        Some(SessionCommand::ClipboardSync { epoch, payload, reply }) => {
                             if epoch != self.clipboard_epoch { let _ = reply.send(Err("Session changed. Retry clipboard in the active connection.".into())); continue; }
                             use ironrdp_cliprdr::CliprdrClient;
                             if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
                                 if !cliprdr.is_ready() {
                                     let _ = reply.send(Err("Clipboard channel is not ready. Retry shortly or reconnect.".into()));
                                 } else if let Some(backend) = cliprdr.downcast_backend_mut::<SessionClipboardBackend>() {
-                                    match text { Some(text) => backend.begin_local(text, reply), None => backend.begin_remote(reply) }
+                                    match payload { Some(payload) => backend.begin_payload(payload, reply), None => backend.begin_remote(reply) }
                                 }
                             } else { let _ = reply.send(Err("Clipboard channel is unavailable. Reconnect the session.".into())); }
                             if self.flush_clipboard_messages(&mut active_stage, &mut writer).await.is_err() {

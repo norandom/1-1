@@ -181,3 +181,6 @@ export type MainPanelView =
   | { view: 'session'; sessionId: string }
   | { view: 'dashboard'; node: NodeId }
   | { view: 'start' };
+
+/** Clipboard content is transient; image bytes are bounded base64 PNG. */
+export type ClipboardPayload = string | { png: string };

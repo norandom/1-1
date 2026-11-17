@@ -26,6 +26,8 @@ pub fn run() {
         .expect("Failed to install rustls crypto provider");
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(commands::native_clipboard::NativeClipboardState::default())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -181,6 +183,10 @@ pub fn run() {
             commands::clipboard::clipboard_sync,
             commands::clipboard::clipboard_context,
             commands::clipboard::clipboard_paste,
+            commands::native_clipboard::clipboard_local_acquire,
+            commands::native_clipboard::clipboard_local_release,
+            commands::native_clipboard::clipboard_local_read,
+            commands::native_clipboard::clipboard_local_write,
             // Library commands (tasks 6.4/6.5/7.2/7.3, Req 10.1/10.2/10.3/10.5/10.8/10.15/10.16/10.17/10.18)
             commands::library::create_library,
             commands::library::rename_library,

@@ -39,7 +39,7 @@ pub enum SessionCommand {
     },
     ClipboardSync {
         epoch: String,
-        text: Option<String>,
+        payload: Option<crate::rdp::clipboard_payload::ClipboardPayload>,
         reply: crate::rdp::clipboard::ClipboardReply,
     },
     ClipboardContext {

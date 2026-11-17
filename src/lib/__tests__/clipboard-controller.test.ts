@@ -1,5 +1,27 @@
 import { expect, it, vi } from 'vitest';
 import { createClipboardController } from '../clipboard-controller';
+
+it('rejects oversized screenshot payloads before publishing them', async () => {
+  const state = vi.fn(); const publish = vi.fn(async () => {});
+  const controller = createClipboardController({ direction: 'bidirectional', read: async () => ({ png: 'A'.repeat(24 * 1024 * 1024) }), write: async () => {}, publish, request: async () => {}, paste: async () => {}, state });
+  await controller.toRemote();
+  expect(state).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'error' }));
+  expect(publish).not.toHaveBeenCalled();
+});
+
+it('keeps repeated text and screenshot transfers distinct and respects image direction policy', async () => {
+  const image = { png: 'iVBORw0KGgo=' };
+  const values = ['before', image, 'after'];
+  const publish = vi.fn(async () => {}); const write = vi.fn(async () => {});
+  const controller = createClipboardController({ direction: 'bidirectional', read: async () => values.shift()!, write, publish, request: async () => {}, paste: async () => {}, state: vi.fn() });
+  for (let i = 0; i < 3; i++) await controller.toRemote();
+  expect(publish.mock.calls).toEqual([['before'], [image], ['after']]);
+  await controller.receive(image); await controller.receive('text again');
+  expect(write.mock.calls).toEqual([[image], ['text again']]);
+  const disabled = createClipboardController({ direction: 'off', read: async () => image, write, publish, request: async () => {}, paste: async () => {}, state: vi.fn() });
+  await disabled.toRemote(); await disabled.receive(image);
+  expect(publish).toHaveBeenCalledTimes(3); expect(write).toHaveBeenCalledTimes(2);
+});
 import { subscribeClipboardInput } from '../clipboard-input';
 import { subscribeCanvasKeyboard } from '../../components/session/canvas-keyboard';
 

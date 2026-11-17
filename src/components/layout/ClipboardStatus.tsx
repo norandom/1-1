@@ -22,7 +22,7 @@ export function ClipboardStatus({ onOpenChange }: { onOpenChange?: (open: boolea
       <p className="px-2 py-1 text-xs text-muted-foreground">{clipboard.status.message}</p>
       <DropdownMenuItem disabled={busy || !clipboard.controller || !sendsClipboard(clipboard.direction)} onSelect={() => { void clipboard.controller?.toRemote(); }}>Send local clipboard to remote</DropdownMenuItem>
       <DropdownMenuItem disabled={busy || !clipboard.controller || !receivesClipboard(clipboard.direction)} onSelect={() => { void clipboard.controller?.fromRemote(); }}>Get remote clipboard locally</DropdownMenuItem>
-      <p className="px-2 py-1 text-xs text-muted-foreground">Choose a direction to avoid overwriting the other clipboard. Host policy changes require reconnect.</p>
+      <p className="px-2 py-1 text-xs text-muted-foreground">Sync text or screenshots. Choose a direction to avoid overwriting the other clipboard. Host policy changes require reconnect.</p>
     </DropdownMenuContent>
   </DropdownMenu>;
 }
