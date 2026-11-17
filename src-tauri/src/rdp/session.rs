@@ -235,6 +235,7 @@ impl SessionEventSink {
 /// It receives commands via an mpsc channel and publishes session info via a watch channel.
 /// Frames are streamed to the frontend via a Tauri channel.
 struct SessionActor {
+    clipboard_epoch: String,
     id: String,
     config: ConnectionConfig,
     password: Option<String>,
@@ -298,6 +299,7 @@ impl SessionActor {
             frame_channel,
             events,
             local_clipboard_text: None,
+            clipboard_epoch: Uuid::new_v4().to_string(),
             reconnect_attempts: 0,
             last_error: None,
             auto_reconnect,
@@ -343,13 +345,23 @@ impl SessionActor {
 
     fn publish_remote_clipboard(&mut self, text: String) {
         let _ = self.clipboard_tx.send(Some(text.clone()));
-        if let Err(error) = self.events.emit(&format!("clipboard-{}", self.id), text) {
+        if let Err(error) = self.events.emit(
+            &format!("clipboard-{}", self.id),
+            serde_json::json!({"epoch": self.clipboard_epoch, "text": text}),
+        ) {
             log::warn!(
                 "Failed to emit clipboard event for session {}: {}",
                 self.id,
                 error
             );
         }
+    }
+
+    fn publish_clipboard_failure(&self, message: &str) {
+        let _ = self.events.emit(
+            &format!("clipboard-error-{}", self.id),
+            serde_json::json!({"epoch": self.clipboard_epoch, "message": message}),
+        );
     }
 
     fn send_frame_packet(
@@ -487,7 +499,7 @@ impl SessionActor {
             backend::ClipboardMessage,
         };
 
-        let (pending_messages, remote_text_update) = {
+        let (pending_messages, remote_text_update, failure) = {
             let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() else {
                 return Ok(());
             };
@@ -498,8 +510,13 @@ impl SessionActor {
             (
                 backend.take_pending_messages(),
                 backend.take_remote_text_update(),
+                backend.take_failure(),
             )
         };
+
+        if let Some(error) = failure {
+            self.publish_clipboard_failure(&error);
+        }
 
         if let Some(text) = remote_text_update {
             self.publish_remote_clipboard(text);
@@ -540,8 +557,13 @@ impl SessionActor {
                             self.id,
                             error
                         );
-                        self.last_error = Some(format!("Clipboard error: {}", error));
-                        return Err(DisconnectReason::ConnectionLost);
+                        if let Some(backend) =
+                            cliprdr.downcast_backend_mut::<SessionClipboardBackend>()
+                        {
+                            backend.fail_pending("Clipboard channel rejected the operation. Reconnect to restore the channel.");
+                        }
+                        self.publish_clipboard_failure("Clipboard channel rejected the operation. Reconnect to restore the channel.");
+                        return Ok(());
                     }
                 }
             };
@@ -565,8 +587,18 @@ impl SessionActor {
                         self.id,
                         error
                     );
-                    self.last_error = Some(format!("Clipboard encode error: {}", error));
-                    return Err(DisconnectReason::ConnectionLost);
+                    if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>()
+                        && let Some(backend) =
+                            cliprdr.downcast_backend_mut::<SessionClipboardBackend>()
+                    {
+                        backend.fail_pending(
+                            "Clipboard encoding failed. Reconnect to restore the channel.",
+                        );
+                    }
+                    self.publish_clipboard_failure(
+                        "Clipboard encoding failed. Reconnect to restore the channel.",
+                    );
+                    return Ok(());
                 }
             };
 
@@ -604,7 +636,8 @@ impl SessionActor {
         if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>()
             && let Some(backend) = cliprdr.downcast_backend_mut::<SessionClipboardBackend>()
         {
-            backend.set_local_text(text);
+            let (reply, _result) = tokio::sync::oneshot::channel();
+            backend.begin_local(text, reply);
         }
 
         self.flush_clipboard_messages(active_stage, writer).await
@@ -655,7 +688,10 @@ impl SessionActor {
                         let (width, height) = normalize_remote_resolution(width, height);
                         self.pending_resize = Some((width, height));
                     }
-                    Some(SessionCommand::ClipboardWrite { text }) => {
+                    Some(SessionCommand::ClipboardContext { .. }) => {}
+                Some(SessionCommand::ClipboardPaste { reply, .. }) => { let _ = reply.send(Err("Session is not connected".into())); }
+                Some(SessionCommand::ClipboardSync { reply, .. }) => { let _ = reply.send(Err("Clipboard requires a connected real session.".into())); }
+                Some(SessionCommand::ClipboardWrite { text }) => {
                         self.local_clipboard_text = Some(text);
                     }
                     _ => {}
@@ -836,16 +872,12 @@ impl SessionActor {
         // every (re)connect because this loop (and its decoded image)
         // starts fresh per connection.
         let mut delivered_surface: Option<(u16, u16)> = None;
+        let mut held_modifiers = std::collections::BTreeSet::new();
         self.delivery.reset();
 
-        if let Some(text) = self.local_clipboard_text.clone()
-            && self
-                .set_local_clipboard_text(&mut active_stage, &mut writer, text)
-                .await
-                .is_err()
-        {
-            return DisconnectReason::ConnectionLost;
-        }
+        self.clipboard_epoch = Uuid::new_v4().to_string();
+        self.local_clipboard_text = None;
+        let _ = self.clipboard_tx.send(None);
 
         'session: loop {
             if let Some(result) = encode_pending_resize(&mut self.pending_resize, &mut active_stage)
@@ -1156,6 +1188,9 @@ impl SessionActor {
                                                     return DisconnectReason::ConnectionLost;
                                                 }
                                         }
+                                        if matches!(key_code, 0x1d | 0x11d | 0x2a | 0x36 | 0x38 | 0x138 | 0x15b | 0x15c) {
+                                            if is_down { held_modifiers.insert(key_code); } else { held_modifiers.remove(&key_code); }
+                                        }
                                     }
                                     Err(e) => {
                                         log::warn!("Failed to encode key event: {}", e);
@@ -1196,6 +1231,32 @@ impl SessionActor {
                             let (width, height) = normalize_remote_resolution(width, height);
                             log::info!("Session {} resize request to {}x{}", self.id, width, height);
                             self.pending_resize = Some((width, height));
+                        }
+                        Some(SessionCommand::ClipboardPaste { epoch, reply }) => {
+                            if epoch != self.clipboard_epoch || !self.config.host_profile.clipboard_direction.sends() { let _ = reply.send(Err("Clipboard session or policy changed.".into())); continue; }
+                            let keys: Vec<_> = clipboard_paste_sequence(&held_modifiers).into_iter().filter_map(|(code, down)| encode_keyboard_fastpath_event(code, down)).collect();
+                            match active_stage.process_fastpath_input(&mut image, &keys) {
+                                Ok(outputs) => {
+                                    for output in outputs { if let ActiveStageOutput::ResponseFrame(frame) = output && writer.write_all(&frame).await.is_err() { let _ = reply.send(Err("Clipboard paste transport failed".into())); return DisconnectReason::ConnectionLost; } }
+                                    let _ = reply.send(Ok(()));
+                                }
+                                Err(_) => { let _ = reply.send(Err("Remote paste could not be encoded. Retry resync.".into())); }
+                            }
+                        }
+                        Some(SessionCommand::ClipboardContext { reply }) => { let _ = reply.send(crate::rdp::clipboard::ClipboardContext { epoch: self.clipboard_epoch.clone(), direction: self.config.host_profile.clipboard_direction }); }
+                        Some(SessionCommand::ClipboardSync { epoch, text, reply }) => {
+                            if epoch != self.clipboard_epoch { let _ = reply.send(Err("Session changed. Retry clipboard in the active connection.".into())); continue; }
+                            use ironrdp_cliprdr::CliprdrClient;
+                            if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
+                                if !cliprdr.is_ready() {
+                                    let _ = reply.send(Err("Clipboard channel is not ready. Retry shortly or reconnect.".into()));
+                                } else if let Some(backend) = cliprdr.downcast_backend_mut::<SessionClipboardBackend>() {
+                                    match text { Some(text) => backend.begin_local(text, reply), None => backend.begin_remote(reply) }
+                                }
+                            } else { let _ = reply.send(Err("Clipboard channel is unavailable. Reconnect the session.".into())); }
+                            if self.flush_clipboard_messages(&mut active_stage, &mut writer).await.is_err() {
+                                return DisconnectReason::ConnectionLost;
+                            }
                         }
                         Some(SessionCommand::ClipboardWrite { text }) => {
                             if self
@@ -1554,7 +1615,10 @@ impl SessionActor {
                             let (width, height) = normalize_remote_resolution(width, height);
                             self.pending_resize = Some((width, height));
                         }
-                        Some(SessionCommand::ClipboardWrite { text }) => {
+                        Some(SessionCommand::ClipboardContext { .. }) => {}
+                Some(SessionCommand::ClipboardPaste { reply, .. }) => { let _ = reply.send(Err("Session is not connected".into())); }
+                Some(SessionCommand::ClipboardSync { reply, .. }) => { let _ = reply.send(Err("Clipboard requires a connected real session.".into())); }
+                Some(SessionCommand::ClipboardWrite { text }) => {
                             self.local_clipboard_text = Some(text);
                         }
                         _ => {} // Ignore key/mouse during reconnect
@@ -1649,6 +1713,13 @@ impl SessionActor {
                     );
                     // TODO: Forward to IronRDP input channel when using real session
                 }
+                Some(SessionCommand::ClipboardContext { .. }) => {}
+                Some(SessionCommand::ClipboardPaste { reply, .. }) => {
+                    let _ = reply.send(Err("Session is not connected".into()));
+                }
+                Some(SessionCommand::ClipboardSync { reply, .. }) => {
+                    let _ = reply.send(Err("Clipboard requires a connected real session.".into()));
+                }
                 Some(SessionCommand::ClipboardWrite { text }) => {
                     self.local_clipboard_text = Some(text);
                 }
@@ -1718,6 +1789,17 @@ fn normalize_remote_resolution(width: u32, height: u32) -> (u32, u32) {
 /// not track modifier state, it forwards each modifier key-down/-up itself.
 /// Returns `None` for events without a scancode (unmapped keys), which the
 /// session loop drops without touching the transport.
+fn clipboard_paste_sequence(held_modifiers: &std::collections::BTreeSet<u32>) -> Vec<(u32, bool)> {
+    // Preserve the actor's actual forwarded state at execution time, not the
+    // physical state when Ctrl+V was initially intercepted before its ACK wait.
+    held_modifiers
+        .iter()
+        .map(|code| (*code, false))
+        .chain([(0x1d, true), (0x2f, true), (0x2f, false), (0x1d, false)])
+        .chain(held_modifiers.iter().map(|code| (*code, true)))
+        .collect()
+}
+
 fn encode_keyboard_fastpath_event(key_code: u32, is_down: bool) -> Option<FastPathInputEvent> {
     use ironrdp_pdu::input::fast_path::KeyboardFlags;
 
@@ -2281,6 +2363,39 @@ impl Default for SessionManager {
 /// sleeps, no network I/O and no user-data access.
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delayed_clipboard_paste_preserves_intervening_shortcut_modifiers() {
+        use std::collections::BTreeSet;
+        // Ctrl+V releases initial Ctrl while waiting. An intervening Ctrl+C
+        // re-presses it before ACK; the delayed paste must preserve that state.
+        for held in [
+            BTreeSet::from([0x1d]),
+            BTreeSet::from([0x2a]),
+            BTreeSet::from([0x11d, 0x36]),
+            BTreeSet::new(),
+        ] {
+            let mut remote = held.clone();
+            let sequence = super::clipboard_paste_sequence(&held);
+            for (code, down) in sequence {
+                if down {
+                    remote.insert(code);
+                } else {
+                    remote.remove(&code);
+                }
+                if code == 0x2f && down {
+                    assert_eq!(
+                        remote,
+                        BTreeSet::from([0x1d, 0x2f]),
+                        "paste must not inherit Shift/Alt/Windows modifiers"
+                    );
+                }
+            }
+            assert_eq!(
+                remote, held,
+                "next physical shortcut must see the same modifiers, even before IPC reply"
+            );
+        }
+    }
     use super::*;
     use crate::rdp::client::ConnectionOutcome;
     use std::sync::atomic::{AtomicUsize, Ordering};

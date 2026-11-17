@@ -1,5 +1,5 @@
 import { Sun, Moon, MonitorCog } from 'lucide-react';
-import { useEffect, useMemo, useReducer } from 'react';
+import { useEffect, useMemo, useReducer, useState } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -8,6 +8,7 @@ import { useTheme } from '../../hooks/useTheme';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
+import { ClipboardStatus } from './ClipboardStatus';
 import { buildStatusBarText, createStatusBarHoverReveal, sessionCountLabel, statusBarIndicator, liveSessionCount, shouldAutoHideStatusBar, statusBarRevealReducer, statusBarRowHeight } from '../../lib/status-bar';
 
 export function StatusBar() {
@@ -26,11 +27,12 @@ export function StatusBar() {
   const statusText = buildStatusBarText(activeSession ?? null, connection);
   const autoHideInSession = shouldAutoHideStatusBar(autoHide, pathname, sessions.values(), connections);
   const [reveal, dispatchReveal] = useReducer(statusBarRevealReducer, { pointer: false, focus: false });
+  const [clipboardOpen, setClipboardOpen] = useState(false);
   const hover = useMemo(() => createStatusBarHoverReveal(dispatchReveal), [dispatchReveal]);
   // A new route or visibility mode must not inherit a pending pointer reveal.
   // leave() remains reusable after React StrictMode's setup/cleanup rehearsal.
-  useEffect(() => () => hover.leave(), [hover, autoHideInSession, pathname]);
-  const rowHeight = statusBarRowHeight(autoHideInSession, reveal);
+  useEffect(() => () => { hover.leave(); setClipboardOpen(false); }, [hover, autoHideInSession, pathname, activeSession?.status]);
+  const rowHeight = statusBarRowHeight(autoHideInSession, { ...reveal, focus: reveal.focus || clipboardOpen });
 
   return (
     <div id={autoHideInSession ? 'status-bar-focus-target' : undefined} role="region" aria-label="Connection status bar" aria-keyshortcuts={autoHideInSession ? 'Control+Alt+Shift+S' : undefined} tabIndex={autoHideInSession ? -1 : undefined}
@@ -72,6 +74,7 @@ export function StatusBar() {
       <Separator orientation="vertical" className="h-3.5" />
 
       {/* Right: theme toggle */}
+      <ClipboardStatus onOpenChange={setClipboardOpen} />
       <Button
         variant="ghost"
         size="xs"

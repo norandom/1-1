@@ -32,8 +32,22 @@ pub enum SessionCommand {
         width: u32,
         height: u32,
     },
+    // Legacy actor characterization seam; public IPC uses acknowledged ClipboardSync.
+    #[cfg_attr(not(test), allow(dead_code))]
     ClipboardWrite {
         text: String,
+    },
+    ClipboardSync {
+        epoch: String,
+        text: Option<String>,
+        reply: crate::rdp::clipboard::ClipboardReply,
+    },
+    ClipboardContext {
+        reply: tokio::sync::oneshot::Sender<crate::rdp::clipboard::ClipboardContext>,
+    },
+    ClipboardPaste {
+        epoch: String,
+        reply: crate::rdp::clipboard::ClipboardReply,
     },
     Disconnect,
     /// Task 5.3 (Req 12.2/12.10): force a mock-session connection loss so
@@ -309,7 +323,7 @@ pub async fn attempt_rdp_connection(
         .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
     let mut connector = ClientConnector::new(connector_config, client_addr);
     connector.attach_static_channel(ironrdp_cliprdr::CliprdrClient::new(Box::new(
-        SessionClipboardBackend::new(),
+        SessionClipboardBackend::with_direction(config.host_profile.clipboard_direction),
     )));
     // Task 9.3 (Req 9.6/9.7): the session's shared codec-error policy —
     // the EGFX handler constructed by the attach below reports

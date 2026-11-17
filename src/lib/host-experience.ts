@@ -1,4 +1,8 @@
 import type { HostProfile } from '../types';
+export const CLIPBOARD_OPTIONS: readonly [HostProfile['clipboardDirection'], string][] = [
+  ['bidirectional', 'Both directions'], ['localToRemote', 'Local to remote'], ['remoteToLocal', 'Remote to local'], ['off', 'Off'],
+];
+export const CLIPBOARD_HELP = 'Clipboard direction applies on reconnect. Resync in the status bar uses the active session policy.';
 
 export const VISUAL_OPTIONS = [
   ['fontSmoothing', 'Font smoothing'],

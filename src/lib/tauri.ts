@@ -189,6 +189,15 @@ export async function importSshConfig(
 }
 
 // ── Clipboard ────────────────────────────────────────────────────────
+export async function clipboardPaste(sessionId: string, epoch: string): Promise<void> {
+  await invoke('clipboard_paste', { sessionId, epoch });
+}
+export async function clipboardSync(sessionId: string, epoch: string, text: string | null): Promise<void> {
+  await invoke('clipboard_sync', { sessionId, epoch, text });
+}
+export async function clipboardContext(sessionId: string): Promise<{epoch: string; direction: import('../types').HostProfile['clipboardDirection']}> {
+  return invoke('clipboard_context', { sessionId });
+}
 
 export async function clipboardWrite(sessionId: string, text: string): Promise<void> {
   await invoke('clipboard_write', { sessionId, text });

@@ -1,6 +1,7 @@
 import type { ConnectionConfig, HostProfile } from '../types';
 
 export const DEFAULT_HOST_PROFILE: Readonly<HostProfile> = Object.freeze({
+  clipboardDirection: 'bidirectional',
   displayMode: 'fit', resizeMode: 'dynamic', wallpaper: false,
   fullWindowDrag: true, menuAnimations: false, themes: false,
   cursorShadow: false, cursorBlinking: true, desktopComposition: false,
@@ -11,6 +12,7 @@ export const DEFAULT_HOST_PROFILE: Readonly<HostProfile> = Object.freeze({
 /** Defaults missing legacy fields without losing explicit false preferences. */
 export function normalizeHostProfile(profile?: Partial<HostProfile> | null): HostProfile {
   return {
+    clipboardDirection: profile?.clipboardDirection ?? DEFAULT_HOST_PROFILE.clipboardDirection,
     colorDepth: profile?.colorDepth ?? DEFAULT_HOST_PROFILE.colorDepth,
     bulkCompression: profile?.bulkCompression ?? DEFAULT_HOST_PROFILE.bulkCompression,
     displayMode: profile?.displayMode ?? DEFAULT_HOST_PROFILE.displayMode,

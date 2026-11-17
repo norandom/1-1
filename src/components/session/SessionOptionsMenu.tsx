@@ -4,7 +4,7 @@ import type { ConnectionConfig, HostProfile } from '../../types';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { selectIsWriteBlocked, useLibraryStore } from '../../stores/libraryStore';
 import { normalizeHostProfile } from '../../lib/host-profile';
-import { COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset } from '../../lib/host-experience';
+import { CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset } from '../../lib/host-experience';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuPortal, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuCheckboxItem, DropdownMenuItem } from '@/components/ui/dropdown-menu';
 
@@ -36,6 +36,17 @@ export function SessionOptionsMenu({ connection }: { connection: ConnectionConfi
         <DropdownMenuLabel>Saved settings for {connection.name}</DropdownMenuLabel>
         {blocked && <p role="alert" className="px-2 py-1 text-xs text-destructive">Settings are read-only during storage recovery.</p>}
         {saving && <p role="status" className="px-2 py-1 text-xs">Saving…</p>}
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>Clipboard</DropdownMenuSubTrigger>
+          <DropdownMenuPortal>
+            <DropdownMenuSubContent className="w-72" data-local-input onEscapeKeyDown={(event) => event.stopPropagation()}>
+              <DropdownMenuRadioGroup value={profile.clipboardDirection} onValueChange={(clipboardDirection) => void save({ hostProfile: { clipboardDirection: clipboardDirection as HostProfile['clipboardDirection'] } })}>
+                {CLIPBOARD_OPTIONS.map(([value, label]) => <DropdownMenuRadioItem key={value} value={value} disabled={disabled} onSelect={(event) => event.preventDefault()}>{label}</DropdownMenuRadioItem>)}
+              </DropdownMenuRadioGroup>
+              <p className="px-2 py-1 text-xs text-muted-foreground">{CLIPBOARD_HELP}</p>
+            </DropdownMenuSubContent>
+          </DropdownMenuPortal>
+        </DropdownMenuSub>
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>Display</DropdownMenuSubTrigger>
           <DropdownMenuPortal>

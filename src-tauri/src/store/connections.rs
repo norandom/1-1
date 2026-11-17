@@ -72,9 +72,28 @@ pub enum BulkCompression {
     Rdp61,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClipboardDirection {
+    Off,
+    #[default]
+    Bidirectional,
+    LocalToRemote,
+    RemoteToLocal,
+}
+impl ClipboardDirection {
+    pub fn sends(self) -> bool {
+        matches!(self, Self::Bidirectional | Self::LocalToRemote)
+    }
+    pub fn receives(self) -> bool {
+        matches!(self, Self::Bidirectional | Self::RemoteToLocal)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HostProfile {
+    pub clipboard_direction: ClipboardDirection,
     pub color_depth: ColorDepth,
     pub bulk_compression: BulkCompression,
     pub display_mode: DisplayMode,
@@ -91,6 +110,7 @@ pub struct HostProfile {
 impl Default for HostProfile {
     fn default() -> Self {
         Self {
+            clipboard_direction: ClipboardDirection::default(),
             color_depth: ColorDepth::default(),
             bulk_compression: BulkCompression::default(),
             display_mode: DisplayMode::Fit,

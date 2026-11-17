@@ -1,5 +1,5 @@
 import type { HostProfile } from '../../types';
-import { COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
+import { CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
 import { Switch } from '@/components/ui/switch';
 
 interface Props {
@@ -39,6 +39,15 @@ export function HostProfileFields({ profile, fontSmoothing, onChange }: Props) {
         </select>
       </label>
       <p id="compression-help" className="text-xs text-muted-foreground">{COMPRESSION_HELP}</p>
+    </fieldset>
+    <fieldset className="grid gap-2">
+      <legend className="mb-2 text-sm font-medium">Clipboard</legend>
+      <label className="flex items-center justify-between gap-3 text-sm">Direction
+        <select className={selectClass} aria-describedby="clipboard-direction-help" value={profile.clipboardDirection} onChange={(e) => onChange({ ...profile, clipboardDirection: e.target.value as HostProfile['clipboardDirection'] }, fontSmoothing)}>
+          {CLIPBOARD_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select>
+      </label>
+      <p id="clipboard-direction-help" className="text-xs text-muted-foreground">{CLIPBOARD_HELP}</p>
     </fieldset>
     <details className="rounded border p-3">
       <summary className="cursor-pointer text-sm font-medium">Visual effects and connection</summary>

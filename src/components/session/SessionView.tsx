@@ -67,7 +67,7 @@ function SessionContent() {
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const resizeSchedulerRef = useRef<ResizeScheduler | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
-  useClipboard({ sessionId });
+  useClipboard({ sessionId, status });
   const sessionResolution = useSessionStore((s) =>
     sessionId ? s.sessions.get(sessionId) : null
   );

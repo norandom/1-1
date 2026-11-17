@@ -29,8 +29,11 @@ export function subscribeCanvasKeyboard(
   statusBar: (EventTarget & { focus(): void }) | null = null,
 ): () => void {
   const forwardedKeys = new Set<string>();
-  const releaseKeys = () => releaseForwardedKeys(forwardedKeys, (code) =>
-    onKeyUp(new KeyboardEvent('keyup', { code })));
+  let reconcileModifiers = false;
+  const releaseKeys = () => {
+    reconcileModifiers = true;
+    releaseForwardedKeys(forwardedKeys, (code) => onKeyUp(new KeyboardEvent('keyup', { code })));
+  };
   const handleDown = (event: Event) => {
     const e = event as KeyboardEvent;
     if (statusBar && isStatusBarShortcut(e)) {
@@ -49,6 +52,18 @@ export function subscribeCanvasKeyboard(
       select?.focus();
       return;
     }
+    // A local paste releases remote modifiers while awaiting clipboard ACK.
+    // Reconcile still-held physical modifiers before the next remote key.
+    for (const [held, left, right] of [
+      [e.ctrlKey, 'ControlLeft', 'ControlRight'], [e.shiftKey, 'ShiftLeft', 'ShiftRight'],
+      [e.altKey, 'AltLeft', 'AltRight'], [e.metaKey, 'MetaLeft', 'MetaRight'],
+    ] as const) {
+      if (reconcileModifiers && held && e.code !== left && e.code !== right && !forwardedKeys.has(left) && !forwardedKeys.has(right)) {
+        forwardedKeys.add(left);
+        onKeyDown(new KeyboardEvent('keydown', { code: left }));
+      }
+    }
+    reconcileModifiers = false;
     e.preventDefault();
     forwardedKeys.add(e.code);
     onKeyDown(e);
@@ -73,6 +88,7 @@ export function subscribeCanvasKeyboard(
   target.addEventListener('pointerover', enterLocal, true);
   target.addEventListener('focusin', enterLocal, true);
   target.addEventListener('blur', releaseKeys);
+  target.addEventListener('rdp-release-keys', releaseKeys);
 
   return () => {
     target.removeEventListener('keydown', handleDown);
@@ -82,6 +98,7 @@ export function subscribeCanvasKeyboard(
     target.removeEventListener('pointerover', enterLocal, true);
     target.removeEventListener('focusin', enterLocal, true);
     target.removeEventListener('blur', releaseKeys);
+    target.removeEventListener('rdp-release-keys', releaseKeys);
     releaseKeys();
   };
 }

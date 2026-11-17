@@ -178,6 +178,9 @@ pub fn run() {
             // Clipboard commands
             commands::clipboard::clipboard_write,
             commands::clipboard::clipboard_read,
+            commands::clipboard::clipboard_sync,
+            commands::clipboard::clipboard_context,
+            commands::clipboard::clipboard_paste,
             // Library commands (tasks 6.4/6.5/7.2/7.3, Req 10.1/10.2/10.3/10.5/10.8/10.15/10.16/10.17/10.18)
             commands::library::create_library,
             commands::library::rename_library,
