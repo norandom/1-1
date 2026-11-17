@@ -57,7 +57,7 @@ describe('Rust session error wire integration', () => {
     expect(session.lastError).toBe(reason);
     expect(connectionStatusText(statusesFromSessions(sessions.values()).failed)).toBe('Error');
     expect(buildSessionTabs(sessions.values(), {})[0].statusText).toBe('Error');
-    expect(buildStatusBarText(session)).toBe('Connection error - failed');
+    expect(buildStatusBarText(session)).toBe('Connection error - Unknown host');
     expect(statusBarIndicator(session)).toEqual({ label: 'Error', color: 'var(--color-danger)', pulse: false });
     expect(liveSessionCount(sessions.values())).toBe(0);
     const noop = () => {};

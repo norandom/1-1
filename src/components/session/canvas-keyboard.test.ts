@@ -103,7 +103,7 @@ it.each(['BUTTON', 'A', 'SUMMARY'])('keeps local %s keys out of the remote sessi
   cleanup();
 });
 
-it('releases remote modifiers on blur and local pointer entry before focus changes', () => {
+it.each(['pointerdown', 'pointerover'])('releases remote modifiers on blur and local %s before focus changes', (eventType) => {
   vi.stubGlobal('KeyboardEvent', Key);
   const target = new EventTarget();
   const down = vi.fn();
@@ -114,7 +114,7 @@ it('releases remote modifiers on blur and local pointer entry before focus chang
   expect(up.mock.calls.map(([e]) => e.code)).toEqual(['ControlLeft']);
   target.dispatchEvent(new Key('keydown', { code: 'AltLeft' }));
   Object.assign(target, { tagName: 'BUTTON' });
-  target.dispatchEvent(new Event('pointerdown'));
+  target.dispatchEvent(new Event(eventType));
   expect(up.mock.calls.map(([e]) => e.code)).toEqual(['ControlLeft', 'AltLeft']);
   cleanup();
 });

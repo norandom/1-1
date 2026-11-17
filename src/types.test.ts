@@ -71,6 +71,7 @@ describe('Type definitions', () => {
       theme: 'dark',
       defaultPort: 3389,
       autoReconnect: true,
+      autoHideStatusBar: false,
       showPerformanceHud: false,
       sidebarCollapsed: false,
       defaultResolution: '1920x1080',

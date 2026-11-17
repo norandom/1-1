@@ -5,6 +5,8 @@ import * as tauri from '../lib/tauri';
 interface SettingsState {
   settings: AppSettings;
   isLoading: boolean;
+  isSaving: boolean;
+  error: string | null;
   fetchSettings: () => Promise<void>;
   updateSettings: (settings: Partial<AppSettings>) => Promise<void>;
 }
@@ -13,6 +15,7 @@ export const defaultSettings: AppSettings = {
   theme: 'system',
   defaultPort: 3389,
   autoReconnect: true,
+  autoHideStatusBar: false,
   showPerformanceHud: false,
   sidebarCollapsed: false,
   defaultResolution: '1920x1080',
@@ -25,27 +28,38 @@ export const defaultSettings: AppSettings = {
   connectionTimeout: 30000,
 };
 
-export const useSettingsStore = create<SettingsState>((set, get) => ({
-  settings: defaultSettings,
-  isLoading: false,
+export const useSettingsStore = create<SettingsState>((set) => {
+  let pending = Promise.resolve();
+  return {
+    settings: defaultSettings,
+    isLoading: false,
+    isSaving: false,
+    error: null,
 
-  fetchSettings: async () => {
-    set({ isLoading: true });
-    try {
-      const settings = await tauri.getSettings();
-      set({ settings, isLoading: false });
-    } catch {
-      set({ isLoading: false });
-    }
-  },
+    fetchSettings: async () => {
+      set({ isLoading: true });
+      try {
+        const settings = await tauri.getSettings();
+        set({ settings: { ...defaultSettings, ...settings }, isLoading: false });
+      } catch {
+        set({ isLoading: false });
+      }
+    },
 
-  updateSettings: async (partial) => {
-    const merged = { ...get().settings, ...partial };
-    set({ settings: merged });
-    try {
-      await tauri.updateSettings(partial);
-    } catch (e) {
-      console.error('Failed to save settings:', e);
-    }
-  },
-}));
+    updateSettings: async (partial) => {
+      set({ isSaving: true, error: null });
+      const saving = pending.then(async () => {
+        try {
+          const settings = await tauri.updateSettings(partial);
+          set({ settings: { ...defaultSettings, ...settings }, error: null });
+        } catch (e) {
+          set({ error: `Settings not saved: ${e instanceof Error ? e.message : String(e)}` });
+          console.error('Failed to save settings:', e);
+        }
+      });
+      pending = saving;
+      await saving;
+      if (pending === saving) set({ isSaving: false });
+    },
+  };
+});

@@ -1,7 +1,13 @@
-import type { SessionInfo } from '../types';
+import type { ConnectionConfig, SessionInfo } from '../types';
 
 import { SESSION_STATUS_TEXT } from './ux-tree-states';
-import { isLiveSessionStatus } from './session-route';
+import { isLiveSessionStatus, resolveSessionView, sessionRouteIdFromPath } from './session-route';
+
+export function shouldAutoHideStatusBar(enabled: boolean, pathname: string, sessions: Iterable<SessionInfo>, connections: Pick<ConnectionConfig, 'id'>[]): boolean {
+  if (!enabled) return false;
+  const id = sessionRouteIdFromPath(pathname);
+  return !!id && resolveSessionView(id, sessions, (connectionId) => connections.some((c) => c.id === connectionId)).kind !== 'stale';
+}
 
 export type StatusBarSession = Pick<
   SessionInfo,
@@ -9,16 +15,18 @@ export type StatusBarSession = Pick<
 >;
 
 export function buildStatusBarText(
-  activeSession: StatusBarSession | null
+  activeSession: StatusBarSession | null,
+  connection?: Pick<ConnectionConfig, 'name' | 'host'>,
 ): string {
   if (!activeSession) return 'No active connection';
-  const { status, connectionId, width, height } = activeSession;
+  const { status, width, height } = activeSession;
+  const hostLabel = connection?.name.trim() || connection?.host.trim() || 'Unknown host';
   switch (status) {
-    case 'connected': return `Connected to ${connectionId} - ${width}x${height}`;
-    case 'connecting': return `Connecting to ${connectionId}`;
-    case 'reconnecting': return `Reconnecting to ${connectionId}`;
-    case 'error': return `Connection error - ${connectionId}`;
-    case 'disconnected': return `Disconnected - ${connectionId}`;
+    case 'connected': return `Connected to ${hostLabel} - ${width}x${height}`;
+    case 'connecting': return `Connecting to ${hostLabel}`;
+    case 'reconnecting': return `Reconnecting to ${hostLabel}`;
+    case 'error': return `Connection error - ${hostLabel}`;
+    case 'disconnected': return `Disconnected - ${hostLabel}`;
   }
 }
 

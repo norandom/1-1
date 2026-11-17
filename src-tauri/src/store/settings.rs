@@ -13,6 +13,8 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub auto_reconnect: bool,
     #[serde(default)]
+    pub auto_hide_status_bar: bool,
+    #[serde(default)]
     pub show_performance_hud: bool,
     #[serde(default)]
     pub sidebar_collapsed: bool,
@@ -66,6 +68,7 @@ impl Default for AppSettings {
             theme: default_theme(),
             default_port: default_port(),
             auto_reconnect: true,
+            auto_hide_status_bar: false,
             show_performance_hud: false,
             sidebar_collapsed: false,
             default_resolution: default_resolution(),
@@ -86,6 +89,7 @@ pub struct AppSettingsPatch {
     pub theme: Option<String>,
     pub default_port: Option<u16>,
     pub auto_reconnect: Option<bool>,
+    pub auto_hide_status_bar: Option<bool>,
     pub show_performance_hud: Option<bool>,
     pub sidebar_collapsed: Option<bool>,
     pub default_resolution: Option<String>,
@@ -140,7 +144,8 @@ impl SettingsStore {
     /// settings.json. The serde defaults stay the file-load contract for
     /// fresh installs and settings.json files from older builds.
     pub async fn apply(&self, patch: AppSettingsPatch) -> Result<AppSettings, String> {
-        let mut settings = self.settings.lock().await;
+        let mut persisted = self.settings.lock().await;
+        let mut settings = persisted.clone();
         if let Some(theme) = patch.theme {
             settings.theme = theme;
         }
@@ -149,6 +154,9 @@ impl SettingsStore {
         }
         if let Some(auto_reconnect) = patch.auto_reconnect {
             settings.auto_reconnect = auto_reconnect;
+        }
+        if let Some(auto_hide_status_bar) = patch.auto_hide_status_bar {
+            settings.auto_hide_status_bar = auto_hide_status_bar;
         }
         if let Some(show_performance_hud) = patch.show_performance_hud {
             settings.show_performance_hud = show_performance_hud;
@@ -172,8 +180,8 @@ impl SettingsStore {
             settings.connection_timeout = connection_timeout;
         }
         let merged = settings.clone();
-        drop(settings);
         self.save(&merged).await?;
+        *persisted = merged.clone();
         Ok(merged)
     }
 
@@ -196,6 +204,51 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn status_bar_preference_persists_true_false_and_legacy_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.json"), r#"{"theme":"dark"}"#).unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf());
+        assert!(!store.get().await.auto_hide_status_bar);
+        for enabled in [true, false] {
+            let patch =
+                serde_json::from_value(serde_json::json!({"autoHideStatusBar": enabled})).unwrap();
+            assert_eq!(
+                store.apply(patch).await.unwrap().auto_hide_status_bar,
+                enabled
+            );
+            store
+                .apply(AppSettingsPatch {
+                    quality: Some(42),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let reopened = SettingsStore::new(dir.path().to_path_buf());
+            assert_eq!(reopened.get().await.auto_hide_status_bar, enabled);
+            assert_eq!(reopened.get().await.theme, "dark");
+        }
+    }
+
+    #[tokio::test]
+    async fn status_bar_failed_save_does_not_publish_unsaved_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf());
+        std::fs::create_dir(dir.path().join("settings.json")).unwrap();
+        assert!(
+            store
+                .apply(AppSettingsPatch {
+                    auto_hide_status_bar: Some(true),
+                    theme: Some("dark".into()),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+        );
+        assert!(!store.get().await.auto_hide_status_bar);
+        assert_eq!(store.get().await.theme, "system");
+    }
 
     // ---- Task 3.1 characterization tests (persistence baseline, Req 6.1). ----
 

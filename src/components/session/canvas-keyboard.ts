@@ -62,6 +62,7 @@ export function subscribeCanvasKeyboard(
   select?.addEventListener('focus', releaseKeys);
   const enterLocal = (event: Event) => { if (isLocalInputTarget(event.target)) releaseKeys(); };
   target.addEventListener('pointerdown', enterLocal, true);
+  target.addEventListener('pointerover', enterLocal, true);
   target.addEventListener('focusin', enterLocal, true);
   target.addEventListener('blur', releaseKeys);
 
@@ -70,6 +71,7 @@ export function subscribeCanvasKeyboard(
     target.removeEventListener('keyup', handleUp);
     select?.removeEventListener('focus', releaseKeys);
     target.removeEventListener('pointerdown', enterLocal, true);
+    target.removeEventListener('pointerover', enterLocal, true);
     target.removeEventListener('focusin', enterLocal, true);
     target.removeEventListener('blur', releaseKeys);
     releaseKeys();

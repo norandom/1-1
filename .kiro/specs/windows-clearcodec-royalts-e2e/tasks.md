@@ -2,8 +2,8 @@
 
 This is the approved implementation plan; phase approvals are recorded in spec.json.
 The original plan has 49 of 61 subtasks completed. Three explicit harness
-prerequisites and three user-requested professional-control tasks were added during
-integration. The three professional-control tasks are complete at the implementation boundary; harness additions and real-server acceptance remain open.
+prerequisites and four user-requested professional-control tasks were added during
+integration. The four professional-control tasks are complete at the implementation boundary; harness additions and real-server acceptance remain open.
 Current product name is 1-1, pronounced zero. The latest delivery focus is the
 per-host profile, compact session menu and viewport-sized initial connection.
 
@@ -300,6 +300,8 @@ User-directed priority: finish the professional controls below before resuming t
 - [x] 11.0e Move display controls into compact accessible session menu and expose per-host options in connection settings. No extra display row, saved local fit/native and dynamic/fixed behavior, presets, next-connect help, local menu input isolation and visible save failures. _Boundary: Host settings and session UI. Depends: 11.0d. Requirements: 14.5,14.7,14.8._
 - [x] 11.0f Size initial dynamic connections from the actual viewport through existing IPC. Correct DPR/bounds, fixed-mode preservation, no transient size persistence, first-connect/restart/navigation regression coverage. _Boundary: Session viewport and connection admission. Depends: 11.0e. Requirements: 3.3,14.9._
 
+- [x] 11.0g Add a persisted status-bar auto-hide setting and readable host labels. Reclaim session height, reveal on bottom-edge hover or keyboard focus as an overlay, preserve viewport size on reveal, and retain normal status display outside sessions. Verify legacy/default/false settings persistence and all lifecycle labels without internal IDs. _Boundary: Application settings and status bar. Requirements: 14.11,14.12._
+
 Release-harness prerequisites (remaining):
 - [ ] 11.0a Establish the shared harness and Windows adapter
   - Prerequisite repair identified on 2026-11-17: the shared harness assumed by 11.1 does not exist. Reuse the approved WebdriverIO/native Windows driver approach, pinned dependencies and lockfile; introduce the shared command/spec directory, isolated app/settings/credential resources, cold-launch UI assertion, bounded teardown and failure artifacts.
@@ -417,3 +419,5 @@ Release-harness prerequisites (remaining):
 - 2026-11-17: 11.0e independently APPROVED after portalling nested menu panels to avoid clipping. Existing document chrome now hosts display/visual/network options; no extra display row. Shared form options, serialized latest-state updates, visible save errors, local input isolation and fixed-resize cancellation verified. Full frontend 503 tests/lint/tsc/Vite pass; portal remediation 14 focused tests/tsc/lint pass. Native visual/keyboard acceptance pending. Carry CSS-to-physical DPR consistency into 11.0f. Evidence: group11/review-menu-*.log.
 
 - 2026-11-17: 11.0f independently APPROVED after repairing child-observer/parent-scheduler ordering on fixed-to-dynamic changes. Initial connect/restart measures stable viewport after pending tab strip, shared initial/ongoing physical sizing applies DPR once, IPC validates transient dynamic overrides without persistence, fixed dimensions retained. Full frontend 516/default Rust306/test-support324 pass (four Rust skips), static/build checks pass; final ordering remediation 31 focused tests/tsc/lint pass. Native test-support executable built. Native acceptance pending. Evidence: group11/review-viewport-*.log.
+
+- 2026-11-17: 11.0g independently APPROVED: persisted default-off session status-bar auto-hide, fixed overlay reveal without viewport changes, readable name/hostname/unknown labels, long-label truncation and local hover/focus input isolation. Settings saves publish confirmed values and retain prior state on failure. Independent 530 frontend / 308 default / 326 test-support Rust tests pass (four Rust skips), static/build checks pass with existing warnings. Native follow-up pending. Menu Escape integration correction independently APPROVED in ef7bd1c (17 focused tests), also awaiting native confirmation. Evidence: group11/review-status-*.log.

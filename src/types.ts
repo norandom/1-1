@@ -78,6 +78,7 @@ export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
   defaultPort: number;
   autoReconnect: boolean;
+  autoHideStatusBar: boolean;
   showPerformanceHud: boolean;
   sidebarCollapsed: boolean;
   defaultResolution: string;

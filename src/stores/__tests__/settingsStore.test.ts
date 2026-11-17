@@ -19,6 +19,7 @@ const BACKEND_DEFAULTS = {
   theme: 'system',
   defaultPort: 3389,
   autoReconnect: true,
+  autoHideStatusBar: false,
   showPerformanceHud: false,
   sidebarCollapsed: false,
   defaultResolution: '1920x1080',
@@ -29,11 +30,12 @@ const BACKEND_DEFAULTS = {
 } as const;
 
 describe('defaultSettings', () => {
-  it('pins the ten frontend defaults', () => {
+  it('pins the frontend defaults', () => {
     expect(defaultSettings).toEqual({
       theme: 'system',
       defaultPort: 3389,
       autoReconnect: true,
+      autoHideStatusBar: false,
       showPerformanceHud: false,
       sidebarCollapsed: false,
       defaultResolution: '1920x1080',
@@ -54,11 +56,43 @@ describe('defaultSettings', () => {
 });
 
 describe('settingsStore', () => {
+  it('defaults a legacy settings response to a visible status bar', async () => {
+    const legacy = { ...defaultSettings };
+    Reflect.deleteProperty(legacy, 'autoHideStatusBar');
+    vi.mocked(tauri.getSettings).mockResolvedValueOnce(legacy);
+    await useSettingsStore.getState().fetchSettings();
+    expect(useSettingsStore.getState().settings.autoHideStatusBar).toBe(false);
+  });
+  it('serializes saves and retains both confirmed patches', async () => {
+    let complete!: (value: typeof defaultSettings) => void;
+    vi.mocked(tauri.updateSettings).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    vi.mocked(tauri.updateSettings).mockResolvedValueOnce({ ...defaultSettings, autoHideStatusBar: true, theme: 'dark' });
+    const first = useSettingsStore.getState().updateSettings({ autoHideStatusBar: true });
+    const second = useSettingsStore.getState().updateSettings({ theme: 'dark' });
+    await Promise.resolve();
+    expect(tauri.updateSettings).toHaveBeenCalledTimes(1);
+    complete({ ...defaultSettings, autoHideStatusBar: true });
+    await Promise.all([first, second]);
+    expect(useSettingsStore.getState().settings).toMatchObject({ autoHideStatusBar: true, theme: 'dark' });
+    expect(useSettingsStore.getState().isSaving).toBe(false);
+  });
+  it('does not publish auto-hide before the backend confirms persistence', async () => {
+    let complete!: (value: typeof defaultSettings) => void;
+    vi.mocked(tauri.updateSettings).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    const saving = useSettingsStore.getState().updateSettings({ autoHideStatusBar: true });
+    await Promise.resolve();
+    expect(useSettingsStore.getState().settings.autoHideStatusBar).toBe(false);
+    complete({ ...defaultSettings, autoHideStatusBar: true });
+    await saving;
+    expect(useSettingsStore.getState().settings.autoHideStatusBar).toBe(true);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     useSettingsStore.setState({
       settings: { ...defaultSettings },
       isLoading: false,
+      isSaving: false,
+      error: null,
     });
   });
 
@@ -81,7 +115,7 @@ describe('settingsStore', () => {
     expect(useSettingsStore.getState().isLoading).toBe(false);
   });
 
-  it('updateSettings merges optimistically and forwards only the partial', async () => {
+  it('updateSettings publishes confirmed settings and forwards only the partial', async () => {
     vi.mocked(tauri.updateSettings).mockResolvedValueOnce({ ...defaultSettings, theme: 'light' });
 
     await useSettingsStore.getState().updateSettings({ theme: 'light' });
@@ -105,13 +139,14 @@ describe('settingsStore', () => {
     expect(tauri.updateSettings).toHaveBeenCalledWith({ sidebarCollapsed: true });
   });
 
-  it('keeps the optimistic merge when the backend save fails (silent divergence)', async () => {
+  it('retains saved settings and surfaces a failed write', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.mocked(tauri.updateSettings).mockRejectedValueOnce(new Error('write failed'));
 
     await useSettingsStore.getState().updateSettings({ quality: 50 });
 
-    expect(useSettingsStore.getState().settings.quality).toBe(50);
+    expect(useSettingsStore.getState().settings.quality).toBe(80);
+    expect(useSettingsStore.getState().error).toContain('write failed');
     expect(consoleSpy).toHaveBeenCalledOnce();
     consoleSpy.mockRestore();
   });

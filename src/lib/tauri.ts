@@ -208,6 +208,7 @@ export async function getSettings(): Promise<AppSettings> {
       theme: 'system',
       defaultPort: 3389,
       autoReconnect: true,
+      autoHideStatusBar: false,
       showPerformanceHud: false,
       sidebarCollapsed: false,
       defaultResolution: '1920x1080',
