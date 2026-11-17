@@ -24,6 +24,14 @@ import {
 
 export function SessionView() {
   const { id } = useParams<{ id: string }>();
+  const connectionId = useSessionStore((s) => s.sessions.get(id ?? '')?.connectionId ?? id);
+  // A new connection owns fresh input/clipboard/controller state. The initial
+  // connection route and its eventual session route intentionally share a key.
+  return <SessionContent key={connectionId} />;
+}
+
+function SessionContent() {
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const connections = useConnectionStore((s) => s.connections);
   const sessions = useSessionStore((s) => s.sessions);
@@ -42,12 +50,13 @@ export function SessionView() {
     subscribeToFrames,
     reportFramePresented,
     connect,
+    restart,
     disconnect,
     cancelReconnect,
     sendKey,
     sendWheel,
     sendMouse,
-  } = useRdpSession();
+  } = useRdpSession(id && sessions.has(id) ? id : undefined);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
@@ -106,26 +115,8 @@ export function SessionView() {
     navigate(urlAction.route, { replace: true });
   }, [resolution, existingForConnection, sessionId, navigate]);
 
-  // Connect / adopt (remediation finding 2; round 2 findings 3+4). The
-  // node-tested `createConnectController` (session-attach.ts) IS this
-  // connect effect's body: `resolveConnectAction` content-guards the
-  // IPC so that on a transitional route the connect fires exactly once
-  // per route arrival / Connect gesture, and after it completes the
-  // store-identity churn from the session-info listener and the 1 Hz
-  // fps interval re-runs the effect but HOLDS — no reconnect loop, no
-  // repeated `update_last_connected` stamping. View resolutions adopt
-  // when this hook does not yet hold the route's session (tab switch /
-  // remount). NOTE (corrected in review): the adopt connect does NOT
-  // re-attach the frame channel — the backend reuse branch returns
-  // before attaching the new channel; frames keep flowing only because
-  // the ORIGINAL connect's channel closure writes into the shared
-  // `frameListenersRef` set in `useRdpSession.ts` — fragile, flagged in
-  // review. `update_last_connected` (commands/session.rs) runs after
-  // `create_session` returns, so EVERY real connect IPC re-stamps
-  // last-connected — fresh connects, Req 11.9 restarts, AND adopt
-  // connects (a tab switch with the hook unattached); it never runs on
-  // the Req 11.8 zero-IPC focus path of selecting an existing live
-  // session's tab.
+  // The session runtime owns channels across view changes. Route attachment
+  // is local; the controller starts fresh sessions or explicit restarts.
   const connectRequest = useSessionStore((s) => s.connectRequest);
   // Round 2 (findings 3+4): the STATEFUL wake-up signal in the connect
   // effect's deps — the in-repo `restartRequest` nonce pattern. When an
@@ -144,14 +135,17 @@ export function SessionView() {
   // order within a commit's flush: ref refresh → (once) controller
   // creation → re-arm → evaluate.
   const connectRef = useRef(connect);
+  const restartRef = useRef(restart);
   const connectControllerRef = useRef<ConnectController | null>(null);
   useEffect(() => {
     connectRef.current = connect;
+    restartRef.current = restart;
   });
   useEffect(() => {
     if (connectControllerRef.current == null) {
       connectControllerRef.current = createConnectController({
         connect: (connectionId) => connectRef.current(connectionId),
+        restart: (connectionId) => restartRef.current(connectionId),
         sessionForConnection: (connectionId) =>
           sessionForConnection(
             useSessionStore.getState().sessions.values(),
@@ -303,6 +297,7 @@ export function SessionView() {
 
         {/* Canvas */}
         <SessionCanvas
+          key={sessionId ?? id}
           subscribeToFrames={subscribeToFrames}
           status={status}
           reconnectAttempts={reconnectAttempts}

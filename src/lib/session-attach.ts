@@ -115,15 +115,8 @@ function toInitiation(
  * anything — without a new gesture a settled-without-session attempt
  * still HOLDS, so persistent failures cannot auto-retry in a loop.
  *
- * View resolutions: attached (including a terminal session — Req 11.9
- * restarts only on an explicit Connect gesture, never on navigation)
- * holds — and that attach guard OUTRANKS any pending gesture;
- * unattached adopts via the idempotent 7.1 admission, which returns
- * the SAME session id. NOTE: the adopt connect does NOT re-attach the
- * frame channel — the backend reuse branch returns before attaching
- * it, and frames keep flowing only through the ORIGINAL connect's
- * channel closure writing into the shared `frameListenersRef` set
- * (useRdpSession.ts) — fragile, flagged in review.
+ * View attachment is local to the session runtime. A terminal session is
+ * restarted only through runImmediate, which uses the explicit restart entry.
  */
 export function resolveConnectAction(
   resolution: SessionViewResolution,
@@ -167,6 +160,8 @@ export interface ConnectControllerDeps {
    * detected via `sessionForConnection` at settle time; a real
    * rejection is tolerated the same way. */
   connect: (connectionId: string) => Promise<void>;
+  /** Explicit user restart; ordinary view attachment never restarts. */
+  restart?: (connectionId: string) => Promise<void>;
   /** Live lookup: the existing session for a connection, if any — the
    * settle-time failure signal. */
   sessionForConnection: (connectionId: string) => SessionInfo | undefined;
@@ -234,8 +229,8 @@ export function createConnectController(
     deps.requestReevaluation();
   };
 
-  const settleAfter = (connectionId: string) => {
-    deps.connect(connectionId)
+  const settleAfter = (connectionId: string, restart = false) => {
+    (restart ? deps.restart ?? deps.connect : deps.connect)(connectionId)
       .catch(() => {})
       .then(() => settle(connectionId));
   };
@@ -279,7 +274,7 @@ export function createConnectController(
     runImmediate(connectionId) {
       if (busy) return;
       busy = true;
-      settleAfter(connectionId);
+      settleAfter(connectionId, true);
     },
     isBusy() {
       return busy;

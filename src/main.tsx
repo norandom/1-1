@@ -6,7 +6,9 @@ import './styles/globals.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter>
+    {/* Session routes and the external session registry must commit together
+        when closing a tab; deferred navigation exposes a stale session route. */}
+    <BrowserRouter unstable_useTransitions={false}>
       <App />
     </BrowserRouter>
   </React.StrictMode>

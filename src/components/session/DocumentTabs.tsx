@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Monitor, Plus, X } from 'lucide-react';
@@ -89,6 +90,8 @@ export function DocumentTabs() {
   };
 
   const handleTabKeyDown = (event: React.KeyboardEvent, tabId: string) => {
+    // Let the nested close button handle its own Enter/Space activation.
+    if (event.target !== event.currentTarget) return;
     // The tab is a div[role="tab"]: activate it on Enter/Space exactly
     // like the native button it replaced.
     if (event.key === 'Enter' || event.key === ' ') {
@@ -114,11 +117,17 @@ export function DocumentTabs() {
     } catch {
       // The backend session may already be gone; the tab still closes.
     }
-    removeSession(sessionId);
-    navigate(closeFocusRoute(focus));
     if (focus.focus === 'adjacent-tab') {
       pendingFocusRef.current = focus.tabId;
-    } else {
+    }
+    // Commit route and registry changes together. Removing the active session
+    // first exposes a stale route and lets SessionView redirect to `/`, racing
+    // the intended adjacent-tab navigation.
+    flushSync(() => {
+      navigate(closeFocusRoute(focus));
+      removeSession(sessionId);
+    });
+    if (focus.focus !== 'adjacent-tab') {
       // Dashboard / start view: hand focus to the main panel.
       requestAnimationFrame(() => document.getElementById('main-panel')?.focus());
     }
@@ -183,7 +192,7 @@ export function DocumentTabs() {
                 size="icon-xs"
                 aria-label={tab.closeControlName}
                 title={tab.closeControlName}
-                tabIndex={-1}
+                tabIndex={tab.tabId === rovingTabId ? 0 : -1}
                 className="h-4 w-4 rounded p-0 hover:bg-[var(--color-surface-3)]"
                 onClick={(e) => {
                   e.stopPropagation();
