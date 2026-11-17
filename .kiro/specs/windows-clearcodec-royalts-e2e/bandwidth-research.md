@@ -48,3 +48,16 @@ Use the same resolution, host, font, content and activity trace: idle desktop, t
 - Progressive differential/refinement behavior: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/219ffb6f-4c86-4dd9-bf13-79b29af9ae99
 - Bitmap cache: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/d1c1540f-9bc7-4344-81e0-3cce6b845f86
 - Upstream implementation: https://github.com/Devolutions/IronRDP ; exact-version code verified locally in configured Cargo registry: ironrdp-session-0.13.0/src/active_stage.rs, ironrdp-connector-0.12.0/src/connection{,_activation}.rs, ironrdp-egfx-0.5.0/src/{cache,client,compositor}.rs. Current repository Cargo.lock is the authority for pinned versions.
+## Frame-rate follow-up — user question 2026-11-17
+
+A local presentation cap (candidate 15/30 FPS) can reduce canvas/GPU work, but incoming RDP decoding and network traffic continue unless the server changes its output. Label it Render FPS, preserve the latest fully composited surface, and send input immediately; do not advertise it as a network cap. Even 15 FPS can add up to roughly 67 ms of presentation scheduling delay, which must be evaluated against responsive coding. No cap is implemented by this research task.
+
+The pinned connector has no verified numeric per-session server-FPS request. EGFX FrameAcknowledge queueDepth is unprocessed bytes, not frames or desired FPS. Upstream currently reports QueueDepth::Unavailable. Microsoft specifies that actual queue information may influence server throttling; fabricated queue lengths or delayed acknowledgments are not a clean rate control and may stall or grow queues. Keep upstream acknowledgments correct.
+
+Windows host-side frame interval configuration exists, but it is host/version-specific and administrative; it is not a portable client preference and this task does not modify remote registry/policy. For actual bandwidth savings prioritize verified server suppression in idle mode, cache reuse and compression, then evaluate host-specific FPS caps separately with measured Rx/Tx and typing latency.
+
+Sources:
+- https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/0241e258-77ef-4a58-b426-5039ed6296ce
+- https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/d64cfae6-f30a-47e7-9655-d019d3d8fb0f
+- https://learn.microsoft.com/en-us/troubleshoot/windows-server/remote/frame-rate-limited-to-30-fps
+- Pinned ironrdp-egfx-0.5.0/src/client.rs handle_end_frame and frame_ack_queue_depth_is_not_a_frame_count.
