@@ -298,3 +298,6 @@ Stage each successful signed installer, its `.sig` and generated `build-info.jso
 Run `node scripts/update-manifest.mjs VERSION ASSET_DIRECTORY OUTPUT_JSON` to create the feed, checking version/target/filename/hash and listing only available signed platforms.
 Upload immutable installer assets to the matching version release first, then publish the verified manifest as `latest.json` on the `preview-channel` prerelease.
 Do not replace a published installer under an existing version. Check its uploaded digest before updating the feed.
+
+The preview workflow must be present on the fork's default branch before its first run. It can also be dispatched manually with an existing version tag; these jobs build artifacts without running non-Windows runtime tests.
+
