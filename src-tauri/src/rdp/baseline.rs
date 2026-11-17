@@ -455,6 +455,50 @@ pub fn median_of(values: &mut [f64]) -> f64 {
 // Harness 1: real-server TLS/NLA smoke (`#[ignore]`)
 // ---------------------------------------------------------------------------
 
+#[derive(serde::Serialize, Debug)]
+struct ResizeObservation {
+    requested: (u16, u16),
+    activation_dimensions: Option<(u16, u16)>,
+    egfx_reset_dimensions: Option<(u16, u16)>,
+    confirmation_source: Option<&'static str>,
+    decoded_dimensions: Option<(u16, u16)>,
+    sent_ms: Option<f64>,
+    confirmed_ms: Option<f64>,
+    status: String,
+}
+
+impl ResizeObservation {
+    fn new(requested: (u16, u16)) -> Self {
+        Self {
+            requested,
+            activation_dimensions: None,
+            egfx_reset_dimensions: None,
+            confirmation_source: None,
+            decoded_dimensions: None,
+            sent_ms: None,
+            confirmed_ms: None,
+            status: "not-attempted".into(),
+        }
+    }
+    fn observe_frame(&mut self, dimensions: (u16, u16), elapsed_ms: f64) {
+        self.decoded_dimensions = Some(dimensions);
+        // A write or cleared surface is not a decoded desktop. Both routes
+        // require actual server dimensions followed by painted frame content.
+        let source = if self.activation_dimensions == Some(self.requested) {
+            Some("reactivation")
+        } else if self.egfx_reset_dimensions == Some(self.requested) {
+            Some("egfx-reset")
+        } else {
+            None
+        };
+        if self.sent_ms.is_some() && source.is_some() && dimensions == self.requested {
+            self.status = "confirmed".into();
+            self.confirmation_source = source;
+            self.confirmed_ms = Some(elapsed_ms);
+        }
+    }
+}
+
 /// Redacted per-host evidence row (design.md L453). Usernames are replaced
 /// by fixed labels; passwords never have a field here at all.
 #[derive(serde::Serialize, Debug)]
@@ -491,6 +535,9 @@ struct HostSmokeReport {
     session_error_first: Option<String>,
     fastpath_mouse_move: Option<String>,
     display_control_resize: Option<String>,
+    /// Unlike the interactive actor, diagnostic graphics evidence excludes cursor composition.
+    software_cursor_composited: bool,
+    resize_observations: Vec<ResizeObservation>,
     graceful_shutdown: Option<String>,
     /// Server-side reaction observed during the bounded post-shutdown drain
     /// (task 4.2): whether the server closed the connection or kept
@@ -1013,6 +1060,8 @@ async fn smoke_host(
         session_error_first: None,
         fastpath_mouse_move: None,
         display_control_resize: None,
+        software_cursor_composited: SMOKE_SOFTWARE_POINTER,
+        resize_observations: Vec::new(),
         graceful_shutdown: None,
         teardown_observation: None,
         teardown_ms: None,
@@ -1198,6 +1247,79 @@ async fn smoke_host(
     report
 }
 
+// Diagnostic-only policy: desktop graphics evidence must not include cursor
+// composition. The interactive actor retains its production pointer settings.
+const SMOKE_SOFTWARE_POINTER: bool = false;
+
+fn smoke_stage_from_result(mut result: ConnectionResult) -> ironrdp_session::ActiveStage {
+    result.pointer_software_rendering = SMOKE_SOFTWARE_POINTER;
+    crate::rdp::client::active_stage_from_connection_result(result)
+}
+
+// The same upstream activation sequence used by the actor; bounded by the
+// caller so a server refusing to reactivate becomes evidence, not a hung smoke.
+async fn smoke_reactivate<SR: ironrdp_tokio::FramedRead, SW: ironrdp_tokio::FramedWrite>(
+    factory: &ironrdp_connector::connection_activation::ConnectionActivationFactory,
+    stage: &mut ironrdp_session::ActiveStage,
+    image: &mut ironrdp_session::image::DecodedImage,
+    reader: &mut ironrdp_tokio::Framed<SR>,
+    writer: &mut ironrdp_tokio::Framed<SW>,
+) -> Result<(u16, u16), String> {
+    use ironrdp_connector::{Sequence, connection_activation::ConnectionActivationState};
+    use ironrdp_tokio::FramedWrite as _;
+    let mut sequence = factory.create();
+    let mut buffer = ironrdp_core::WriteBuf::new();
+    loop {
+        buffer.clear();
+        let written = if sequence.next_pdu_hint().is_some() {
+            let (_, payload) = reader.read_pdu().await.map_err(|e| e.to_string())?;
+            sequence
+                .step(&payload, None, &mut buffer)
+                .map_err(|e| e.to_string())?
+        } else {
+            sequence
+                .step_no_input(&mut buffer)
+                .map_err(|e| e.to_string())?
+        };
+        if let Some(length) = written.size() {
+            writer
+                .write_all(&buffer.filled()[..length])
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        match sequence.connection_activation_state() {
+            ConnectionActivationState::Finalized {
+                desktop_size,
+                share_id,
+                static_channel_chunk_size,
+                enable_server_pointer,
+                ..
+            } => {
+                if !stage.reactivate(
+                    factory.io_channel_id(),
+                    factory.user_channel_id(),
+                    share_id,
+                    enable_server_pointer,
+                    SMOKE_SOFTWARE_POINTER,
+                    static_channel_chunk_size,
+                ) {
+                    return Err("invalid reactivation chunk size".into());
+                }
+                *image = ironrdp_session::image::DecodedImage::new(
+                    ironrdp_graphics::image_processing::PixelFormat::RgbA32,
+                    desktop_size.width,
+                    desktop_size.height,
+                );
+                return Ok((desktop_size.width, desktop_size.height));
+            }
+            ConnectionActivationState::Redirected { .. } => {
+                return Err("server redirected during resize".into());
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn session_layer_checks(
     report: &mut HostSmokeReport,
     connection_result: ironrdp_connector::ConnectionResult,
@@ -1223,7 +1345,8 @@ async fn session_layer_checks(
         connection_result.desktop_size.width,
         connection_result.desktop_size.height,
     );
-    let mut stage = crate::rdp::client::active_stage_from_connection_result(connection_result);
+    let activation_factory = connection_result.activation_factory.clone();
+    let mut stage = smoke_stage_from_result(connection_result);
     let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop_width, desktop_height);
     let (mut reader, mut writer) = ironrdp_tokio::split_tokio_framed(framed);
 
@@ -1236,25 +1359,74 @@ async fn session_layer_checks(
     let mut frames = 0usize;
     let mut first_frame_ms: Option<f64> = None;
     const FIRST_FRAME_BUDGET: Duration = Duration::from_secs(30);
-    const FRAMES_WINDOW: Duration = Duration::from_secs(5);
+    const RESIZE_BUDGET: Duration = Duration::from_secs(15);
+    let shrink = if (desktop_width, desktop_height) == (1280, 720) {
+        (800, 600)
+    } else {
+        (1280, 720)
+    };
+    report.resize_observations = vec![
+        ResizeObservation::new(shrink),
+        ResizeObservation::new((desktop_width, desktop_height)),
+    ];
+    let mut resize_index = 0usize;
+    let mut resize_started = loop_start;
+    let mut read_failure = None;
 
     loop {
-        if loop_start.elapsed() > FIRST_FRAME_BUDGET + FRAMES_WINDOW {
+        if first_frame_ms.is_none() && loop_start.elapsed() > FIRST_FRAME_BUDGET {
             break;
         }
-        let pdu = match tokio::time::timeout(Duration::from_secs(10), reader.read_pdu()).await {
+        if first_frame_ms.is_some() {
+            if resize_index == report.resize_observations.len() {
+                break;
+            }
+            let observation = &mut report.resize_observations[resize_index];
+            if observation.sent_ms.is_none() && stage.display_control_ready() == Some(true) {
+                let (width, height) = observation.requested;
+                match stage.encode_resize(u32::from(width), u32::from(height), None, None) {
+                    Some(Ok(frame)) => match writer.write_all(&frame).await {
+                        Ok(()) => {
+                            observation.sent_ms = Some(loop_start.elapsed().as_secs_f64() * 1000.0);
+                            observation.status = "awaiting-server-confirmation".into();
+                            resize_started = std::time::Instant::now();
+                        }
+                        Err(error) => {
+                            read_failure = Some(format!("resize write failed: {error}"));
+                            break;
+                        }
+                    },
+                    Some(Err(error)) => {
+                        observation.status = format!("encode-failed: {error}");
+                        resize_index += 1;
+                        resize_started = std::time::Instant::now();
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+            if resize_started.elapsed() >= RESIZE_BUDGET {
+                observation.status = if observation.sent_ms.is_some() {
+                    "timeout-awaiting-server-resize-and-frame".into()
+                } else {
+                    "unsupported-or-capabilities-timeout".into()
+                };
+                resize_index += 1;
+                resize_started = std::time::Instant::now();
+                continue;
+            }
+        }
+        let pdu = match tokio::time::timeout(Duration::from_secs(1), reader.read_pdu()).await {
             Ok(Ok(pdu)) => pdu,
-            Ok(Err(e)) => {
-                eprintln!("SMOKE read_pdu error after {frames} frames: {e}");
+            Ok(Err(error)) => {
+                read_failure = Some(format!("connection-lost: {error}"));
                 break;
             }
-            Err(_) => {
-                eprintln!("SMOKE read_pdu timed out after {frames} frames");
-                break;
-            }
+            Err(_) => continue,
         };
         // `received_at: None` preserves the pre-0.13 behavior (the timestamp
         // only feeds upstream's new bandwidth auto-detect measurement).
+        let previous_surface = (image.width(), image.height());
         let outputs = match stage.process(&mut image, pdu.0, &pdu.1, None) {
             Ok(outputs) => outputs,
             Err(e) => {
@@ -1271,7 +1443,19 @@ async fn session_layer_checks(
                 continue;
             }
         };
+        // Upstream ActiveStage follows EGFX ResetGraphics by resizing and
+        // clearing DecodedImage. It emits GraphicsUpdate only when completed
+        // frame regions paint; observation below therefore cannot pass on a
+        // blank reset alone. Fast-path bitmap processing does not resize it.
+        let current_surface = (image.width(), image.height());
+        if current_surface != previous_surface
+            && let Some(observation) = report.resize_observations.get_mut(resize_index)
+            && observation.sent_ms.is_some()
+        {
+            observation.egfx_reset_dimensions = Some(current_surface);
+        }
         let mut got_graphics = false;
+        let mut deactivate = false;
         for out in outputs {
             match out {
                 ActiveStageOutput::GraphicsUpdate(_) => {
@@ -1280,13 +1464,42 @@ async fn session_layer_checks(
                 ActiveStageOutput::ResponseFrame(frame) if !frame.is_empty() => {
                     let _ = writer.write_all(&frame).await;
                 }
+                ActiveStageOutput::DeactivateAll => deactivate = true,
                 _ => {}
             }
+        }
+        if deactivate {
+            let result = tokio::time::timeout(
+                RESIZE_BUDGET,
+                smoke_reactivate(
+                    &activation_factory,
+                    &mut stage,
+                    &mut image,
+                    &mut reader,
+                    &mut writer,
+                ),
+            )
+            .await;
+            match result {
+                Ok(Ok(dimensions)) => {
+                    if let Some(observation) = report.resize_observations.get_mut(resize_index)
+                        && observation.sent_ms.is_some()
+                    {
+                        observation.activation_dimensions = Some(dimensions);
+                    }
+                }
+                result => {
+                    read_failure = Some(format!("reactivation-failed: {result:?}"));
+                    break;
+                }
+            }
+            continue;
         }
         if got_graphics {
             frames += 1;
             if first_frame_ms.is_none() {
                 first_frame_ms = Some(loop_start.elapsed().as_secs_f64() * 1000.0);
+                resize_started = std::time::Instant::now();
                 report.first_frame_ms = Some(connect_start.elapsed().as_secs_f64() * 1000.0);
                 eprintln!(
                     "SMOKE first frame: {:.0} ms after connect start ({frames} window frames)",
@@ -1321,26 +1534,34 @@ async fn session_layer_checks(
                     }
                     Err(e) => report.fastpath_mouse_move = Some(format!("error: {e}")),
                 }
-
-                // Display-control resize probe: the connector never attaches
-                // the DisplayControlClient DVC (session-layer work), so
-                // encode_resize is expected to return None — recorded as
-                // found behavior.
-                report.display_control_resize =
-                    Some(match stage.encode_resize(1280, 720, None, None) {
-                        None => "None (display-control DVC not negotiated by the connector)".into(),
-                        Some(Ok(frame)) => {
-                            let ok = writer.write_all(&frame).await.is_ok();
-                            format!("encoded+sent (write ok: {ok})")
-                        }
-                        Some(Err(e)) => format!("encode error: {e}"),
-                    });
             }
-            if loop_start.elapsed() >= FRAMES_WINDOW || frames >= 150 {
-                break;
+            if let Some(observation) = report.resize_observations.get_mut(resize_index)
+                && observation.sent_ms.is_some()
+            {
+                observation.observe_frame(
+                    (image.width(), image.height()),
+                    loop_start.elapsed().as_secs_f64() * 1000.0,
+                );
+                if observation.status == "confirmed" {
+                    resize_index += 1;
+                    resize_started = std::time::Instant::now();
+                }
             }
         }
     }
+    for observation in report.resize_observations.iter_mut().skip(resize_index) {
+        observation.status = read_failure
+            .clone()
+            .unwrap_or_else(|| "no-initial-frame".into());
+    }
+    report.display_control_resize = Some(
+        report
+            .resize_observations
+            .iter()
+            .map(|o| format!("{}x{}: {}", o.requested.0, o.requested.1, o.status))
+            .collect::<Vec<_>>()
+            .join("; "),
+    );
     report.frames_observed = Some(frames);
     report.frames_window_ms = Some(loop_start.elapsed().as_secs_f64() * 1000.0);
     eprintln!(
@@ -1728,6 +1949,125 @@ mod tests {
     use ironrdp_session::image::DecodedImage;
 
     // --- fixture geometry -------------------------------------------------
+
+    fn assert_pointer_only_cannot_confirm_smoke_resize(reactivated: bool) {
+        use ironrdp_pdu::fast_path::{
+            EncryptionFlags, FastPathHeader, FastPathUpdatePdu, Fragmentation, UpdateCode,
+        };
+        use ironrdp_pdu::pointer::{ColorPointerAttribute, Point16, PointerAttribute};
+        let mut result = synthetic_connection_result(64, 64);
+        result.enable_server_pointer = true;
+        result.pointer_software_rendering = true; // actual interactive configuration
+        let mut stage = smoke_stage_from_result(result);
+        let dimensions = if reactivated { (40, 32) } else { (64, 64) };
+        if reactivated {
+            assert!(stage.reactivate(1003, 1004, 42, true, SMOKE_SOFTWARE_POINTER, 1600));
+        }
+        let mut image = DecodedImage::new(PixelFormat::RgbA32, dimensions.0, dimensions.1);
+        let mut observation = ResizeObservation::new(dimensions);
+        observation.sent_ms = Some(1.0);
+        observation.activation_dimensions = Some(dimensions);
+        let pointer = PointerAttribute {
+            xor_bpp: 24,
+            color_pointer: ColorPointerAttribute {
+                cache_index: 0,
+                hot_spot: Point16 { x: 0, y: 0 },
+                width: 2,
+                height: 2,
+                xor_mask: &[0xff; 12],
+                and_mask: &[0; 4],
+            },
+        };
+        let data = ironrdp_core::encode_vec(&pointer).unwrap();
+        let pdu = FastPathUpdatePdu {
+            fragmentation: Fragmentation::Single,
+            update_code: UpdateCode::NewPointer,
+            compression_flags: None,
+            compression_type: None,
+            data: &data,
+        };
+        let mut wire =
+            ironrdp_core::encode_vec(&FastPathHeader::new(EncryptionFlags::empty(), data.len()))
+                .unwrap();
+        wire.extend(ironrdp_core::encode_vec(&pdu).unwrap());
+        let outputs = stage
+            .process(&mut image, Action::FastPath, &wire, None)
+            .unwrap();
+        assert!(
+            outputs.iter().any(|out| matches!(
+                out,
+                ActiveStageOutput::PointerBitmap(_) | ActiveStageOutput::GraphicsUpdate(_)
+            )),
+            "pointer fixture actually decoded"
+        );
+        for output in outputs {
+            if matches!(output, ActiveStageOutput::GraphicsUpdate(_)) {
+                observation.observe_frame((image.width(), image.height()), 2.0);
+            }
+        }
+        assert_ne!(
+            observation.status, "confirmed",
+            "cursor-only graphics cannot prove resized desktop content"
+        );
+        let rect = full_frame_rect(dimensions.0, dimensions.1);
+        let rows = [0x00, 0xf8].repeat(usize::from(dimensions.0) * usize::from(dimensions.1));
+        for wire in encode_bitmap_update_pdu_16bpp(&[rect], &[&rows]) {
+            for output in stage
+                .process(&mut image, Action::FastPath, &wire, None)
+                .unwrap()
+            {
+                if matches!(output, ActiveStageOutput::GraphicsUpdate(_)) {
+                    observation.observe_frame((image.width(), image.height()), 3.0);
+                }
+            }
+        }
+        assert_eq!(
+            observation.status, "confirmed",
+            "real desktop pixels remain accepted"
+        );
+    }
+
+    #[test]
+    fn initial_smoke_cursor_only_is_not_desktop_evidence() {
+        assert_pointer_only_cannot_confirm_smoke_resize(false);
+    }
+
+    #[test]
+    fn reactivated_smoke_cursor_only_is_not_desktop_evidence() {
+        assert_pointer_only_cannot_confirm_smoke_resize(true);
+    }
+
+    #[test]
+    fn resize_evidence_accepts_egfx_reset_only_after_decoded_frame() {
+        let mut observation = ResizeObservation::new((1280, 720));
+        observation.sent_ms = Some(1.0);
+        observation.egfx_reset_dimensions = Some((1280, 720));
+        assert_ne!(
+            observation.status, "confirmed",
+            "a cleared surface is not a decoded frame"
+        );
+        observation.observe_frame((1920, 1080), 2.0);
+        assert_ne!(observation.status, "confirmed");
+        observation.observe_frame((1280, 720), 3.0);
+        assert_eq!(observation.status, "confirmed");
+        assert_eq!(observation.confirmation_source, Some("egfx-reset"));
+    }
+
+    #[test]
+    fn resize_evidence_requires_sent_request_activation_and_decoded_dimensions() {
+        let mut observation = ResizeObservation::new((1280, 720));
+        observation.observe_frame((1280, 720), 10.0);
+        assert_ne!(observation.status, "confirmed");
+        observation.sent_ms = Some(20.0);
+        observation.observe_frame((1280, 720), 30.0);
+        assert_ne!(observation.status, "confirmed");
+        observation.activation_dimensions = Some((1280, 720));
+        observation.observe_frame((1920, 1080), 40.0);
+        assert_ne!(observation.status, "confirmed");
+        observation.observe_frame((1280, 720), 50.0);
+        assert_eq!(observation.status, "confirmed");
+        assert_eq!(observation.confirmed_ms, Some(50.0));
+    }
 
     #[test]
     fn text_scroll_rects_shape_matches_design_workload() {
@@ -2370,6 +2710,8 @@ mod tests {
             session_error_first: None,
             fastpath_mouse_move: Some("sent-ok".into()),
             display_control_resize: Some("encode_resize-returned-None".into()),
+            software_cursor_composited: SMOKE_SOFTWARE_POINTER,
+            resize_observations: Vec::new(),
             graceful_shutdown: Some("clean".into()),
             teardown_observation: Some(
                 "server closed the connection after the shutdown request (3 pdus drained)".into(),

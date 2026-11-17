@@ -255,6 +255,7 @@ struct SessionActor {
     reconnect_attempts: u32,
     last_error: Option<String>,
     auto_reconnect: bool,
+    pending_resize: Option<(u32, u32)>,
     connect: ConnectFn,
     shared_frame: Option<Arc<SharedFrame>>,
 }
@@ -300,6 +301,7 @@ impl SessionActor {
             reconnect_attempts: 0,
             last_error: None,
             auto_reconnect,
+            pending_resize: None,
             connect,
             shared_frame,
         }
@@ -651,9 +653,7 @@ impl SessionActor {
                     }
                     Some(SessionCommand::Resize { width, height }) => {
                         let (width, height) = normalize_remote_resolution(width, height);
-                        self.width = width;
-                        self.height = height;
-                        self.publish_info();
+                        self.pending_resize = Some((width, height));
                     }
                     Some(SessionCommand::ClipboardWrite { text }) => {
                         self.local_clipboard_text = Some(text);
@@ -848,6 +848,21 @@ impl SessionActor {
         }
 
         'session: loop {
+            if let Some(result) = encode_pending_resize(&mut self.pending_resize, &mut active_stage)
+            {
+                match result {
+                    Ok(frame) => {
+                        if let Err(error) = writer.write_all(&frame).await {
+                            self.last_error = Some(format!("Resize write failed: {error}"));
+                            return DisconnectReason::ConnectionLost;
+                        }
+                    }
+                    Err(error) => {
+                        self.last_error = Some(format!("Resize request failed: {error}"));
+                        self.publish_info();
+                    }
+                }
+            }
             tokio::select! {
                 _ = crate::rdp::frame_delivery::wait_for_stall(self.delivery.deadline()) => self.check_display_stall(),
                 // Read PDUs from the server
@@ -998,6 +1013,11 @@ impl SessionActor {
                         // inside the bounds come from the framebuffer and
                         // accumulated dirty regions are never lost.
                         let surface = (image.width(), image.height());
+                        if (self.width, self.height) != (u32::from(surface.0), u32::from(surface.1)) {
+                            self.width = u32::from(surface.0);
+                            self.height = u32::from(surface.1);
+                            self.publish_info();
+                        }
                         if let Some(plan) =
                             frame_batch::plan_batch(&updated_regions, surface, delivered_surface)
                         {
@@ -1175,23 +1195,7 @@ impl SessionActor {
                         Some(SessionCommand::Resize { width, height }) => {
                             let (width, height) = normalize_remote_resolution(width, height);
                             log::info!("Session {} resize request to {}x{}", self.id, width, height);
-                            self.width = width;
-                            self.height = height;
-                            self.publish_info();
-                            // Try to send a display control resize via the DVC
-                            if let Some(result) = active_stage.encode_resize(width, height, None, None) {
-                                match result {
-                                    Ok(frame) => {
-                                        if let Err(e) = writer.write_all(&frame).await {
-                                            log::warn!("Write error on resize: {}", e);
-                                            return DisconnectReason::ConnectionLost;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::warn!("Failed to encode resize: {}", e);
-                                    }
-                                }
-                            }
+                            self.pending_resize = Some((width, height));
                         }
                         Some(SessionCommand::ClipboardWrite { text }) => {
                             if self
@@ -1301,6 +1305,10 @@ impl SessionActor {
                                 return ReactivationOutcome::Stop(
                                     DisconnectReason::UserDisconnect,
                                 );
+                            }
+                            Some(SessionCommand::Resize { width, height }) => {
+                                self.pending_resize = Some(normalize_remote_resolution(width, height));
+                                continue;
                             }
                             // Input against a deactivated share cannot be
                             // encoded; the window is a handful of PDUs.
@@ -1544,10 +1552,7 @@ impl SessionActor {
                         // Process other commands while waiting
                         Some(SessionCommand::Resize { width, height }) => {
                             let (width, height) = normalize_remote_resolution(width, height);
-                            self.width = width;
-                            self.height = height;
-                            self.frame_buffer = FrameBuffer::generate_mock_frame(width, height);
-                            self.publish_info();
+                            self.pending_resize = Some((width, height));
                         }
                         Some(SessionCommand::ClipboardWrite { text }) => {
                             self.local_clipboard_text = Some(text);
@@ -1562,6 +1567,12 @@ impl SessionActor {
     /// Mock session loop: sends an initial full frame and refreshes on resize.
     /// Returns the reason the loop ended.
     async fn run_mock_frame_loop(&mut self) -> DisconnectReason {
+        if let Some((width, height)) = self.pending_resize.take() {
+            self.width = width;
+            self.height = height;
+            self.frame_buffer = FrameBuffer::generate_mock_frame(width, height);
+            self.publish_info();
+        }
         self.delivery.reset();
         if self.send_mock_frame().is_err() {
             return DisconnectReason::ConnectionLost;
@@ -1681,6 +1692,18 @@ enum ReactivationOutcome {
     /// protocol failure, server redirection, user disconnect). The actor
     /// must unwind with the carried reason.
     Stop(DisconnectReason),
+}
+
+/// Keep one request while the server opens the channel and sends capabilities.
+/// Encoding consumes it only once; server activation/graphics own actual dimensions.
+pub(crate) fn encode_pending_resize(
+    pending: &mut Option<(u32, u32)>,
+    stage: &mut ironrdp_session::ActiveStage,
+) -> Option<ironrdp_session::SessionResult<Vec<u8>>> {
+    let (width, height) = (*pending)?;
+    let result = stage.encode_resize(width, height, None, None)?;
+    *pending = None;
+    Some(result)
 }
 
 fn normalize_remote_resolution(width: u32, height: u32) -> (u32, u32) {
@@ -4703,6 +4726,27 @@ mod tests {
                 // handled by drive_reactivation, not the main actor loop.
                 server_end.write_all(&activation[0]).await.unwrap();
                 settle_actor().await;
+                sender
+                    .send(SessionCommand::Resize {
+                        width: 800,
+                        height: 600,
+                    })
+                    .await
+                    .unwrap();
+                sender
+                    .send(SessionCommand::Resize {
+                        width: 1024,
+                        height: 768,
+                    })
+                    .await
+                    .unwrap();
+                settle_actor().await;
+                let info = manager.get_session_info(&id).await.unwrap();
+                assert_eq!(
+                    (info.width, info.height),
+                    (64, 64),
+                    "requests during activation cannot replace negotiated dimensions"
+                );
                 tokio::time::advance(std::time::Duration::from_secs(5)).await;
                 settle_actor().await;
                 assert!(manager.get_session_info(&id).await.unwrap().display_stalled);
@@ -4865,6 +4909,40 @@ mod tests {
             })
             .await;
             assert_eq!(session.connect_calls.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn resize_without_display_control_keeps_negotiated_dimensions() {
+            let manager = SessionManager::new();
+            let session =
+                create_scripted_real_session(&manager, "resize-unavailable", false, vec![], true)
+                    .await;
+            let mut rx = session.events_rx.clone();
+            wait_for(&session.id, &session.events, &mut rx, |events| {
+                events
+                    .last()
+                    .is_some_and(|(_, v)| status_string(v) == "connected")
+            })
+            .await;
+            session
+                .cmd_tx
+                .send(SessionCommand::Resize {
+                    width: 800,
+                    height: 600,
+                })
+                .await
+                .unwrap();
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            let info = manager.get_session_info(&session.id).await.unwrap();
+            assert_eq!((info.width, info.height), (64, 64));
+            assert!(session.frame_sizes.lock().unwrap().is_empty());
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .unwrap();
         }
 
         /// Boundary preserved (Req 2.3): DeactivateAll followed by a dead
@@ -5221,6 +5299,124 @@ mod tests {
                 gfx_data(&GfxPdu::WireToSurface1(wire), compressor),
                 gfx_data(&GfxPdu::EndFrame(EndFramePdu { frame_id }), compressor),
             ]
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn delayed_display_caps_flush_latest_actor_resize_without_claiming_success() {
+            use ironrdp_displaycontrol::pdu::{DisplayControlCapabilities, DisplayControlPdu};
+            use ironrdp_tokio::FramedWrite as _;
+            let manager = SessionManager::new();
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            let client = StdMutex::new(Some(client));
+            let connect: ConnectFn = Arc::new(move |_, _, _, _| {
+                let client = client.lock().unwrap().take().unwrap();
+                Box::pin(async move {
+                    let mut result = crate::rdp::baseline::synthetic_connection_result(W, H);
+                    let policy = Arc::new(CodecErrorPolicy::new());
+                    crate::rdp::egfx::attach_to_stage_channels(
+                        &mut result.static_channels,
+                        DRDYNVC_CHANNEL_ID,
+                        &policy,
+                    );
+                    ConnectionOutcome::RealSessionLocal {
+                        connection_result: Box::new(result),
+                        framed: Box::new(ironrdp_tokio::TokioFramed::new(client)),
+                        codec_policy: policy,
+                    }
+                })
+            });
+            let (events, mut rx) = RecordedEvents::new();
+            let id = manager
+                .create_session_with_transport(
+                    test_config("delayed-display"),
+                    None,
+                    Channel::new(|_| Ok(())),
+                    SessionEventSink::recorded(events.clone()),
+                    false,
+                    None,
+                    connect,
+                )
+                .await
+                .unwrap();
+            wait_for(&id, &events, &mut rx, |events| {
+                events
+                    .last()
+                    .is_some_and(|(_, v)| status_string(v) == "connected")
+            })
+            .await;
+            let sender = manager.get_cmd_sender(&id).await.unwrap();
+            for (width, height) in [(800, 600), (1024, 768)] {
+                sender
+                    .send(SessionCommand::Resize { width, height })
+                    .await
+                    .unwrap();
+            }
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            let mut server = ironrdp_tokio::TokioFramed::new(server);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), server.read_pdu())
+                    .await
+                    .is_err()
+            );
+            server
+                .write_all(&dvc_frame(&DrdynvcServerPdu::Create(
+                    CreateRequestPdu::new(9, ironrdp_displaycontrol::CHANNEL_NAME.to_owned()),
+                )))
+                .await
+                .unwrap();
+            // DRDYNVC may emit its capability response as well as CREATE.
+            // Drain handshake traffic, proving none is our pending layout.
+            let dimensions: Vec<_> = 1024u32
+                .to_le_bytes()
+                .into_iter()
+                .chain(768u32.to_le_bytes())
+                .collect();
+            let mut responses = 0;
+            while let Ok(response) =
+                tokio::time::timeout(std::time::Duration::from_millis(10), server.read_pdu()).await
+            {
+                let (_, payload) = response.unwrap();
+                assert!(
+                    !payload
+                        .windows(dimensions.len())
+                        .any(|bytes| bytes == dimensions)
+                );
+                responses += 1;
+            }
+            assert!(responses >= 1);
+            let caps =
+                DisplayControlPdu::Caps(DisplayControlCapabilities::new(1, 8192, 8192).unwrap());
+            server
+                .write_all(&dvc_frame(&DrdynvcServerPdu::Data(DrdynvcDataPdu::Data(
+                    DataPdu::new(9, ironrdp_core::encode_vec(&caps).unwrap()),
+                ))))
+                .await
+                .unwrap();
+            let (_, request) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), server.read_pdu())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                request
+                    .windows(dimensions.len())
+                    .any(|bytes| bytes == dimensions)
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), server.read_pdu())
+                    .await
+                    .is_err(),
+                "only the latest pending request is sent once"
+            );
+            let info = manager.get_session_info(&id).await.unwrap();
+            assert_eq!(
+                (info.width, info.height),
+                (u32::from(W), u32::from(H)),
+                "a successful write is not a server-confirmed resize"
+            );
+            sender.send(SessionCommand::Disconnect).await.unwrap();
         }
 
         /// Captured frame packets, in emission order (raw IPC bytes).

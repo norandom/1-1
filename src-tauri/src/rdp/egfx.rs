@@ -91,17 +91,21 @@ impl GraphicsPipelineHandler for DriftGfxHandler {
     }
 }
 
-/// Build the DRDYNVC static-channel client carrying the graphics pipeline DVC
+/// Build the shared DRDYNVC carrying graphics and display-control channels.
 /// (the design's `DrdynvcClient::with_dynamic_channel` attach shape).
-fn drdynvc_with_graphics_pipeline(policy: &Arc<CodecErrorPolicy>) -> DrdynvcClient {
-    DrdynvcClient::new().with_dynamic_channel(GraphicsPipelineClient::new(
-        Box::new(DriftGfxHandler::new(Arc::clone(policy))),
-        // None: no H.264 decoder — AVC-free client (Req 9.5).
-        None,
-    ))
+fn drdynvc_with_display_channels(policy: &Arc<CodecErrorPolicy>) -> DrdynvcClient {
+    DrdynvcClient::new()
+        .with_dynamic_channel(GraphicsPipelineClient::new(
+            Box::new(DriftGfxHandler::new(Arc::clone(policy))),
+            // None: no H.264 decoder — AVC-free client (Req 9.5).
+            None,
+        ))
+        .with_dynamic_channel(ironrdp_displaycontrol::client::DisplayControlClient::new(
+            |_| Ok(Vec::new()),
+        ))
 }
 
-/// Attach the graphics pipeline DVC to the connector (production seam).
+/// Attach graphics and display-control DVCs to the connector (production seam).
 ///
 /// Called by `attempt_rdp_connection` next to the CliprdrClient attachment:
 /// the connector joins the DRDYNVC static channel at MCS, binds the
@@ -115,7 +119,7 @@ pub fn attach_to_connector(
     connector: &mut ironrdp_connector::ClientConnector,
     policy: &Arc<CodecErrorPolicy>,
 ) {
-    connector.attach_static_channel(drdynvc_with_graphics_pipeline(policy));
+    connector.attach_static_channel(drdynvc_with_display_channels(policy));
 }
 
 /// Actor-test seam twin of [`attach_to_connector`] (task 9.2): bind the same
@@ -130,7 +134,7 @@ pub(crate) fn attach_to_stage_channels(
     drdynvc_channel_id: u16,
     policy: &Arc<CodecErrorPolicy>,
 ) {
-    let existing = static_channels.insert(drdynvc_with_graphics_pipeline(policy));
+    let existing = static_channels.insert(drdynvc_with_display_channels(policy));
     debug_assert!(
         existing.is_none(),
         "task 9.2: the EGFX wiring attaches the DRDYNVC channel exactly once"
@@ -618,6 +622,45 @@ mod tests {
                 .is_some(),
             "attach_to_connector lands the DRDYNVC static channel"
         );
+    }
+
+    #[test]
+    fn display_control_is_registered_and_waits_for_server_capabilities() {
+        use ironrdp_displaycontrol::pdu::{DisplayControlCapabilities, DisplayControlPdu};
+        let (mut stage, mut image) = egfx_stage();
+        let mut pending = Some((800, 600));
+        let (mut bare, _) = bare_stage();
+        assert!(crate::rdp::session::encode_pending_resize(&mut pending, &mut bare).is_none());
+        assert_eq!(pending, Some((800, 600)));
+        assert_eq!(stage.display_control_ready(), Some(false));
+        assert!(crate::rdp::session::encode_pending_resize(&mut pending, &mut stage).is_none());
+        pending = Some((1024, 768)); // latest viewport replaces, rather than queues, the old one
+        feed(
+            &mut stage,
+            &mut image,
+            &DrdynvcServerPdu::Create(CreateRequestPdu::new(
+                9,
+                ironrdp_displaycontrol::CHANNEL_NAME.to_owned(),
+            )),
+        );
+        assert_eq!(stage.display_control_ready(), Some(false));
+        let caps = DisplayControlPdu::Caps(DisplayControlCapabilities::new(1, 8192, 8192).unwrap());
+        feed(
+            &mut stage,
+            &mut image,
+            &DrdynvcServerPdu::Data(DrdynvcDataPdu::Data(DataPdu::new(
+                9,
+                ironrdp_core::encode_vec(&caps).unwrap(),
+            ))),
+        );
+        assert_eq!(stage.display_control_ready(), Some(true));
+        let expected = stage.encode_resize(1024, 768, None, None).unwrap().unwrap();
+        let encoded = crate::rdp::session::encode_pending_resize(&mut pending, &mut stage)
+            .unwrap()
+            .unwrap();
+        assert_eq!(encoded, expected);
+        assert!(pending.is_none());
+        assert!(crate::rdp::session::encode_pending_resize(&mut pending, &mut stage).is_none());
     }
 
     #[test]
