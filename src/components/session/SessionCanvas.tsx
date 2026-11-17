@@ -35,6 +35,7 @@ interface Props {
   displayStalled?: boolean;
   onRefreshDisplay?: () => void;
   status: SessionStatus;
+  lastError?: string | null;
   reconnectAttempts?: number;
   maxReconnectAttempts?: number;
   surfaceWidth: number;
@@ -55,6 +56,7 @@ export function SessionCanvas({
   displayStalled = false,
   onRefreshDisplay,
   status,
+  lastError,
   reconnectAttempts = 0,
   maxReconnectAttempts = 5,
   surfaceWidth,
@@ -389,7 +391,7 @@ export function SessionCanvas({
         </p>
         <p className="text-xs text-[var(--color-text-muted)]">
           {status === 'error'
-            ? 'Failed to connect to the remote desktop'
+            ? (lastError ?? 'Failed to connect to the remote desktop')
             : 'The session has been disconnected'}
         </p>
       </div>

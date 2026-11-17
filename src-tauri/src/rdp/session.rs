@@ -612,6 +612,7 @@ impl SessionActor {
     /// builds. The feature check is defense in depth on top of the command
     /// boundary rejection ([`admit_mock_session`]): a production build can
     /// never select mock execution, even from a hand-edited connections.json.
+    #[cfg(feature = "test-support")]
     fn mock_enabled(&self) -> bool {
         self.config.mock && cfg!(feature = "test-support")
     }
@@ -619,17 +620,48 @@ impl SessionActor {
     /// Resolve the next connection outcome. Synthetic sessions short-circuit
     /// to the mock path WITHOUT invoking the connector seam (no network,
     /// Req 12.2); real sessions dial exactly as before.
-    async fn connect_outcome(&self) -> ConnectionOutcome {
+    async fn connect_outcome(&mut self) -> Option<ConnectionOutcome> {
+        #[cfg(feature = "test-support")]
         if self.mock_enabled() {
-            ConnectionOutcome::Failed("synthetic mock session (test-support build)".to_string())
-        } else {
-            (self.connect)(
-                self.config.clone(),
-                self.password.clone(),
-                self.width,
-                self.height,
-            )
-            .await
+            return Some(ConnectionOutcome::Synthetic);
+        }
+        let mut connect = (self.connect)(
+            self.config.clone(),
+            self.password.clone(),
+            self.width,
+            self.height,
+        );
+        // Preserve initial-connect ownership; reconnect cancellation must
+        // remain responsive even while the next handshake is pending.
+        if self.state == SessionState::Connecting {
+            return Some(connect.await);
+        }
+        loop {
+            tokio::select! {
+                // A queued cancellation wins over a concurrently completed dial.
+                biased;
+                cmd = self.cmd_rx.recv() => match cmd {
+                    Some(SessionCommand::Disconnect) | None => {
+                        self.state = SessionState::Disconnected;
+                        self.publish_info();
+                        return None;
+                    }
+                    Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
+                        self.delivery.acknowledge(&receipt, refresh);
+                    }
+                    Some(SessionCommand::Resize { width, height }) => {
+                        let (width, height) = normalize_remote_resolution(width, height);
+                        self.width = width;
+                        self.height = height;
+                        self.publish_info();
+                    }
+                    Some(SessionCommand::ClipboardWrite { text }) => {
+                        self.local_clipboard_text = Some(text);
+                    }
+                    _ => {}
+                },
+                outcome = &mut connect => return Some(outcome),
+            }
         }
     }
 
@@ -638,7 +670,7 @@ impl SessionActor {
         // Publish initial "Connecting" state
         self.publish_info();
 
-        // Step 1: Attempt RDP connection (with graceful fallback to mock)
+        // Step 1: Attempt RDP connection; failures remain visible to the user.
         log::info!(
             "Session {} attempting RDP connection to {}:{}",
             self.id,
@@ -646,7 +678,9 @@ impl SessionActor {
             self.config.port
         );
 
-        let outcome = self.connect_outcome().await;
+        let Some(outcome) = self.connect_outcome().await else {
+            return;
+        };
 
         // Both real-session variants share one actor path; only the framed
         // transport differs (production TLS vs the in-memory test seam).
@@ -673,9 +707,13 @@ impl SessionActor {
                 codec_policy,
             )),
             ConnectionOutcome::Failed(reason) => {
-                log::info!("Session {} using mock frames (reason: {})", self.id, reason);
-                None
+                self.state = SessionState::Error(reason.clone());
+                self.last_error = Some(reason);
+                self.publish_info();
+                return;
             }
+            #[cfg(any(test, feature = "test-support"))]
+            ConnectionOutcome::Synthetic => None,
         };
 
         match real_session {
@@ -714,8 +752,10 @@ impl SessionActor {
             }
         }
 
-        // Actor finished; set state to disconnected
-        self.state = SessionState::Disconnected;
+        // Terminal errors remain observable after the actor has stopped.
+        if !matches!(self.state, SessionState::Error(_)) {
+            self.state = SessionState::Disconnected;
+        }
         self.publish_info();
         log::info!("Session {} actor stopped", self.id);
     }
@@ -1393,7 +1433,9 @@ impl SessionActor {
 
             // Attempt real reconnection (synthetic sessions re-admit the
             // mock loop without dialing — see connect_outcome).
-            let outcome = self.connect_outcome().await;
+            let Some(outcome) = self.connect_outcome().await else {
+                return;
+            };
 
             let real_session = match outcome {
                 ConnectionOutcome::RealSession {
@@ -1414,7 +1456,12 @@ impl SessionActor {
                     SessionTransport::Local(framed),
                     codec_policy,
                 )),
-                ConnectionOutcome::Failed(_reason) => None,
+                ConnectionOutcome::Failed(reason) => {
+                    self.last_error = Some(reason);
+                    continue;
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                ConnectionOutcome::Synthetic => None,
             };
 
             match real_session {
@@ -1445,13 +1492,13 @@ impl SessionActor {
                     }
                 }
                 None => {
-                    // Fall back to mock on reconnect too
+                    // Explicit synthetic session in a test build.
                     self.state = SessionState::Connected;
                     self.reconnect_attempts = 0;
                     self.last_error = None;
                     self.publish_info();
                     log::info!(
-                        "Reconnected session {} (mock fallback) on attempt {}",
+                        "Reconnected session {} (synthetic) on attempt {}",
                         self.id,
                         attempt
                     );
@@ -1470,12 +1517,12 @@ impl SessionActor {
 
         // Exhausted all attempts
         let msg = format!(
-            "Reconnection failed after {} attempts",
-            MAX_RECONNECT_ATTEMPTS
+            "Reconnection failed after {} attempts: {}",
+            MAX_RECONNECT_ATTEMPTS,
+            self.last_error.as_deref().unwrap_or("connection lost")
         );
         self.state = SessionState::Error(msg.clone());
         self.last_error = Some(msg);
-        self.reconnect_attempts = 0;
         self.publish_info();
     }
 
@@ -2220,8 +2267,6 @@ mod tests {
     enum FrameScript {
         Ok,
         Fail,
-        /// Only the send with this 1-based index fails.
-        FailOnly(usize),
     }
 
     struct TestSession {
@@ -2311,7 +2356,6 @@ mod tests {
             let fail = match &script {
                 FrameScript::Ok => false,
                 FrameScript::Fail => true,
-                FrameScript::FailOnly(idx) => n == *idx,
             };
             if fail {
                 return Err(tauri::Error::AssetNotFound(format!(
@@ -2330,7 +2374,7 @@ mod tests {
     fn scripted_connect(calls: Arc<AtomicUsize>) -> ConnectFn {
         Arc::new(move |_config, _password, _width, _height| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { ConnectionOutcome::Failed("scripted connect failure".to_string()) })
+            Box::pin(async { ConnectionOutcome::Synthetic })
         })
     }
 
@@ -2796,8 +2840,175 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_transport_loss_retries_capped_backoff_then_error_state_is_transient_defect_b3_8()
-    {
+    async fn test_initial_failed_connect_has_no_connected_or_frames() {
+        let manager = SessionManager::new();
+        let (events, _) = RecordedEvents::new();
+        let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connect: ConnectFn = Arc::new(move |_, _, _, _| {
+            Box::pin(async { ConnectionOutcome::Failed("TLS authentication rejected".into()) })
+        });
+        let id = manager
+            .create_session_with_transport(
+                test_config("failed-initial"),
+                None,
+                scripted_frame_channel(&manager, FrameScript::Ok, frames.clone()),
+                SessionEventSink::recorded(events.clone()),
+                true,
+                None,
+                connect,
+            )
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !statuses_of(&info_events(&id, &events))
+                .iter()
+                .any(|s| s == "connected")
+        );
+        assert!(frames.lock().unwrap().is_empty());
+        let info = manager.get_session_info(&id).await.unwrap();
+        assert!(matches!(info.status, SessionState::Error(_)));
+        assert_eq!(
+            info.last_error.as_deref(),
+            Some("TLS authentication rejected")
+        );
+        assert!(info.connected_at.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_failed_reconnect_is_bounded_without_false_connected_or_frames() {
+        let manager = SessionManager::new();
+        let (events, _) = RecordedEvents::new();
+        let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dials = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let times = dials.clone();
+        let connect: ConnectFn = Arc::new(move |_, _, _, _| {
+            let mut times = times.lock().unwrap();
+            times.push(tokio::time::Instant::now());
+            let first = times.len() == 1;
+            Box::pin(async move {
+                if first {
+                    let (client, server) = tokio::io::duplex(1024);
+                    drop(server);
+                    ConnectionOutcome::RealSessionLocal {
+                        connection_result: Box::new(
+                            crate::rdp::baseline::synthetic_connection_result(64, 64),
+                        ),
+                        framed: Box::new(ironrdp_tokio::TokioFramed::new(client)),
+                        codec_policy: Arc::new(CodecErrorPolicy::new()),
+                    }
+                } else {
+                    ConnectionOutcome::Failed("NLA rejected on retry".into())
+                }
+            })
+        });
+        let id = manager
+            .create_session_with_transport(
+                test_config("failed-retry"),
+                None,
+                scripted_frame_channel(&manager, FrameScript::Ok, frames.clone()),
+                SessionEventSink::recorded(events.clone()),
+                true,
+                None,
+                connect,
+            )
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        for delay in [2, 4, 8, 16, 30] {
+            tokio::time::advance(std::time::Duration::from_secs(delay)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(
+            statuses_of(&info_events(&id, &events))
+                .iter()
+                .filter(|s| *s == "connected")
+                .count(),
+            1
+        );
+        assert!(frames.lock().unwrap().is_empty());
+        assert_eq!(dials.lock().unwrap().len(), 6);
+        assert_eq!(
+            dials
+                .lock()
+                .unwrap()
+                .windows(2)
+                .map(|p| (p[1] - p[0]).as_secs())
+                .collect::<Vec<_>>(),
+            vec![2, 4, 8, 16, 30]
+        );
+        let info = manager.get_session_info(&id).await.unwrap();
+        assert!(matches!(info.status, SessionState::Error(_)));
+        assert!(info.last_error.unwrap().contains("NLA rejected on retry"));
+        assert_eq!(info.reconnect_attempts, MAX_RECONNECT_ATTEMPTS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_cancel_pending_reconnect_dial_stops_actor() {
+        let manager = SessionManager::new();
+        let (events, _) = RecordedEvents::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let connect: ConnectFn = Arc::new(move |_, _, _, _| {
+            let first = count.fetch_add(1, Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                if first {
+                    ConnectionOutcome::Synthetic
+                } else {
+                    std::future::pending().await
+                }
+            })
+        });
+        let id = manager
+            .create_session_with_transport(
+                test_config("cancel-dial"),
+                None,
+                scripted_frame_channel(
+                    &manager,
+                    FrameScript::Fail,
+                    Arc::new(std::sync::Mutex::new(Vec::new())),
+                ),
+                SessionEventSink::recorded(events.clone()),
+                true,
+                None,
+                connect,
+            )
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        manager
+            .get_cmd_sender(&id)
+            .await
+            .unwrap()
+            .send(SessionCommand::Disconnect)
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            manager.get_session_info(&id).await.unwrap().status,
+            SessionState::Disconnected
+        );
+        tokio::time::advance(std::time::Duration::from_secs(120)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_synthetic_transport_loss_retries_capped_backoff_then_retains_error() {
         let manager = SessionManager::new();
         let session = create_scripted(&manager, "recon", true, FrameScript::Fail).await;
         let mut rx = session.events_rx.clone();
@@ -2805,21 +3016,21 @@ mod tests {
         wait_for(&session.id, &session.events, &mut rx, |events| {
             events
                 .iter()
-                .any(|(_, v)| status_string(v) == "disconnected")
+                .any(|(_, v)| status_string(v).starts_with("error:Reconnection failed"))
         })
         .await;
 
         let recorded = info_events(&session.id, &session.events);
-        // connecting → connected (mock fallback) → MAX_RECONNECT_ATTEMPTS ×
-        // (reconnecting → connected via mock fallback) → terminal error →
-        // final disconnected.
+        // Explicit synthetic sessions reconnect through the same capped loop.
         let mut expected: Vec<&str> = vec!["connecting", "connected"];
         for _ in 0..MAX_RECONNECT_ATTEMPTS {
             expected.push("reconnecting");
             expected.push("connected");
         }
-        expected.push("error:Reconnection failed after 5 attempts");
-        expected.push("disconnected");
+        let terminal = recorded.last().unwrap().1["lastError"].as_str().unwrap();
+        let terminal_status = format!("error:{terminal}");
+        expected.push(&terminal_status);
+        expected.push(&terminal_status);
         assert_eq!(statuses_of(&recorded), expected);
 
         // One initial attempt plus exactly MAX_RECONNECT_ATTEMPTS retries.
@@ -2841,95 +3052,15 @@ mod tests {
             .collect();
         assert_eq!(backoffs, expected_backoffs);
 
-        // Defect B3-8: the terminal error state is published and then
-        // immediately overwritten by "disconnected" in the same watch
-        // channel; the final resting status is disconnected while the error
-        // reason survives only in last_error.
+        // Terminal error survives actor teardown in both status and lastError.
         let (_, last) = recorded.last().expect("final event recorded");
-        assert_eq!(status_string(last), "disconnected");
-        assert_eq!(
-            last["lastError"].as_str(),
-            Some("Reconnection failed after 5 attempts")
+        assert_eq!(status_string(last), terminal_status);
+        assert!(
+            last["lastError"]
+                .as_str()
+                .unwrap()
+                .starts_with("Reconnection failed after 5 attempts:")
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_failed_reconnect_falls_back_to_mock_as_connected_defect_b3_7() {
-        let manager = SessionManager::new();
-        // Frame send #1 (initial mock frame) succeeds; send #2 (triggered by
-        // resize) fails, modeling transport loss on an otherwise healthy sink.
-        let session = create_scripted(&manager, "fallback", true, FrameScript::FailOnly(2)).await;
-        let mut rx = session.events_rx.clone();
-        let sizes = Arc::clone(&session.frame_sizes);
-
-        wait_for(&session.id, &session.events, &mut rx, |events| {
-            events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
-                && !sizes.lock().unwrap().is_empty()
-        })
-        .await;
-
-        // The second frame send (resize) hits the scripted transport loss.
-        session
-            .cmd_tx
-            .send(SessionCommand::Resize {
-                width: 64,
-                height: 64,
-            })
-            .await
-            .expect("resize command accepted");
-
-        // The reconnect attempt also fails (scripted connector), yet the
-        // session reports connected again via mock frames: defect B3-7.
-        wait_for(&session.id, &session.events, &mut rx, |events| {
-            events
-                .iter()
-                .any(|(_, v)| status_string(v) == "reconnecting")
-                && events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
-        })
-        .await;
-
-        let recorded = info_events(&session.id, &session.events);
-        assert_eq!(
-            statuses_of(&recorded),
-            vec![
-                "connecting".to_string(),
-                "connected".to_string(),
-                "connected".to_string(), // resize re-publish
-                "reconnecting".to_string(),
-                "connected".to_string(),
-            ]
-        );
-        // Defect B3-7: with the server unreachable, retries do NOT run to the
-        // cap; exactly one reconnect attempt runs and the failure is masked
-        // by the mock fallback.
-        assert_eq!(session.connect_calls.load(Ordering::SeqCst), 2);
-        // The reconnecting event reports attempt 1 of 5 …
-        let (_, reconnecting) = recorded
-            .iter()
-            .find(|(_, v)| status_string(v) == "reconnecting")
-            .expect("reconnecting event recorded");
-        assert_eq!(reconnecting["reconnectAttempts"].as_u64(), Some(1));
-        assert_eq!(reconnecting["maxReconnectAttempts"].as_u64(), Some(5));
-        // … and the mock fallback clears the error surface entirely.
-        let (_, settled) = recorded.last().expect("settled event recorded");
-        assert_eq!(settled["reconnectAttempts"].as_u64(), Some(0));
-        assert_eq!(settled["lastError"].as_str(), None);
-        assert_eq!(
-            session.frame_sizes.lock().unwrap().len(),
-            2,
-            "mock frames resumed after the fallback"
-        );
-
-        // The session still answers a user disconnect normally.
-        session
-            .cmd_tx
-            .send(SessionCommand::Disconnect)
-            .await
-            .expect("disconnect accepted");
-        wait_for(&session.id, &session.events, &mut rx, |events| {
-            events.last().map(|(_, v)| status_string(v)) == Some("disconnected".to_string())
-        })
-        .await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -3271,7 +3402,7 @@ mod tests {
         assert_eq!(normalize_remote_resolution(200, 200), (200, 200));
     }
 
-    /// Req 3.1/3.2 — the mock frame loop (pre-real-session fallback) accepts
+    /// Req 3.1/3.2: the explicit synthetic frame loop accepts
     /// key/mouse/clipboard commands but does not forward them anywhere: no
     /// frames, no state change, no disconnect. This is the documented TODO
     /// zone deferred from task 3.2; mock sessions can never prove input
@@ -4756,16 +4887,29 @@ mod tests {
             .await;
             let mut rx = session.events_rx.clone();
 
-            // The pinned drop observable: reconnecting → mock-fallback
-            // connected (the scripted dial fails after the first).
+            // EOF enters reconnect; a failed next dial stays reconnecting
+            // with its reason instead of fabricating a connected desktop.
             wait_for(&session.id, &session.events, &mut rx, |events| {
-                events
-                    .iter()
-                    .any(|(_, v)| status_string(v) == "reconnecting")
-                    && events.last().map(|(_, v)| status_string(v)) == Some("connected".to_string())
+                events.last().is_some_and(|(_, v)| {
+                    status_string(v) == "reconnecting" && v["reconnectAttempts"] == 2
+                })
             })
             .await;
             assert_eq!(session.connect_calls.load(Ordering::SeqCst), 2);
+            let recorded = info_events(&session.id, &session.events);
+            assert_eq!(
+                statuses_of(&recorded)
+                    .iter()
+                    .filter(|s| *s == "connected")
+                    .count(),
+                1
+            );
+            assert!(
+                recorded.last().unwrap().1["lastError"]
+                    .as_str()
+                    .unwrap()
+                    .contains("already consumed")
+            );
 
             // Same session identity across the reconnect cycle.
             assert!(manager.get_session_info(&session.id).await.is_some());
@@ -5809,15 +5953,14 @@ mod tests {
             );
             assert_no_retry(&egfx);
 
-            // The actor ends (final status terminal-then-disconnected, the
-            // reason survives in lastError — the recorded defect B3-8
-            // pattern) and the AVC frame itself never became pixels.
+            // The actor stops with a persistent terminal error, and the
+            // AVC frame itself never becomes pixels.
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
             loop {
                 let done = info_events(&egfx.session.id, &egfx.session.events)
                     .last()
                     .map(|(_, v)| status_string(v))
-                    .is_some_and(|s| s == "disconnected");
+                    .is_some_and(|s| s.starts_with("error:"));
                 if done {
                     break;
                 }

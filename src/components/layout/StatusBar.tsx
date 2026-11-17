@@ -4,7 +4,7 @@ import { useTheme } from '../../hooks/useTheme';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
-import { buildStatusBarText, sessionCountLabel } from '../../lib/status-bar';
+import { buildStatusBarText, sessionCountLabel, statusBarIndicator, liveSessionCount } from '../../lib/status-bar';
 
 export function StatusBar() {
   const sessions = useSessionStore((s) => s.sessions);
@@ -12,7 +12,8 @@ export function StatusBar() {
   const { theme, toggle } = useTheme();
 
   const activeSession = activeSessionId ? sessions.get(activeSessionId) : null;
-  const sessionCount = sessions.size;
+  const sessionCount = liveSessionCount(sessions.values());
+  const indicator = statusBarIndicator(activeSession ?? null);
 
   const statusText = buildStatusBarText(activeSession ?? null);
 
@@ -23,19 +24,17 @@ export function StatusBar() {
     >
       {/* Left: connection status */}
       <div className="flex items-center gap-2 text-[var(--color-text-muted)]">
-        {activeSession ? (
-          <Badge
-            variant="outline"
-            className="h-4 gap-1 px-1.5 text-[10px] border-[var(--color-success)]/30 text-[var(--color-success)]"
-          >
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-success)] pulse-online" />
-            Connected
-          </Badge>
-        ) : (
-          <Badge variant="outline" className="h-4 gap-1 px-1.5 text-[10px]">
-            Disconnected
-          </Badge>
-        )}
+        <Badge
+          variant="outline"
+          className="h-4 gap-1 px-1.5 text-[10px]"
+          style={{ color: indicator.color, borderColor: indicator.color }}
+        >
+          <span
+            className={`inline-block w-1.5 h-1.5 rounded-full${indicator.pulse ? ' pulse-online' : ''}`}
+            style={{ backgroundColor: indicator.color }}
+          />
+          {indicator.label}
+        </Badge>
         <span>{statusText}</span>
       </div>
 

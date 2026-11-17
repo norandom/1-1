@@ -1056,6 +1056,10 @@ async fn smoke_host(
         } => (*connection_result, *framed),
         // Task 7.4 test seam: production connectors never produce the
         // in-memory transport; the smoke only ever dials real servers.
+        #[cfg(any(test, feature = "test-support"))]
+        ConnectionOutcome::Synthetic => {
+            unreachable!("real-server smoke cannot use synthetic sessions")
+        }
         ConnectionOutcome::RealSessionLocal { .. } => {
             unreachable!("smoke runs against real servers only (RealSessionLocal is a test seam)")
         }
@@ -1174,6 +1178,10 @@ async fn smoke_host(
         }
         // Task 7.4 test seam: production connectors never produce the
         // in-memory transport.
+        #[cfg(any(test, feature = "test-support"))]
+        ConnectionOutcome::Synthetic => {
+            unreachable!("real-server smoke cannot use synthetic sessions")
+        }
         ConnectionOutcome::RealSessionLocal { .. } => {
             unreachable!("smoke runs against real servers only (RealSessionLocal is a test seam)")
         }

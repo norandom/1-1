@@ -319,7 +319,7 @@ mod tests {
         format!("{seed:08x}-0000-4000-8000-000000000000")
     }
 
-    /// Scripted connector that falls back to the mock frame loop: the
+    /// Explicit synthetic connector for the mock frame loop: the
     /// actor reaches its live `Connected` state and stops promptly on a
     /// `Disconnect` command (no network, Req 12.7).
     fn mock_loop_connect() -> ConnectFn {
@@ -327,9 +327,7 @@ mod tests {
             |_config, _password: Option<String>, _width: u32, _height: u32| {
                 let outcome: std::pin::Pin<
                     Box<dyn std::future::Future<Output = ConnectionOutcome> + Send>,
-                > = Box::pin(async {
-                    ConnectionOutcome::Failed("scripted: fall back to the mock loop".to_string())
-                });
+                > = Box::pin(async { ConnectionOutcome::Synthetic });
                 outcome
             },
         )

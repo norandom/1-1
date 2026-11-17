@@ -22,19 +22,13 @@ describe('buildStatusBarText', () => {
     );
   });
 
-  it('claims "Connected to" while the session is still connecting or failed_defect_b3_12', () => {
-    // B3-12: the status bar text ignores the session's lifecycle status —
-    // it reports "Connected to …" even for connecting/reconnecting/error
-    // sessions. Pinned as a defect; the fix belongs to later task groups.
-    expect(buildStatusBarText(session({ status: 'connecting' }))).toBe(
-      'Connected to conn-1 - 800x600'
-    );
-    expect(buildStatusBarText(session({ status: 'reconnecting' }))).toBe(
-      'Connected to conn-1 - 800x600'
-    );
-    expect(buildStatusBarText(session({ status: 'error' }))).toBe(
-      'Connected to conn-1 - 800x600'
-    );
+  it.each([
+    ['connecting', 'Connecting to conn-1'],
+    ['reconnecting', 'Reconnecting to conn-1'],
+    ['error', 'Connection error - conn-1'],
+    ['disconnected', 'Disconnected - conn-1'],
+  ] as const)('describes %s without claiming a connected desktop', (status, text) => {
+    expect(buildStatusBarText(session({ status }))).toBe(text);
   });
 });
 

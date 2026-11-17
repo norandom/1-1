@@ -84,6 +84,9 @@ pub enum ConnectionOutcome {
         /// the scripted connection's EGFX wiring reports into it.
         codec_policy: std::sync::Arc<crate::rdp::codec_policy::CodecErrorPolicy>,
     },
+    /// Explicit synthetic session; never returned by the production connector.
+    #[cfg(any(test, feature = "test-support"))]
+    Synthetic,
     /// Connection failed; reason provided.
     Failed(String),
 }

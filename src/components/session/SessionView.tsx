@@ -286,6 +286,7 @@ function SessionContent() {
       <div className="relative flex-1 overflow-hidden">
         {/* Canvas */}
         <SessionCanvas
+          lastError={sessionResolution?.lastError}
           overlays={
             <>
               {/* Toolbar */}

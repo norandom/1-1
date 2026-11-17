@@ -54,6 +54,12 @@ export interface SessionInfo {
   lastError?: string | null;
 }
 
+/** Rust's externally tagged SessionState::Error carries its message. */
+export type SessionInfoWire = Omit<SessionInfo, 'status' | 'connectedAt'> & {
+  status: Exclude<SessionStatus, 'error'> | { error: string };
+  connectedAt: string | null;
+};
+
 export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
   defaultPort: number;

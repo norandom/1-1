@@ -12,10 +12,12 @@ import type {
   LibraryTree,
   NodeKind,
   SessionInfo,
+  SessionInfoWire,
   AppSettings,
   KeyEvent,
   MouseEvent as RdpMouseEvent,
 } from '../types';
+import { normalizeSessionInfo } from './session-info';
 import type { FrameMessage, FrameReceipt } from './frame-protocol';
 
 // ── Connection Management ───────────────────────────────────────────
@@ -101,7 +103,7 @@ export async function cancelReconnect(sessionId: string): Promise<void> {
 
 export async function listSessions(): Promise<SessionInfo[]> {
   try {
-    return await invoke<SessionInfo[]>('list_sessions');
+    return (await invoke<SessionInfoWire[]>('list_sessions')).map(normalizeSessionInfo);
   } catch {
     return [];
   }
@@ -109,7 +111,8 @@ export async function listSessions(): Promise<SessionInfo[]> {
 
 export async function getSessionInfo(sessionId: string): Promise<SessionInfo | null> {
   try {
-    return await invoke<SessionInfo>('get_session_info', { sessionId });
+    const info = await invoke<SessionInfoWire | null>('get_session_info', { sessionId });
+    return info ? normalizeSessionInfo(info) : null;
   } catch {
     return null;
   }

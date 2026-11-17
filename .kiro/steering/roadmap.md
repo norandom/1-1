@@ -5,6 +5,12 @@ Continue the approved `windows-clearcodec-royalts-e2e` spec; no new spec or
 protocol rewrite is needed. Existing completed work remains evidence, not a
 substitute for integrated user journeys.
 
+User clarification on 2026-11-17: no font defect is currently reported; the
+updated software awaits testing. The next priority is real connection and smart
+resize on all three staged hosts. Distinguish remote resolution changes from
+local fit scaling, and inspect text rendering after resize before diagnosing
+font smoothing. The full fixed-text matrix remains later acceptance work.
+
 ## Outcome
 
 Readable remote text, predictable window and session navigation, and reliable
@@ -18,7 +24,7 @@ scaling are separate concerns. A requested flag is not proof of server acceptanc
 |---|---|---|---|
 | 1. Session navigation repair | Remediate 8.6; requirements 11.2, 11.4, 11.6, 11.7, 11.8, 11.9 | Two sessions cannot exchange frames; dashboard/return restores the correct display without reconnecting; close releases resources; terminal restart retains identity | Reviewed and verified |
 | 2. Bounded delivery | 9.5 | One in-flight frame, accumulated damage, generation-aware acknowledgement, visible five-second stall and full-refresh recovery; delayed/dropped/stale acknowledgement tests | Reviewed and verified |
-| 3. Font smoothing | 10.1 then 10.2 | Default on; saved toggle; `.rdp` import; legacy default and explicit off preserved; outgoing flag verified; help describes server override and reconnect | Implementation reviewed; native UI check pending |
+| 3. Font smoothing | 10.1 then 10.2 | Default on; saved toggle; `.rdp` import; legacy default and explicit off preserved; outgoing flag verified; help describes server override and reconnect | Implementation reviewed; native save/reopen verified; server rendering acceptance pending |
 | 4. Pixel fidelity | 10.3 | Native pixels and aspect-preserving fit; correct mouse coordinates and scrolling at 100/125/150/200% DPI; no double scaling | Implementation reviewed; automated checks pass; physical validation pending |
 | 5. Three-target readability | Relevant 11.x interoperability/text/performance evidence | Same fixed text page, font, remote resolution and server scaling; record actual codec and smoothing request; compare decoded pixels, canvas and screenshots, plus human readability feedback | Pending |
 | 6. Release completion | Remaining 11.x journeys and native/container gates | Required CRUD, keyboard, recovery, production-build and platform evidence; unresolved findings explicitly closed or blocked | Pending |
@@ -113,10 +119,16 @@ attachment, and closing B back to A. Runtime tests cover frame isolation,
 failure/retry, restart, and disposal races. Test artifacts live under
 `D:/BuildArtifacts/drift-rdp/session-navigation`.
 
-Release blocker rediscovered: a real connection to an invalid host falls back
-to synthetic frames and reports Connected (existing B3-7 behavior in session.rs).
-Resolve this before real-server acceptance. Native failure-state validation was
-therefore inconclusive; do not present the synthetic image as RDP evidence.
+B3-7 resolved with independent Rust and frontend review. Real failures retain
+Error without synthetic frames; Rust error objects normalize at UI ingress and
+the footer follows actual lifecycle state. Native invalid-host check verified
+Connection Error with the DNS cause, Error in tree/tab/footer and zero active
+sessions. Explicit test mocks still render. Tests: 291 default Rust, 309
+test-support Rust (four existing skips each), 487 frontend, lint/typecheck/build,
+fmt/doctests/Clippy (two existing warnings). Evidence: group11/failure-* and
+review-failure-* under D:/BuildArtifacts/drift-rdp. Test app and Computer Use closed.
+Three-host connector smoke passed; real app smart-resize is next. Its headless
+smoke did not negotiate display-control DVC and cannot prove resize support.
 
 UI cleanup checks passed on 2026-11-17: 428 frontend tests, lint, app typecheck,
 frontend build, Rust formatting and Clippy (two existing warnings). Native debug

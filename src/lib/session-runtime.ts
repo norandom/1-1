@@ -1,9 +1,10 @@
 import { Channel } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { SessionInfo } from '../types';
+import type { SessionInfo, SessionInfoWire } from '../types';
 import { useSessionStore } from '../stores/sessionStore';
 import { compositeFrameRects, type CompositingSurface } from './canvas-compositor';
 import { parseFramePacket, toFrameBytes, type FrameMessage, type FrameDeliveryMessage } from './frame-protocol';
+import { normalizeSessionInfo } from './session-info';
 import * as tauri from './tauri';
 
 export type FrameListener = (frame: Uint8Array, consumed?: () => void) => void;
@@ -170,9 +171,9 @@ async function startSession(connectionId: string, existing?: SessionInfo): Promi
         ...info, fps: current?.fps ?? 0, bandwidth: current?.bandwidth ?? 0,
       });
     };
-    const unlisten = await listen<SessionInfo>(`session-info-${id}`, (event) => {
+    const unlisten = await listen<SessionInfoWire>(`session-info-${id}`, (event) => {
       eventReceived = true;
-      applyInfo(event.payload);
+      applyInfo(normalizeSessionInfo(event.payload));
     });
     if (runtime.disposed) {
       unlisten();

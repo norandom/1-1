@@ -73,6 +73,50 @@ Row schema per design.md § Testing Strategy ("Delivery gates and brownfield cov
 
 12. **React/DOM wiring of the shell and render layer** (jsdom/testing-library absent, same as #10): theme DOM application (`data-theme`/class writes, `matchMedia` listener), `PerformanceHUD`/`Toast`/`ShortcutOverlay`/`StatusBar` rendering, `SessionCanvas` rAF draw scheduling + `putImageData` + status overlays (connecting spinner, reconnect overlay with `min(1<<attempt, 30)` countdown, error/disconnected screens), `useRdpSession` FPS/bandwidth 1 s interval, `useKeyboard` window listeners, the SessionView resolution fallback chain (session info → connection `displayWidth/Height` → 1920x1080) and the **D1 tab-identity wiring** (`SessionTabs.tsx` L27–30 and `Sidebar.tsx` L200 navigate `/session/${sessionId}` while `SessionView.tsx` L62–70 treats the route param as a **connectionId** and reconnects with it) all need component tests or E2E. D1 is recorded here as a known defect (per tasks.md 3.1 note) and deliberately **not** frozen by a test. **`GpuRenderer`/wgpu surface** (adapter/device/pipeline creation, present loop, resize handling in `lib.rs`/`gpu.rs`) requires a real window + GPU adapter and cannot be unit-tested headlessly; the lib.rs GPU-init-failure fallback (warn + continue) is audit-pinned and real-device smoke belongs to the 12.9 matrix.
 
+### B3-7 remediation (2026-11-17)
+
+The task-3.2 observations below are historical. Real initial failures now remain
+Error without Connected events or synthetic frames. Failed reconnects retain the
+latest cause, use the existing five-attempt backoff, and preserve terminal Error
+after actor teardown. Only explicit test/test-support Synthetic outcomes use mock
+frames. Intentional mock fixtures were migrated; real-server smoke rejects that
+outcome. Independent review approved the bounded actor change: 291 default and
+309 test-support tests pass (four existing skips each), plus doctests, formatting
+and Clippy (two existing warnings). RED evidence reproduced false success and
+pending-reconnect cancellation before repair. Evidence: `D:/BuildArtifacts/drift-rdp/group11/failure-*`
+and `review-failure-*`. Initial-connect timeout ownership is unchanged; actor
+retry cancellation does not prove immediate cleanup of the existing TLS subtask.
+Native verification then exposed the Rust error-object/frontend-string mismatch
+and presence-based Connected footer. Shared ingress normalization and lifecycle
+footer rendering were independently reviewed (487 frontend tests plus lint,
+typecheck and build). Final native invalid-host check shows Connection Error with
+the DNS cause, Error in tree/tab/footer and zero active sessions. Explicit test
+mocks still render. Computer Use was closed/reset after both bounded checks.
+Real-server smart resize and text fidelity still require separate evidence.
+
+### Staged three-host smoke (2026-11-17)
+
+`scripts/Invoke-Baseline.ps1 -Mode Smoke` passed on the reviewed B3-7 Rust
+working tree based on `85de5eb`. Report and redaction self-check:
+`D:/BuildArtifacts/drift-rdp/group11/real-smoke/smoke-20261117-130820`.
+
+| Staged target | Route | Desktop | First frame | Connector reconnect |
+|---|---|---|---|---|
+| Windows 11 RDP | TLS 1.3 + CredSSP/NLA | 1920x1080 | 921 ms | Connected |
+| FreeRDP/Linux | TLS 1.3; server selected SSL without NLA | 1920x1080 | 459 ms | Connected |
+| IronRDP/Linux | TLS 1.3 + CredSSP/NLA | 3064x1264 | 1564 ms | Connected |
+
+All three produced frames, sent the mouse input PDU and passed the harness
+shutdown gate. Windows/FreeRDP teardown used bounded drain; only IronRDP reported
+server closure after shutdown. All three reported display-control DVC unavailable,
+so this run does not prove dynamic resize. Capability advertisements are not proof
+of the actual graphics codec. Smoothing was requested on; this was not an on/off
+comparison, fixed-text capture, canvas equality check or physical readability test.
+The portable embedded-Geist sample is prepared at
+`D:/BuildArtifacts/drift-rdp/group11/text-sample/drift-text-sample.html`; remote
+font-load verification and matched server scaling/resolution are still required.
+No 11.x acceptance checkbox is completed by this smoke alone.
+
 ### Req 13.2 compliance note (task 3.2)
 
 B3-7 and B3-8 are **pinned, not fixed**: the defect-marked tests reproduce today's behavior (Req 13.2 regression tests already exist for any future fix), and no production logic changed beyond the behavior-preserving transport seams disclosed above.
