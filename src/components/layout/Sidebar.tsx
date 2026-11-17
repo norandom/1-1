@@ -12,6 +12,7 @@ import {
   railToggleButtonName,
 } from '../../lib/tree-rail';
 import { ConnectionTree } from './ConnectionTree';
+import { NewLibraryDialog } from './NewLibraryDialog';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import {
@@ -120,6 +121,9 @@ export function Sidebar() {
       </div>
 
       <Separator className="mx-4 mb-3 w-auto" />
+      <div className="flex flex-col px-4 pb-2">
+        <NewLibraryDialog collapsed={collapsed} />
+      </div>
 
       {/* Tree (expanded) or library rail (collapsed) — same tree state */}
       {collapsed ? (

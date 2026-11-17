@@ -194,8 +194,8 @@ function TreeRow({
       }}
       className={cn(
         'group flex cursor-pointer items-center gap-1.5 rounded-md py-1.5 pr-1 text-[13px] outline-none',
-        'focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]',
-        a11y.selected && 'bg-[var(--color-accent)]/10 text-[var(--color-accent)]',
+        'focus-visible:ring-2 focus-visible:ring-ring',
+        a11y.selected && 'bg-sidebar-accent text-sidebar-accent-foreground',
         isOver && canDrop && 'ring-1 ring-[var(--color-accent)]',
         isDragging && 'opacity-50'
       )}
@@ -664,10 +664,9 @@ export function ConnectionTree() {
           onKeyDown={handleTreeKeyDown}
           className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
         >
+          {error && <p role="alert" className="px-2 py-4 text-[12px] text-[var(--color-danger)]">{error}</p>}
           {isLoading && tree.libraries.length === 0 ? (
             <p className="px-2 py-4 text-[12px] text-[var(--color-text-muted)]">Loading…</p>
-          ) : error ? (
-            <p role="alert" className="px-2 py-4 text-[12px] text-[var(--color-danger)]">{error}</p>
           ) : isFilterActive && a11yNodes.length === 0 ? (
             <p className="px-2 py-4 text-[12px] text-[var(--color-text-muted)]">{FILTER_EMPTY_STATE_TEXT}</p>
           ) : a11yNodes.length === 0 ? (

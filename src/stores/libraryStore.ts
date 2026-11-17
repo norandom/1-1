@@ -1,8 +1,10 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { LibraryTree, LibraryStoreStatus, NodeId } from '../types';
+import type { Library, LibraryTree, LibraryStoreStatus, NodeId } from '../types';
 import * as tauri from '../lib/tauri';
 import { isWriteBlocked, RECOVERY_BLOCKED_MESSAGE } from '../lib/recovery';
+import { useToastStore } from './toastStore';
+
 
 // Task 8.2 (Req 10.1/10.3/10.9/10.11): typed tree state for the Royal
 // TS-style sidebar — the design.md `LibraryStore` contract. The store owns
@@ -38,6 +40,8 @@ export interface FilterResult {
 }
 
 interface LibraryStoreState {
+  isCreatingLibrary: boolean;
+  createLibrary: (name: string) => Promise<Library>;
   tree: LibraryTree;
   selectedNodeId: NodeId | null;
   /** Saved (persisted) expansion — the only expansion that survives a filter. */
@@ -332,6 +336,35 @@ export const useLibraryStore = create<LibraryStoreState>()(
   persist(
     (set, get) => ({
       tree: EMPTY_LIBRARY_TREE,
+      isCreatingLibrary: false,
+      createLibrary: async (name) => {
+        if (isWriteBlocked(get().status)) throw new Error(RECOVERY_BLOCKED_MESSAGE);
+        if (get().isCreatingLibrary) throw new Error('A library is already being created');
+        const trimmedName = name.trim();
+        if (!trimmedName) throw new Error('Enter a library name');
+        set({ isCreatingLibrary: true });
+        try {
+          const library = await tauri.createLibrary(trimmedName);
+          await get().fetchTree();
+          if (get().error) {
+            useToastStore.getState().addToast({ type: 'warning', duration: 0,
+              message: `Library "${library.name}" was created, but refreshing the tree failed: ${get().error}. Your library is saved; do not create it again.`,
+            });
+          }
+          // The IPC receipt proves persistence succeeded even if the refresh
+          // failed. Keep that root visible; never invite a duplicate retry.
+          const tree = get().tree;
+          set({
+            tree: tree.libraries.some((item) => item.id === library.id)
+              ? tree : { ...tree, libraries: [...tree.libraries, library] },
+            selectedNodeId: { kind: 'library', id: library.id },
+            filter: '',
+          });
+          return library;
+        } finally {
+          set({ isCreatingLibrary: false });
+        }
+      },
       selectedNodeId: null,
       expanded: {},
       filter: '',

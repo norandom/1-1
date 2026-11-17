@@ -289,10 +289,28 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 3.2,4.1,14.5_
 
 - [ ] 11. Regression journeys and release evidence
+- [ ] 11.0a Establish the shared harness and Windows adapter
+  - Prerequisite repair identified on 2026-11-17: the shared harness assumed by 11.1 does not exist. Reuse the approved WebdriverIO/native Windows driver approach, pinned dependencies and lockfile; introduce the shared command/spec directory, isolated app/settings/credential resources, cold-launch UI assertion, bounded teardown and failure artifacts.
+  - Done: The built Windows app passes the shared cold-launch spec; an intentional failure propagates with evidence; only owned resources are cleaned up. Keep the existing three-hour investigation/split threshold.
+  - _Boundary: Windows E2E bootstrap and shared harness_
+  - _Requirements: 12.1,12.5,12.7,12.8_
+- [ ] 11.0b Complete the approved macOS harness adapter
+  - Implement the already-approved debug-gated tauri-plugin-wdio-webdriver dependency/capability, run the shared cold-launch spec and require its native CI result. Preserve production exclusion; do not select another driver.
+  - Done: Native macOS evidence proves UI control, intentional-failure propagation and teardown; release dependency/configuration checks exclude test control. Keep the existing three-hour investigation/split threshold.
+  - _Depends: 11.0a_
+  - _Boundary: macOS E2E bootstrap_
+  - _Requirements: 12.1,12.5,12.7,12.8,12.10_
+- [ ] 11.0c Complete Linux harness and matrix integration
+  - Extend the existing Dagger entry with the approved WebKitGTK/Xvfb route and shared cold-launch spec; preserve failure evidence and require all three platform results.
+  - Done: Dagger Linux UI execution and intentional-failure propagation pass; the same spec runs in all three jobs. Keep native Windows/macOS evidence distinct. Keep the existing three-hour investigation/split threshold.
+  - _Depends: 11.0a,11.0b_
+  - _Boundary: Linux E2E bootstrap and matrix integration_
+  - _Requirements: 12.1,12.5,12.7,12.8,13.3_
 - [ ] 11.1 Verify CRUD, migration and recovery journeys
   - Implement/rerun create/edit/import/duplicate/delete and v1/recovery journeys using the existing harness; run the same specs in the three OS jobs.
   - Done: Fixtures preserve fields and secrets; rollback/recovery mutations fail safely and restart state is correct.
   - _Boundary: Storage E2E_
+  - _Depends: 11.0a,11.0b,11.0c; reviewed 8.3 library-creation remediation_
   - _Requirements: 1.1,1.2,1.3,1.4,1.5,10.1,10.2,10.7,10.10,10.12,10.16,10.17,10.18,10.19,12.3,12.5,12.7_
 - [ ] 11.2 Verify tree and keyboard journeys
   - Run filter/ancestor, rail persistence, keyboard menus/Move, subtree move and dashboard scenarios against the shared harness.
@@ -351,6 +369,8 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,7.3,8.1,8.2,8.3,8.4,8.5,8.6,12.1,12.6,12.8,12.9,13.1,13.2,13.3,13.4_
 
 ## Implementation Notes
+- 2026-11-17: 8.3 New Library remediation independently APPROVED after correcting collapsed-rail refresh-error visibility. Creation uses existing IPC, recovery/pending guards and retained saved receipts; persistent global warnings prevent duplicate retries after refresh failure. Selected tree rows now use paired contrast tokens. VERIFIED: 471 frontend tests, lint/typecheck/build; native isolated creation, Enter submit, dashboard selection, rail open/cancel, restart persistence and readable selected name. Native group-10 follow-up also verified smoothing off save/reopen and stored false. Computer Use was closed/reset after each bounded check. Display-mode smoke exposed faint light-theme labels and a shortcut collision with the performance HUD; remediate 10.3 before harness work. Artifacts: `D:/BuildArtifacts/drift-rdp/group11`.
+- 2026-11-17: Group 11 resumed. 11.1 preflight and independent kiro-debug found omitted prerequisites, not a new driver/product decision: no shared E2E suite exists and New Library has no UI caller. Debug verdict RETRY_TASK routes library creation to the already-authorized 8.3 remediation, then explicit 11.0a-c harness slices before unchanged Storage E2E scope. These three prerequisite slices are additional to the original 61 subtasks; the original completion count remains 49/61. No new acceptance result is claimed from preflight.
 - 2026-11-17: 10.3 independently APPROVED after fixing passive wheel handling. Native dimensions use DPR once; fit preserves aspect ratio; shared canvas bounds account for scrolling. Persistent display control preserves remote Tab and releases forwarded keys before local focus. Non-passive wheel subscription cancels local scrolling and forwards once, with cleanup coverage. VERIFIED implementation: 463 frontend tests, lint/typecheck/build; group backend regression 307 test-support tests passed (four existing skips), native test binary built. Four-DPI full/dirty RGBA, input, and wheel lifecycle evidence: `D:/BuildArtifacts/drift-rdp/group10/pixel-*.log`. Native UI launch was rejected by automatic approval policy ("blocked by policy", no further reason); no app or Computer Use session started. Native UI smoke, actual canvas readback and physical/server text-quality acceptance remain pending in 11.x. Group 10 checkpoint: 49/61 original subtasks complete; no release GO.
 - 2026-11-17: 10.2 independently APPROVED. Connector sets/clears upstream ENABLE_FONT_SMOOTHING from saved preference; XOR test proves only that performance bit changes. Accessible form help describes next connection and server override. VERIFIED: 445 frontend/289 Rust tests (four existing skips), lint/typecheck/build/fmt/doctests and Clippy with two existing warnings. No ClearType/server-acceptance claim. Original RED transcript copied to `D:/BuildArtifacts/drift-rdp/group10/flags-red-transcript.txt`.
 - 2026-11-17: 10.1 independently APPROVED. Default-on serde/read models and form switch preserve explicit false through `.rdp` import, create/update, restart, v1 migration, v2 load and duplicate. VERIFIED: 445 frontend/288 default Rust tests (four existing skips), lint/typecheck/build/fmt/doctests; test-support Clippy passes with two existing warnings. Prior ConnectionForm tree-refresh fix is preserved in this commit. Protocol application/help remain 10.2; native integrated UI verification follows 10.3. Evidence: `D:/BuildArtifacts/drift-rdp/group10/preference-*.log`.

@@ -33,15 +33,21 @@ test framework is planned for text readability. Use upstream capabilities.
 - The prior spacing, dashboard refresh and native window-control cleanup remains
   uncommitted in three files. Save/tree refresh and keyboard tab close are included
   in reviewed task commits. Preserve the remaining UI changes.
-- Missing New Library UI remains a separate 8.x integration remediation before
-  the CRUD acceptance journey; it does not block the text-rendering changes.
+- New Library UI remediation is reviewed and natively verified, including
+  creation, restart persistence and selected-row readability. This removes the
+  product prerequisite for the CRUD journey; the shared harness is still pending.
 - Start with a small working user journey, then add the next capability. Tests
   must exercise production behavior rather than merely validate fixture constants.
 - Keep task-local review and focused validation. Run platform/group gates at
   their existing boundaries, not after every cosmetic change. Record real failures
   and avoid rerunning unaffected checks without a reason.
 - Existing group-boundary holds remain in effect. Group 10 is complete at the
-  implementation boundary; hold before group 11 until explicit resume.
+  implementation boundary; the user explicitly resumed group 11 on 2026-11-17.
+- Group 11 preflight found that its assumed shared UI harness does not exist.
+  Repair New Library in the owning 8.3 boundary first, then deliver the already
+  approved harness as separate 11.0a Windows/shared, 11.0b macOS and 11.0c Linux/
+  matrix slices. Only then run 11.1's storage journeys. This separates omitted
+  prerequisites from acceptance work; it introduces no new product/driver choice.
 - Computer Use runs only for a bounded native check. Close the isolated test app,
   send the completion summary, and reset the session afterward; restart only when
   another UI check is needed (user preference, 2026-11-17).
@@ -69,6 +75,16 @@ started. Preference save/reopen and display controls still need native UI smoke;
 actual canvas readback and physical/server readability remain acceptance work.
 Do not treat unit fixtures as real-server or physical-display quality evidence.
 Artifacts: `D:/BuildArtifacts/drift-rdp/group10`.
+
+Group 11 follow-up: after the user's explicit resume, isolated native launch
+succeeded. New Library remediation passed independent review and 471 frontend
+tests plus lint/typecheck/build. Native creation, keyboard submit, rail cancellation,
+restart persistence and selected-name contrast passed. Font smoothing off saved
+and reopened correctly. The display-mode check found faint light-theme labels
+and a shortcut collision with the performance HUD; fix these before harness work.
+Both test-app sessions were closed and Computer Use reset. Real-server text
+quality and canvas-readback acceptance remain unverified. Follow-up artifacts:
+`D:/BuildArtifacts/drift-rdp/group11`.
 
 Task 9.5 passed independent review after correcting reactivation damage and
 stall-state handling. Checks: 443 frontend tests, 286 default Rust tests,

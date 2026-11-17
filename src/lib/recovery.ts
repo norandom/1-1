@@ -27,6 +27,7 @@ export function isWriteBlocked(status: LibraryStoreStatus | null): status is Wri
  * this list AND wire the gate.
  */
 export type MutationAction =
+  | 'create-library'
   | 'create-connection' // ConnectionForm create save / New Connection CTAs
   | 'update-connection' // ConnectionForm edit save
   | 'duplicate-connection' // tree context menu Duplicate (10.19)
@@ -39,6 +40,7 @@ export type MutationAction =
   | 'import-connections'; // .rdp / ssh-config import wrappers (no surface yet)
 
 export const ALL_MUTATION_ACTIONS: readonly MutationAction[] = [
+  'create-library',
   'create-connection',
   'update-connection',
   'duplicate-connection',

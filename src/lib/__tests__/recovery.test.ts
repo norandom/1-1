@@ -50,10 +50,11 @@ describe('mutation gating decision (which actions are blocked per status)', () =
 
   it('covers every store write surface in the taxonomy', () => {
     // The complete client-side mutation inventory: connection CRUD +
-    // duplicate, folder CRUD, library rename/delete, move (8.4) and the
+    // duplicate, folder CRUD, library create/rename/delete, move (8.4) and the
     // import wrappers. New surfaces must extend this list (and its gate).
     expect([...ALL_MUTATION_ACTIONS].sort()).toEqual(
       [
+        'create-library',
         'create-connection',
         'update-connection',
         'duplicate-connection',
