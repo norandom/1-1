@@ -13,6 +13,10 @@ use crate::store::connections::ConnectionConfig;
 /// Commands that can be sent to a running session actor.
 #[derive(Debug)]
 pub enum SessionCommand {
+    FrameConsumed {
+        receipt: crate::rdp::frame_delivery::FrameReceipt,
+        refresh: bool,
+    },
     SendKey {
         key_code: u32,
         is_down: bool,

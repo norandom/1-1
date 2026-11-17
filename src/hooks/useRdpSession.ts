@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import type { SessionStatus } from '../types';
 import { useSessionStore } from '../stores/sessionStore';
 import * as tauri from '../lib/tauri';
-import { connectSession, subscribeSessionFrames, reportSessionFramePresented } from '../lib/session-runtime';
+import { connectSession, subscribeSessionFrames, reportSessionFramePresented, refreshSessionDisplay, type FrameListener } from '../lib/session-runtime';
 import {
   mapKeyEvent,
   mapMouseEvent,
@@ -10,7 +10,6 @@ import {
   type MouseSurfaceBounds,
 } from '../lib/input-mapper';
 
-type FrameListener = (frame: Uint8Array) => void;
 
 // Views attach to an existing session by ID immediately. Only a fresh Connect
 // or explicit Restart invokes the session runtime; unmount detaches the canvas,
@@ -103,6 +102,8 @@ export function useRdpSession(viewSessionId?: string) {
   }, []);
 
   return {
+    displayStalled: session?.displayStalled ?? false,
+    refreshDisplay: () => { if (sessionId) refreshSessionDisplay(sessionId); },
     sessionId,
     status: session?.status ?? connectStatus,
     fps: session?.fps ?? 0,

@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FramePayload } from '../frame-protocol';
+import type { FrameMessage } from '../frame-protocol';
 import type { SessionInfo } from '../../types';
 
 const transport = vi.hoisted(() => ({
-  channels: new Map<string, (frame: FramePayload) => void>(),
+  channels: new Map<string, (frame: FrameMessage) => void>(),
   statuses: new Map<string, (event: { payload: SessionInfo }) => void>(),
   unlisten: vi.fn(),
 }));
 vi.mock('@tauri-apps/api/core', () => ({
   Channel: class {
-    onmessage: (frame: FramePayload) => void;
-    constructor(listener: (frame: FramePayload) => void) { this.onmessage = listener; }
+    onmessage: (frame: FrameMessage) => void;
+    constructor(listener: (frame: FrameMessage) => void) { this.onmessage = listener; }
   },
 }));
 vi.mock('@tauri-apps/api/event', () => ({
@@ -26,12 +26,13 @@ vi.mock('../tauri', () => ({
   }),
   getSessionInfo: vi.fn(async () => null),
   disconnect: vi.fn(async () => {}),
+  frameConsumed: vi.fn(async () => {}),
 }));
 
 import * as tauri from '../tauri';
 import { listen } from '@tauri-apps/api/event';
 import { useSessionStore } from '../../stores/sessionStore';
-import { connectSession, subscribeSessionFrames } from '../session-runtime';
+import { connectSession, subscribeSessionFrames, refreshSessionDisplay } from '../session-runtime';
 import { parseFramePacket } from '../frame-protocol';
 
 // Real wire layout, small surfaces: every pixel channel is distinct across sessions.
@@ -49,6 +50,12 @@ function packet(value: number, x = 0, width = 2, surfaceWidth = 2): Uint8Array {
   return bytes;
 }
 
+let sequence = 0;
+function send(connection: string, frame: Uint8Array) {
+  transport.channels.get(connection)!({ kind: 'frameDelivery', sessionId: 'session-' + connection, generation: 'test', sequence: ++sequence });
+  transport.channels.get(connection)!(frame);
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
@@ -62,17 +69,63 @@ afterEach(() => {
 });
 
 describe('session-owned frame channels (8.6 integration remediation)', () => {
+  it('rejects binary without metadata, malformed metadata, and another session receipt', async () => {
+    const id = await connectSession('ack');
+    const listener = vi.fn();
+    subscribeSessionFrames(id, listener);
+    transport.channels.get('ack')!(packet(5));
+    transport.channels.get('ack')!({ kind: 'frameDelivery', sessionId: 'wrong', generation: 'g', sequence: 1 });
+    transport.channels.get('ack')!(packet(5));
+    transport.channels.get('ack')!({ kind: 'frameDelivery', sessionId: id, generation: 'g', sequence: -1 });
+    transport.channels.get('ack')!(packet(5));
+    expect(listener).not.toHaveBeenCalled();
+    expect(tauri.frameConsumed).not.toHaveBeenCalled();
+  });
+  it('can resend the last exact receipt for explicit full-refresh recovery', async () => {
+    const id = await connectSession('ack');
+    transport.channels.get('ack')!({ kind: 'frameDelivery', sessionId: id, generation: 'gen', sequence: 1 });
+    transport.channels.get('ack')!(packet(5));
+    refreshSessionDisplay(id);
+    expect(tauri.frameConsumed).toHaveBeenLastCalledWith(id, { generation: 'gen', sequence: 1 }, true);
+  });
+  it('acknowledges the exact receipt only after active canvas completion', async () => {
+    const id = await connectSession('ack');
+    const listener = vi.fn();
+    subscribeSessionFrames(id, listener);
+    transport.channels.get('ack')!({ kind: 'frameDelivery', sessionId: id, generation: 'gen', sequence: 1 });
+    transport.channels.get('ack')!(packet(5));
+    expect(tauri.frameConsumed).not.toHaveBeenCalled();
+    const complete = listener.mock.calls[0][1];
+    expect(complete).toBeTypeOf('function');
+    complete();
+    complete();
+    expect(tauri.frameConsumed).toHaveBeenCalledExactlyOnceWith(id, { generation: 'gen', sequence: 1 }, false);
+  });
+  it('consumes background frames into the retained image and releases on unmount', async () => {
+    const id = await connectSession('ack');
+    const listener = vi.fn();
+    const detach = subscribeSessionFrames(id, listener);
+    transport.channels.get('ack')!({ kind: 'frameDelivery', sessionId: id, generation: 'gen', sequence: 1 });
+    transport.channels.get('ack')!(packet(5));
+    detach();
+    expect(tauri.frameConsumed).toHaveBeenCalledTimes(1);
+    transport.channels.get('ack')!({ kind: 'frameDelivery', sessionId: id, generation: 'gen', sequence: 2 });
+    transport.channels.get('ack')!(packet(9));
+    expect(tauri.frameConsumed).toHaveBeenCalledTimes(2);
+    listener.mock.calls[0][1](); // obsolete canvas completion must not ACK new flight
+    expect(tauri.frameConsumed).toHaveBeenCalledTimes(2);
+  });
   it('switches A/B without routing background frames into the visible session', async () => {
     const a = await connectSession('a');
     const b = await connectSession('b');
     const framesA = vi.fn();
     const framesB = vi.fn();
     const detachA = subscribeSessionFrames(a, framesA);
-    transport.channels.get('a')!(packet(11));
+    send('a', packet(11));
     detachA();
     const detachB = subscribeSessionFrames(b, framesB);
-    transport.channels.get('a')!(packet(22));
-    transport.channels.get('b')!(packet(99));
+    send('a', packet(22));
+    send('b', packet(99));
     expect(framesA).toHaveBeenCalledTimes(1);
     expect(framesB).toHaveBeenCalledTimes(1);
     expect(parseFramePacket(framesB.mock.calls[0][0]).rects[0].pixels[0]).toBe(99);
@@ -81,10 +134,10 @@ describe('session-owned frame channels (8.6 integration remediation)', () => {
 
   it('returns from a dashboard with the complete latest image and no connect IPC', async () => {
     const a = await connectSession('a');
-    transport.channels.get('a')!(packet(11));
+    send('a', packet(11));
     const detach = subscribeSessionFrames(a, vi.fn());
     detach(); // view unmount: background dirty regions must still compose
-    transport.channels.get('a')!(packet(22, 1, 1));
+    send('a', packet(22, 1, 1));
     const returned = vi.fn();
     subscribeSessionFrames(a, returned);
     expect(await connectSession('a')).toBe(a);
@@ -106,7 +159,7 @@ describe('session-owned frame channels (8.6 integration remediation)', () => {
     transport.statuses.get(`session-info-${a}`)!({ payload: info });
     const afterClose = vi.fn();
     subscribeSessionFrames(a, afterClose);
-    transport.channels.get('a')!(packet(33));
+    send('a', packet(33));
     expect(afterClose).not.toHaveBeenCalled();
     expect(useSessionStore.getState().sessions.has(a)).toBe(false);
   });
@@ -122,7 +175,7 @@ describe('session-owned frame channels (8.6 integration remediation)', () => {
     const frames = vi.fn();
     subscribeSessionFrames(a, frames);
     oldChannel(packet(1));
-    transport.channels.get('a')!(packet(2));
+    send('a', packet(2));
     expect(frames).toHaveBeenCalledTimes(1);
     expect(parseFramePacket(frames.mock.calls[0][0]).rects[0].pixels[0]).toBe(2);
   });
@@ -134,8 +187,8 @@ describe('session-owned frame channels (8.6 integration remediation)', () => {
 
   it('replays a resized surface without pixels from the previous dimensions', async () => {
     const a = await connectSession('a');
-    transport.channels.get('a')!(packet(11));
-    transport.channels.get('a')!(packet(33, 0, 1, 1));
+    send('a', packet(11));
+    send('a', packet(33, 0, 1, 1));
     const frames = vi.fn();
     subscribeSessionFrames(a, frames);
     const image = parseFramePacket(frames.mock.calls[0][0]);
@@ -149,10 +202,10 @@ describe('session-owned frame channels (8.6 integration remediation)', () => {
     const detach = subscribeSessionFrames(a, frames);
     useSessionStore.getState().updateSession(a, { status: 'error' });
     await connectSession('a', true);
-    transport.channels.get('a')!(packet(42));
+    send('a', packet(42));
     expect(frames).toHaveBeenCalledTimes(1);
     detach();
-    transport.channels.get('a')!(packet(43));
+    send('a', packet(43));
     expect(frames).toHaveBeenCalledTimes(1);
   });
 

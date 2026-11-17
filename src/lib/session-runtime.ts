@@ -3,13 +3,15 @@ import { listen } from '@tauri-apps/api/event';
 import type { SessionInfo } from '../types';
 import { useSessionStore } from '../stores/sessionStore';
 import { compositeFrameRects, type CompositingSurface } from './canvas-compositor';
-import { parseFramePacket, toFrameBytes, type FramePayload } from './frame-protocol';
+import { parseFramePacket, toFrameBytes, type FrameMessage, type FrameDeliveryMessage } from './frame-protocol';
 import * as tauri from './tauri';
 
-type FrameListener = (frame: Uint8Array) => void;
+export type FrameListener = (frame: Uint8Array, consumed?: () => void) => void;
 interface SessionRuntime {
   disposed: boolean;
-  channel: Channel<FramePayload> | null;
+  channel: Channel<FrameMessage> | null;
+  metadata: FrameDeliveryMessage | null;
+  completion: ((refresh?: boolean) => void) | null;
   listeners: Set<FrameListener>;
   surface: CompositingSurface | null;
   unlisten: (() => void) | null;
@@ -61,7 +63,15 @@ export function subscribeSessionFrames(sessionId: string, listener: FrameListene
   if (!runtime || runtime.disposed) return () => {};
   runtime.listeners.add(listener);
   if (runtime.surface) listener(snapshot(runtime.surface));
-  return () => { runtime.listeners.delete(listener); };
+  return () => {
+    runtime.listeners.delete(listener);
+    // The retained image has consumed the packet even if its canvas unmounted.
+    if (runtime.listeners.size === 0) runtimes.get(sessionId)?.completion?.();
+  };
+}
+
+export function refreshSessionDisplay(sessionId: string) {
+  runtimes.get(sessionId)?.completion?.(true);
 }
 
 export function reportSessionFramePresented(sessionId: string) {
@@ -89,15 +99,25 @@ async function startSession(connectionId: string, existing?: SessionInfo): Promi
   const listeners = old?.listeners ?? new Set<FrameListener>();
   if (old) dispose(old, false);
   const runtime: SessionRuntime = {
-    disposed: false, channel: null, listeners, surface: null,
+    disposed: false, channel: null, metadata: null, completion: null, listeners, surface: null,
     unlisten: null, timer: null, frames: 0, bytes: 0,
   };
   // Publish ownership before restart awaits IPC, so close/delete can cancel it.
   if (existing) runtimes.set(existing.id, runtime);
   let id: string | null = null;
   try {
-    runtime.channel = new Channel<FramePayload>((payload) => {
+    runtime.channel = new Channel<FrameMessage>((payload) => {
       if (runtime.disposed) return;
+      if (!(payload instanceof ArrayBuffer) && !(payload instanceof Uint8Array)) {
+        const valid = payload?.kind === 'frameDelivery' && typeof payload.sessionId === 'string'
+          && typeof payload.generation === 'string' && payload.generation.length > 0
+          && Number.isInteger(payload.sequence) && payload.sequence > 0 && payload.sequence <= 0xffffffff;
+        runtime.metadata = valid && (!id || payload.sessionId === id) ? payload : null;
+        return;
+      }
+      const metadata = runtime.metadata;
+      runtime.metadata = null;
+      if (!metadata) return; // never bind binary bytes to an unrelated receipt
       const bytes = toFrameBytes(payload);
       try {
         const packet = parseFramePacket(bytes);
@@ -110,7 +130,21 @@ async function startSession(connectionId: string, existing?: SessionInfo): Promi
         compositeFrameRects(runtime.surface, packet.rects);
         runtime.surface.dirty = null;
         runtime.bytes += bytes.byteLength;
-        for (const listener of runtime.listeners) listener(bytes);
+        let sent = false;
+        const consumed = (refresh = false) => {
+          if (runtime.disposed || (sent && !refresh)) return;
+          sent = true;
+          void tauri.frameConsumed(metadata.sessionId, {
+            generation: metadata.generation, sequence: metadata.sequence,
+          }, refresh).catch((error) => {
+            // Keep the receipt for explicit recovery if IPC failed.
+            sent = false;
+            console.error('Failed to acknowledge session frame:', error);
+          });
+        };
+        runtime.completion = consumed;
+        for (const listener of runtime.listeners) listener(bytes, consumed);
+        if (runtime.listeners.size === 0) consumed();
       } catch (error) {
         console.error('Failed to consume session frame:', error);
       }

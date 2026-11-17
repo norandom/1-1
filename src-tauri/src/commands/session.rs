@@ -11,6 +11,23 @@ use crate::store::credentials::CredentialStore;
 use crate::store::library::LibraryStore;
 use crate::store::settings::SettingsStore;
 
+#[tauri::command]
+pub async fn frame_consumed(
+    session_id: String,
+    receipt: crate::rdp::frame_delivery::FrameReceipt,
+    refresh: bool,
+    session_mgr: State<'_, SessionManager>,
+) -> Result<(), String> {
+    let sender = session_mgr
+        .get_cmd_sender(&session_id)
+        .await
+        .ok_or_else(|| "Session not found".to_string())?;
+    sender
+        .send(SessionCommand::FrameConsumed { receipt, refresh })
+        .await
+        .map_err(|_| "Session stopped".to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn connect(

@@ -4,6 +4,7 @@ import type { CascadedIds, ConnectionSummary, DeletionReport, Folder, Library, L
 
 import {
   createFolder,
+  frameConsumed,
   createLibrary,
   deleteConnection,
   deleteFolder,
@@ -26,6 +27,14 @@ const invokeMock = vi.mocked(invoke);
 
 beforeEach(() => {
   invokeMock.mockReset();
+});
+
+it('frameConsumed scopes consumption and recovery to session and exact receipt', async () => {
+  const receipt = { generation: 'generation-a', sequence: 7 };
+  await frameConsumed('session-a', receipt);
+  expect(invokeMock).toHaveBeenLastCalledWith('frame_consumed', { sessionId: 'session-a', receipt, refresh: false });
+  await frameConsumed('session-a', receipt, true);
+  expect(invokeMock).toHaveBeenLastCalledWith('frame_consumed', { sessionId: 'session-a', receipt, refresh: true });
 });
 
 describe('library wrappers (task 6.4, Req 10.1/10.2/10.3/10.5)', () => {

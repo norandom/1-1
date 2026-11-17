@@ -192,6 +192,7 @@ pub fn run() {
             commands::library::reload_library_store,
             // Session commands
             commands::session::connect,
+            commands::session::frame_consumed,
             commands::session::disconnect,
             commands::session::list_sessions,
             commands::session::get_session_info,

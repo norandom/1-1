@@ -244,7 +244,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Depends: 6.3_
   - _Requirements: 10.12,10.15_
 
-- [ ] 9. Upstream EGFX and bounded rendering
+- [x] 9. Upstream EGFX and bounded rendering
 - [x] 9.1 Implement capability policy from proven upstream APIs
   - Use only supported non-AVC flags/versions from the pinned crate; distinguish channel selection and observed update codec.
   - Done: Tests cover supported EGFX codecs, no-EGFX bitmap fallback and absence of AVC advertisement.
@@ -265,7 +265,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - Done: Disjoint/overlapping updates and resize fixtures produce correct complete pixels.
   - _Boundary: Frame batching_
   - _Requirements: 4.1,4.4,9.8_
-- [ ] 9.5 Bound UI delivery with existing Tokio primitives
+- [x] 9.5 Bound UI delivery with existing Tokio primitives
   - One in-flight packet plus pending damage accumulator; generation-scoped consumption acknowledgement; five-second stall and full refresh on recovery.
   - Done: Delayed/dropped/stale acknowledgement tests preserve latest full image and bound pending delivery.
   - _Boundary: Frame acknowledgement integration_
@@ -351,6 +351,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,7.3,8.1,8.2,8.3,8.4,8.5,8.6,12.1,12.6,12.8,12.9,13.1,13.2,13.3,13.4_
 
 ## Implementation Notes
+- 2026-11-17: 9.5 independently APPROVED after reactivation remediation. One in-flight receipt plus accumulated damage; ordered same-channel metadata keeps binary bytes unchanged; active canvas acknowledges after painting, background runtime after compositing. Five-second stall/full-refresh recovery and smaller/same-size reactivation are covered by real actor pixel tests. VERIFIED: 443 frontend tests, 286 default Rust and 304 test-support Rust tests (four existing skips each), lint/typecheck/build/fmt/doctests, Clippy with two existing warnings. Final native test-support smoke verified dashboard return, two-session rendering and adjacent close; two explicit connects/two actors. Artifacts: `D:/BuildArtifacts/drift-rdp/task95`. Group 9 checkpoint; next 10.1. Native synthetic evidence is not real-server text-quality acceptance.
 - 2026-11-17: 8.6 remediation independently APPROVED after one rejected round. Session-owned channels/latest composed image survive view navigation; connection-keyed views reset input state; synchronous route/removal fixes adjacent-tab close. VERIFIED: 438 frontend tests, lint/typecheck/build; native dashboard return and close B to existing A with pixels retained. No checkbox count change (45/61). Native failure acceptance remains unproven because existing B3-7 backend fallback turns failed real connects into mock Connected sessions; resolve before 11.x server acceptance. Roadmap: `.kiro/steering/roadmap.md`.
 - Controller sweep owed (before 11.12 audit): baseline-coverage.md rows need updating for 6.6 — B3-1/B3-2/B3-3 FIXED (regression tests in library.rs connection_crud_tests), B3-4 OBSOLETED (fail-closed v2 store), row 1.3/B3-5 pin intact (restored verbatim); B3-2 keyring-half remains convention+E2E covered (see test doc at library.rs ~L4683).
 - 6.5 suggestion carried for 8.4/11.2: add a direct folder→library-root move test (parent→None + subtree library_id rewrite) — branch is shared code already proven via connection→library, but deserves its own case.

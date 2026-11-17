@@ -47,6 +47,8 @@ function SessionContent() {
     bandwidth,
     reconnectAttempts,
     maxReconnectAttempts,
+    displayStalled,
+    refreshDisplay,
     subscribeToFrames,
     reportFramePresented,
     connect,
@@ -297,6 +299,8 @@ function SessionContent() {
 
         {/* Canvas */}
         <SessionCanvas
+          displayStalled={displayStalled}
+          onRefreshDisplay={refreshDisplay}
           key={sessionId ?? id}
           subscribeToFrames={subscribeToFrames}
           status={status}

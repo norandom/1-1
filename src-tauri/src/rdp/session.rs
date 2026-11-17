@@ -12,6 +12,7 @@ use crate::rdp::clipboard::SessionClipboardBackend;
 use crate::rdp::codec_policy::CodecErrorPolicy;
 use crate::rdp::display::FrameBuffer;
 use crate::rdp::frame_batch;
+use crate::rdp::frame_delivery::{FrameDelivery, FrameReceipt};
 use crate::rdp::frame_transport::{
     encode_full_frame_packet, encode_full_frame_packet_from_parts, encode_image_update_packet,
 };
@@ -63,6 +64,7 @@ impl PerformanceMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
+    pub display_stalled: bool,
     pub id: String,
     pub connection_id: String,
     pub connection_name: String,
@@ -243,6 +245,7 @@ struct SessionActor {
     connected_at: Option<DateTime<Utc>>,
     frame_buffer: FrameBuffer,
     frame_packet_scratch: Vec<u8>,
+    delivery: FrameDelivery,
     cmd_rx: mpsc::Receiver<SessionCommand>,
     info_tx: watch::Sender<SessionInfo>,
     clipboard_tx: watch::Sender<Option<String>>,
@@ -287,6 +290,7 @@ impl SessionActor {
             connected_at: None,
             frame_buffer: FrameBuffer::generate_mock_frame(width, height),
             frame_packet_scratch: Vec::with_capacity((width * height * 4) as usize),
+            delivery: FrameDelivery::new(),
             cmd_rx,
             info_tx,
             clipboard_tx,
@@ -304,6 +308,7 @@ impl SessionActor {
     /// Build a SessionInfo snapshot from the current actor state.
     fn build_info(&self) -> SessionInfo {
         SessionInfo {
+            display_stalled: self.delivery.stalled,
             id: self.id.clone(),
             connection_id: self.config.id.clone(),
             connection_name: self.config.name.clone(),
@@ -345,7 +350,23 @@ impl SessionActor {
         }
     }
 
-    fn send_frame_packet(&mut self, packet: Vec<u8>) -> Result<(), DisconnectReason> {
+    fn send_frame_packet(
+        &mut self,
+        receipt: FrameReceipt,
+        packet: Vec<u8>,
+    ) -> Result<(), DisconnectReason> {
+        // Metadata and binary use the SAME ordered channel. Binary packet bytes
+        // remain unchanged; independent event ordering cannot misbind receipts.
+        let metadata = serde_json::json!({ "kind": "frameDelivery", "sessionId": self.id,
+            "generation": receipt.generation, "sequence": receipt.sequence });
+        if self
+            .frame_channel
+            .send(tauri::ipc::InvokeResponseBody::Json(metadata.to_string()))
+            .is_err()
+        {
+            self.delivery.failed_send();
+            return Err(DisconnectReason::ConnectionLost);
+        }
         // Task 5.4 (Req 12.4): the kind byte is captured before the send
         // consumes the buffer; the counting hook below is compiled out of
         // production builds entirely.
@@ -368,6 +389,7 @@ impl SessionActor {
                 Ok(())
             }
             Err(error) => {
+                self.delivery.failed_send();
                 log::warn!(
                     "Failed to send frame packet for session {}: {}",
                     self.id,
@@ -405,8 +427,49 @@ impl SessionActor {
     /// Send the mock frame as a decoded RGBA bitmap packet (kinds 1/2 only;
     /// the H.264 transcode hop was removed by task 4.4, Req 9.4).
     fn send_mock_frame(&mut self) -> Result<(), DisconnectReason> {
+        let surface = (self.width as u16, self.height as u16);
+        self.delivery.damage(
+            surface,
+            frame_batch::BatchPlan {
+                full_refresh: true,
+                rect: ironrdp_pdu::geometry::InclusiveRectangle {
+                    left: 0,
+                    top: 0,
+                    right: surface.0 - 1,
+                    bottom: surface.1 - 1,
+                },
+            },
+        );
+        self.flush_mock_frame()
+    }
+
+    fn flush_mock_frame(&mut self) -> Result<(), DisconnectReason> {
+        let Some((receipt, _)) = self.delivery.take(tokio::time::Instant::now()) else {
+            return Ok(());
+        };
         let packet = encode_full_frame_packet(&self.frame_buffer);
-        self.send_frame_packet(packet)
+        self.send_frame_packet(receipt, packet)
+    }
+
+    fn flush_image_frame(
+        &mut self,
+        image: &ironrdp_session::image::DecodedImage,
+    ) -> Result<(), DisconnectReason> {
+        let Some((receipt, plan)) = self.delivery.take(tokio::time::Instant::now()) else {
+            return Ok(());
+        };
+        let packet = if plan.full_refresh {
+            encode_full_frame_packet_from_parts(image.width(), image.height(), image.data())
+        } else {
+            encode_image_update_packet(image, &[plan.rect], &mut self.frame_packet_scratch)
+        };
+        self.send_frame_packet(receipt, packet)
+    }
+
+    fn check_display_stall(&mut self) {
+        if self.delivery.check_stall(tokio::time::Instant::now()) {
+            self.publish_info();
+        }
     }
 
     async fn flush_clipboard_messages<W>(
@@ -733,6 +796,7 @@ impl SessionActor {
         // every (re)connect because this loop (and its decoded image)
         // starts fresh per connection.
         let mut delivered_surface: Option<(u16, u16)> = None;
+        self.delivery.reset();
 
         if let Some(text) = self.local_clipboard_text.clone()
             && self
@@ -745,6 +809,7 @@ impl SessionActor {
 
         'session: loop {
             tokio::select! {
+                _ = crate::rdp::frame_delivery::wait_for_stall(self.delivery.deadline()) => self.check_display_stall(),
                 // Read PDUs from the server
                 pdu_result = reader.read_pdu() => {
                     let (action, payload) = match pdu_result {
@@ -852,6 +917,12 @@ impl SessionActor {
                     }
 
                     if deactivate_all {
+                        // A replacement share invalidates old dirty coordinates,
+                        // even when its dimensions stay the same. Keep only the
+                        // occupied transport slot; its receipt can drain that
+                        // slot but cannot flush pixels from the previous share.
+                        self.delivery.reset();
+                        delivered_surface = None;
                         match self
                             .drive_reactivation(
                                 &activation_factory,
@@ -966,22 +1037,8 @@ impl SessionActor {
                                 }
                             }
 
-                            // Always send via IPC — webview Canvas renders these
-                            // (wgpu renders behind the webview, not visible yet)
-                            let packet = if plan.full_refresh {
-                                encode_full_frame_packet_from_parts(
-                                    surface.0,
-                                    surface.1,
-                                    image.data(),
-                                )
-                            } else {
-                                encode_image_update_packet(
-                                    &image,
-                                    &[plan.rect],
-                                    &mut self.frame_packet_scratch,
-                                )
-                            };
-                            if self.send_frame_packet(packet).is_err() {
+                            self.delivery.damage(surface, plan);
+                            if self.flush_image_frame(&image).is_err() {
                                 return DisconnectReason::ConnectionLost;
                             }
                             delivered_surface = Some(surface);
@@ -1000,6 +1057,13 @@ impl SessionActor {
                 // Process commands from the frontend
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
+                        Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
+                            let was_stalled = self.delivery.stalled;
+                            if self.delivery.acknowledge(&receipt, refresh) {
+                                if was_stalled { self.publish_info(); }
+                                if self.flush_image_frame(&image).is_err() { return DisconnectReason::ConnectionLost; }
+                            }
+                        }
                         Some(SessionCommand::Disconnect) | None => {
                             log::info!("Session {} received disconnect command", self.id);
                             // Try graceful shutdown
@@ -1167,6 +1231,10 @@ impl SessionActor {
                 // Wait for the next server PDU while staying responsive to
                 // commands (cancel mirrors Req 2.4's intent).
                 let (_action, payload) = tokio::select! {
+                    _ = crate::rdp::frame_delivery::wait_for_stall(self.delivery.deadline()) => {
+                        self.check_display_stall();
+                        continue;
+                    }
                     pdu = reader.read_pdu() => match pdu {
                         Ok(pdu) => pdu,
                         Err(e) => {
@@ -1176,6 +1244,13 @@ impl SessionActor {
                     },
                     cmd = self.cmd_rx.recv() => {
                         match cmd {
+                            Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
+                                let was_stalled = self.delivery.stalled;
+                                if self.delivery.acknowledge(&receipt, refresh) && was_stalled {
+                                    self.publish_info();
+                                }
+                                continue;
+                            }
                             Some(SessionCommand::Disconnect) | None => {
                                 log::info!(
                                     "Session {} disconnect requested during reactivation",
@@ -1415,6 +1490,9 @@ impl SessionActor {
                 _ = &mut sleep => return false,
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
+                        Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
+                            self.delivery.acknowledge(&receipt, refresh);
+                        }
                         Some(SessionCommand::Disconnect) | None => return true,
                         // Process other commands while waiting
                         Some(SessionCommand::Resize { width, height }) => {
@@ -1437,12 +1515,28 @@ impl SessionActor {
     /// Mock session loop: sends an initial full frame and refreshes on resize.
     /// Returns the reason the loop ended.
     async fn run_mock_frame_loop(&mut self) -> DisconnectReason {
+        self.delivery.reset();
         if self.send_mock_frame().is_err() {
             return DisconnectReason::ConnectionLost;
         }
 
         loop {
-            match self.cmd_rx.recv().await {
+            let command = tokio::select! {
+                command = self.cmd_rx.recv() => command,
+                _ = crate::rdp::frame_delivery::wait_for_stall(self.delivery.deadline()) => { self.check_display_stall(); continue; }
+            };
+            match command {
+                Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
+                    let was_stalled = self.delivery.stalled;
+                    if self.delivery.acknowledge(&receipt, refresh) {
+                        if was_stalled {
+                            self.publish_info();
+                        }
+                        if self.flush_mock_frame().is_err() {
+                            return DisconnectReason::ConnectionLost;
+                        }
+                    }
+                }
                 Some(SessionCommand::Disconnect) | None => {
                     log::info!("Session {} received disconnect command", self.id);
                     self.state = SessionState::Disconnected;
@@ -1814,6 +1908,7 @@ impl SessionManager {
 
         // Build initial info for the watch channel
         let initial_info = SessionInfo {
+            display_stalled: false,
             id: session_id.clone(),
             connection_id: config.id.clone(),
             connection_name: config.name.clone(),
@@ -2160,12 +2255,57 @@ mod tests {
         }
     }
 
+    // Existing fixtures model an immediately consuming UI. Withheld-consumption
+    // tests use a raw Channel instead and explicitly send receipts themselves.
+    fn consuming_channel(
+        manager: &SessionManager,
+        sink: impl Fn(InvokeResponseBody) -> tauri::Result<()> + Send + Sync + 'static,
+    ) -> Channel<InvokeResponseBody> {
+        let state = Arc::downgrade(&manager.state);
+        let pending = std::sync::Mutex::new(None::<(String, FrameReceipt)>);
+        Channel::new(move |response| {
+            if let InvokeResponseBody::Json(json) = &response {
+                let value: serde_json::Value = serde_json::from_str(json).unwrap();
+                *pending.lock().unwrap() = Some((
+                    value["sessionId"].as_str().unwrap().to_owned(),
+                    serde_json::from_value(value).unwrap(),
+                ));
+                return Ok(());
+            }
+            sink(response)?;
+            if let Some((id, receipt)) = pending.lock().unwrap().take() {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let Some(state) = state.upgrade() else {
+                        return;
+                    };
+                    let sender = state
+                        .lock()
+                        .await
+                        .handles
+                        .get(&id)
+                        .map(|h| h.cmd_tx.clone());
+                    if let Some(sender) = sender {
+                        let _ = sender
+                            .send(SessionCommand::FrameConsumed {
+                                receipt,
+                                refresh: false,
+                            })
+                            .await;
+                    }
+                });
+            }
+            Ok(())
+        })
+    }
+
     fn scripted_frame_channel(
+        manager: &SessionManager,
         script: FrameScript,
         sizes: Arc<std::sync::Mutex<Vec<usize>>>,
     ) -> Channel<InvokeResponseBody> {
         let sent = Arc::new(AtomicUsize::new(0));
-        Channel::new(move |response| {
+        consuming_channel(manager, move |response| {
             let n = sent.fetch_add(1, Ordering::SeqCst) + 1;
             let fail = match &script {
                 FrameScript::Ok => false,
@@ -2206,7 +2346,7 @@ mod tests {
             .create_session_with_transport(
                 test_config(tag),
                 None,
-                scripted_frame_channel(script, Arc::clone(&frame_sizes)),
+                scripted_frame_channel(manager, script, Arc::clone(&frame_sizes)),
                 SessionEventSink::recorded(Arc::clone(&events)),
                 auto_reconnect,
                 None,
@@ -2298,7 +2438,7 @@ mod tests {
             .create_session_with_transport(
                 test_config("adm11"),
                 None,
-                scripted_frame_channel(FrameScript::Ok, sizes),
+                scripted_frame_channel(&manager, FrameScript::Ok, sizes),
                 SessionEventSink::recorded(events),
                 true,
                 None,
@@ -2376,7 +2516,7 @@ mod tests {
                     .create_session_with_transport(
                         test_config("dup"),
                         None,
-                        scripted_frame_channel(FrameScript::Ok, sizes),
+                        scripted_frame_channel(&manager, FrameScript::Ok, sizes),
                         sink,
                         true,
                         None,
@@ -2485,7 +2625,7 @@ mod tests {
             .create_session_with_transport(
                 test_config("restart"),
                 None,
-                scripted_frame_channel(FrameScript::Ok, sizes),
+                scripted_frame_channel(&manager, FrameScript::Ok, sizes),
                 SessionEventSink::recorded(Arc::clone(&events)),
                 true,
                 None,
@@ -2570,7 +2710,7 @@ mod tests {
             .create_session_with_transport(
                 test_config("cap11"),
                 None,
-                scripted_frame_channel(FrameScript::Ok, sizes),
+                scripted_frame_channel(&manager, FrameScript::Ok, sizes),
                 SessionEventSink::recorded(events),
                 true,
                 None,
@@ -2597,7 +2737,7 @@ mod tests {
             .create_session_with_transport(
                 test_config("cap2"),
                 None,
-                scripted_frame_channel(FrameScript::Ok, sizes),
+                scripted_frame_channel(&manager, FrameScript::Ok, sizes),
                 SessionEventSink::recorded(events),
                 true,
                 None,
@@ -2632,7 +2772,7 @@ mod tests {
             .create_session_with_transport(
                 test_config("cap1"),
                 None,
-                scripted_frame_channel(FrameScript::Ok, sizes),
+                scripted_frame_channel(&manager, FrameScript::Ok, sizes),
                 SessionEventSink::recorded(Arc::clone(&events)),
                 true,
                 None,
@@ -3649,7 +3789,7 @@ mod tests {
             let frame_kinds = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
             let connect_calls = Arc::new(AtomicUsize::new(0));
             let kinds_sink = Arc::clone(&frame_kinds);
-            let frame_channel = tauri::ipc::Channel::new(move |response| {
+            let frame_channel = consuming_channel(manager, move |response| {
                 if let tauri::ipc::InvokeResponseBody::Raw(bytes) = &response
                     && let Some(kind) = bytes.first()
                 {
@@ -4161,6 +4301,10 @@ mod tests {
         }
 
         fn demand_active_frame() -> Vec<u8> {
+            demand_active_frame_for(REACTIVATION_WIDTH, REACTIVATION_HEIGHT)
+        }
+
+        fn demand_active_frame_for(width: u16, height: u16) -> Vec<u8> {
             use ironrdp_pdu::rdp::capability_sets::{
                 Bitmap, BitmapDrawingFlags, CapabilitySet, DemandActive, General, PROTOCOL_VER,
                 ServerDemandActive,
@@ -4177,8 +4321,8 @@ mod tests {
                             }),
                             CapabilitySet::Bitmap(Bitmap {
                                 pref_bits_per_pix: 32,
-                                desktop_width: REACTIVATION_WIDTH,
-                                desktop_height: REACTIVATION_HEIGHT,
+                                desktop_width: width,
+                                desktop_height: height,
                                 desktop_resize_flag: true,
                                 drawing_flags: BitmapDrawingFlags::ALLOW_SKIP_ALPHA,
                             }),
@@ -4296,7 +4440,7 @@ mod tests {
                 .create_session_with_transport(
                     test_config(tag),
                     None,
-                    scripted_frame_channel(FrameScript::Ok, Arc::clone(&frame_sizes)),
+                    scripted_frame_channel(manager, FrameScript::Ok, Arc::clone(&frame_sizes)),
                     SessionEventSink::recorded(Arc::clone(&events)),
                     auto_reconnect,
                     None,
@@ -4316,6 +4460,203 @@ mod tests {
                 frame_sizes,
                 connect_calls,
             }
+        }
+
+        fn bitmap_wire_frames(
+            rect: ironrdp_pdu::geometry::InclusiveRectangle,
+            rows: &[u8],
+        ) -> Vec<Vec<u8>> {
+            use ironrdp_pdu::fast_path::{EncryptionFlags, FastPathHeader};
+            crate::rdp::baseline::encode_bitmap_update_pdu_16bpp(&[rect], &[rows])
+                .into_iter()
+                .map(|frame| {
+                    // Baseline fixtures target ActiveStage directly. The framed
+                    // transport also needs the update-header bytes in its length.
+                    let header_len = if frame[1] & 0x80 == 0 { 2 } else { 3 };
+                    let payload = &frame[header_len..];
+                    let mut wire = ironrdp_pdu::encode_vec(&FastPathHeader::new(
+                        EncryptionFlags::empty(),
+                        payload.len(),
+                    ))
+                    .unwrap();
+                    wire.extend_from_slice(payload);
+                    wire
+                })
+                .collect()
+        }
+
+        async fn settle_actor() {
+            // All transport and command work here is in-memory on one runtime.
+            // Yield without advancing paused time: specifically ACK before the
+            // first graphics update of the replacement share, not on a timer.
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        async fn verify_delivery_reactivation(size: u16, ack_during_activation: bool) {
+            use crate::rdp::baseline::full_frame_rect;
+            use ironrdp_pdu::geometry::InclusiveRectangle;
+            use tokio::io::AsyncWriteExt as _;
+            let manager = SessionManager::new();
+            let (client_end, mut server_end) = tokio::io::duplex(64 * 1024);
+            let stream = std::sync::Mutex::new(Some(client_end));
+            let connect: ConnectFn = Arc::new(move |_, _, _, _| {
+                let stream = stream.lock().unwrap().take().unwrap();
+                Box::pin(async move {
+                    ConnectionOutcome::RealSessionLocal {
+                        connection_result: Box::new(
+                            crate::rdp::baseline::synthetic_connection_result(64, 64),
+                        ),
+                        framed: Box::new(ironrdp_tokio::TokioFramed::new(stream)),
+                        codec_policy: Arc::new(CodecErrorPolicy::new()),
+                    }
+                })
+            });
+            let receipts = Arc::new(std::sync::Mutex::new(Vec::<FrameReceipt>::new()));
+            let packets = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+            let rs = Arc::clone(&receipts);
+            let ps = Arc::clone(&packets);
+            let channel = Channel::new(move |response| {
+                match response {
+                    InvokeResponseBody::Json(json) => rs
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_str(&json).unwrap()),
+                    InvokeResponseBody::Raw(bytes) => ps.lock().unwrap().push(bytes),
+                }
+                Ok(())
+            });
+            let (events, _) = RecordedEvents::new();
+            let shared = SharedFrame::new(64, 64);
+            let id = manager
+                .create_session_with_transport(
+                    test_config("delivery-reactivation"),
+                    None,
+                    channel,
+                    SessionEventSink::recorded(events),
+                    false,
+                    Some(Arc::clone(&shared)),
+                    connect,
+                )
+                .await
+                .unwrap();
+            let sender = manager.get_cmd_sender(&id).await.unwrap();
+            let red_rows = [0x00, 0xf8].repeat(64 * 64);
+            for frame in bitmap_wire_frames(full_frame_rect(64, 64), &red_rows) {
+                server_end.write_all(&frame).await.unwrap();
+            }
+            settle_actor().await;
+            assert_eq!(packets.lock().unwrap().len(), 1);
+            let old = receipts.lock().unwrap()[0].clone();
+            // This damage is outside the future 32x32 image. A stale flush
+            // would slice beyond the replacement DecodedImage and panic.
+            let dirty = InclusiveRectangle {
+                left: 48,
+                top: 48,
+                right: 63,
+                bottom: 63,
+            };
+            let blue_rows = [0x1f, 0x00].repeat(16 * 16);
+            for frame in bitmap_wire_frames(dirty, &blue_rows) {
+                server_end.write_all(&frame).await.unwrap();
+            }
+            settle_actor().await;
+            assert_eq!(packets.lock().unwrap().len(), 1);
+            assert!(shared.publish().is_some());
+            let mut activation = reactivation_script_frames();
+            activation[1] = demand_active_frame_for(size, size);
+            if ack_during_activation {
+                // Leave the sequence awaiting DemandActive to ensure ACK is
+                // handled by drive_reactivation, not the main actor loop.
+                server_end.write_all(&activation[0]).await.unwrap();
+                settle_actor().await;
+                tokio::time::advance(std::time::Duration::from_secs(5)).await;
+                settle_actor().await;
+                assert!(manager.get_session_info(&id).await.unwrap().display_stalled);
+                sender
+                    .send(SessionCommand::FrameConsumed {
+                        receipt: old.clone(),
+                        refresh: false,
+                    })
+                    .await
+                    .unwrap();
+                settle_actor().await;
+                assert!(
+                    !manager.get_session_info(&id).await.unwrap().display_stalled,
+                    "ACK during reactivation must publish cleared display stall"
+                );
+                for frame in &activation[1..] {
+                    server_end.write_all(frame).await.unwrap();
+                }
+            } else {
+                for frame in activation {
+                    server_end.write_all(&frame).await.unwrap();
+                }
+            }
+            settle_actor().await;
+            sender
+                .send(SessionCommand::FrameConsumed {
+                    receipt: old.clone(),
+                    refresh: false,
+                })
+                .await
+                .unwrap();
+            settle_actor().await;
+            assert_eq!(
+                packets.lock().unwrap().len(),
+                1,
+                "old share damage must not flush after reactivation"
+            );
+            assert!(
+                !sender.is_closed(),
+                "reactivation ACK must not panic the actor"
+            );
+            let green_rows = [0xe0, 0x07].repeat(usize::from(size) * usize::from(size));
+            for frame in bitmap_wire_frames(full_frame_rect(size, size), &green_rows) {
+                server_end.write_all(&frame).await.unwrap();
+            }
+            settle_actor().await;
+            assert_eq!(packets.lock().unwrap().len(), 2);
+            let packet = packets.lock().unwrap()[1].clone();
+            assert_eq!(packet[0], 1, "new share begins with full image");
+            assert_eq!(u16::from_le_bytes([packet[1], packet[2]]), size);
+            assert_eq!(
+                &packet[15..],
+                &[0, 255, 0, 255].repeat(usize::from(size) * usize::from(size))
+            );
+            let new = receipts.lock().unwrap()[1].clone();
+            assert_ne!(
+                new.generation, old.generation,
+                "same-size shares also start a new generation"
+            );
+            sender
+                .send(SessionCommand::FrameConsumed {
+                    receipt: old,
+                    refresh: true,
+                })
+                .await
+                .unwrap();
+            settle_actor().await;
+            assert_eq!(
+                packets.lock().unwrap().len(),
+                2,
+                "duplicate old ACK cannot release new flight"
+            );
+            manager.remove_session(&id).await.unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn smaller_reactivation_drops_pending_old_damage_before_ack() {
+            verify_delivery_reactivation(32, false).await;
+        }
+        #[tokio::test(start_paused = true)]
+        async fn same_size_reactivation_starts_new_delivery_generation() {
+            verify_delivery_reactivation(64, false).await;
+        }
+        #[tokio::test(start_paused = true)]
+        async fn ack_during_same_size_reactivation_publishes_stall_recovery() {
+            verify_delivery_reactivation(64, true).await;
         }
 
         /// Task 7.4 acceptance (Req 11.4): DeactivateAll during an active
@@ -4741,11 +5082,12 @@ mod tests {
         type CapturedPackets = Arc<StdMutex<Vec<Vec<u8>>>>;
 
         /// Frame-capturing IPC channel: records every raw packet verbatim.
-        fn packet_capturing_channel() -> (tauri::ipc::Channel<InvokeResponseBody>, CapturedPackets)
-        {
+        fn packet_capturing_channel(
+            manager: &SessionManager,
+        ) -> (tauri::ipc::Channel<InvokeResponseBody>, CapturedPackets) {
             let packets: CapturedPackets = Arc::new(StdMutex::new(Vec::new()));
             let sink = Arc::clone(&packets);
-            let channel = tauri::ipc::Channel::new(move |response| {
+            let channel = consuming_channel(manager, move |response| {
                 if let InvokeResponseBody::Raw(bytes) = response {
                     sink.lock().unwrap().push(bytes);
                 }
@@ -4761,6 +5103,7 @@ mod tests {
         const EGFX_DUPLEX_CAPACITY: usize = 4 * 1024 * 1024;
 
         struct EgfxTestSession {
+            receipts: Arc<StdMutex<Vec<FrameReceipt>>>,
             session: TestSession,
             packets: CapturedPackets,
             shared_frame: Arc<SharedFrame>,
@@ -4775,10 +5118,37 @@ mod tests {
             server_frames: Vec<Vec<u8>>,
             shared_frame: Arc<SharedFrame>,
         ) -> EgfxTestSession {
+            create_egfx_session_with_ack(manager, tag, server_frames, shared_frame, true).await
+        }
+
+        async fn create_egfx_session_with_ack(
+            manager: &SessionManager,
+            tag: &str,
+            server_frames: Vec<Vec<u8>>,
+            shared_frame: Arc<SharedFrame>,
+            auto_ack: bool,
+        ) -> EgfxTestSession {
             let (events, events_rx) = RecordedEvents::new();
             let frame_sizes = Arc::new(StdMutex::new(Vec::new()));
             let connect_calls = Arc::new(AtomicUsize::new(0));
-            let (channel, packets) = packet_capturing_channel();
+            let (channel, packets) = packet_capturing_channel(manager);
+            let receipts = Arc::new(StdMutex::new(Vec::new()));
+            let channel = if auto_ack {
+                channel
+            } else {
+                let receipts = Arc::clone(&receipts);
+                let packets = Arc::clone(&packets);
+                Channel::new(move |response| {
+                    match response {
+                        InvokeResponseBody::Json(json) => receipts
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_str(&json).unwrap()),
+                        InvokeResponseBody::Raw(bytes) => packets.lock().unwrap().push(bytes),
+                    }
+                    Ok(())
+                })
+            };
             let (client_end, mut server_end) = tokio::io::duplex(EGFX_DUPLEX_CAPACITY);
 
             tokio::spawn(async move {
@@ -4788,6 +5158,11 @@ mod tests {
                         .write_all(&frame)
                         .await
                         .expect("scripted EGFX server write");
+                    // Immediate-consumer fixtures pace PDUs so each batch can be consumed.
+                    // Withheld-ACK fixtures deliberately flood the same production loop.
+                    if auto_ack {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
                 }
                 // Park like an idle server: the session stays live.
                 std::future::pending::<()>().await;
@@ -4844,6 +5219,7 @@ mod tests {
                 .await
                 .expect("session handle exists right after creation");
             EgfxTestSession {
+                receipts,
                 session: TestSession {
                     id,
                     cmd_tx,
@@ -4873,6 +5249,128 @@ mod tests {
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
+        }
+
+        async fn verify_withheld_delivery(stall: bool) {
+            let manager = SessionManager::new();
+            let base = expected_rgba(W, H);
+            let mut expected = base.clone();
+            let mut frames = egfx_server_frames(&base);
+            let mut compressor = Compressor::new();
+            for (index, (x, y, color)) in [
+                (2, 2, [9, 130, 240]),
+                (44, 6, [240, 9, 130]),
+                (8, 8, [17, 18, 19]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                frames.extend(egfx_frame_frames(
+                    index as u32 + 2,
+                    sub_rect_clearcodec_wire(color, x, y, 16, 16),
+                    &mut compressor,
+                ));
+                overlay_solid(&mut expected, W, x, y, 16, 16, color);
+            }
+            let egfx = create_egfx_session_with_ack(
+                &manager,
+                "withheld",
+                frames,
+                SharedFrame::new(u32::from(W), u32::from(H)),
+                false,
+            )
+            .await;
+            wait_for_packets(&egfx, |n| n == 1).await;
+            // Let real upstream decode/composition finish while UI does NOT ACK.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if egfx
+                    .shared_frame
+                    .publish()
+                    .is_some_and(|s| s.data == expected)
+                {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "latest decoded image missing"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            assert_eq!(
+                egfx.packets.lock().unwrap().len(),
+                1,
+                "no packet queue while UI waits"
+            );
+            let receipt = egfx.receipts.lock().unwrap()[0].clone();
+            if stall {
+                tokio::time::advance(std::time::Duration::from_secs(5)).await;
+                tokio::task::yield_now().await;
+                assert!(
+                    manager
+                        .get_session_info(&egfx.session.id)
+                        .await
+                        .unwrap()
+                        .display_stalled
+                );
+                assert_eq!(egfx.packets.lock().unwrap().len(), 1);
+            }
+            egfx.session
+                .cmd_tx
+                .send(SessionCommand::FrameConsumed {
+                    receipt: receipt.clone(),
+                    refresh: false,
+                })
+                .await
+                .unwrap();
+            wait_for_packets(&egfx, |n| n == 2).await;
+            let packets = egfx.packets.lock().unwrap().clone();
+            let initial = parse_packet(&packets[0]);
+            let next = parse_packet(&packets[1]);
+            assert_eq!(next.kind, if stall { 1 } else { 2 });
+            let mut received = initial.pixels;
+            let mut source = 0;
+            for (x, y, width, height) in next.rects {
+                for row in y..y + height {
+                    let dest = (usize::from(row) * usize::from(W) + usize::from(x)) * 4;
+                    let count = usize::from(width) * 4;
+                    received[dest..dest + count]
+                        .copy_from_slice(&next.pixels[source..source + count]);
+                    source += count;
+                }
+            }
+            assert_eq!(
+                received, expected,
+                "all disjoint and overlapping damage survives"
+            );
+            assert!(
+                !manager
+                    .get_session_info(&egfx.session.id)
+                    .await
+                    .unwrap()
+                    .display_stalled
+            );
+            // Duplicate old ACK may not release the new packet or trigger refresh.
+            egfx.session
+                .cmd_tx
+                .send(SessionCommand::FrameConsumed {
+                    receipt,
+                    refresh: true,
+                })
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            assert_eq!(egfx.packets.lock().unwrap().len(), 2);
+            disconnect_and_wait(&egfx).await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn egfx_delayed_ui_ack_preserves_latest_pixels() {
+            verify_withheld_delivery(false).await;
+        }
+        #[tokio::test(start_paused = true)]
+        async fn egfx_dropped_ui_ack_stalls_and_full_refresh_recovers_latest_pixels() {
+            verify_withheld_delivery(true).await;
         }
 
         /// One parsed frame packet: kind byte, surface dims, dirty rects
@@ -5352,7 +5850,11 @@ mod tests {
                 .create_session_with_transport(
                     test_config("egfx-avc-terminal"),
                     None,
-                    scripted_frame_channel(FrameScript::Ok, Arc::new(StdMutex::new(Vec::new()))),
+                    scripted_frame_channel(
+                        &manager,
+                        FrameScript::Ok,
+                        Arc::new(StdMutex::new(Vec::new())),
+                    ),
                     SessionEventSink::recorded(Arc::clone(&egfx.session.events)),
                     true,
                     None,
@@ -5480,7 +5982,7 @@ mod tests {
             let (events, events_rx) = RecordedEvents::new();
             let frame_sizes = Arc::new(StdMutex::new(Vec::new()));
             let connect_calls = Arc::new(AtomicUsize::new(0));
-            let (channel, packets) = packet_capturing_channel();
+            let (channel, packets) = packet_capturing_channel(&manager);
             let (client_end, mut server_end) = tokio::io::duplex(EGFX_DUPLEX_CAPACITY);
 
             tokio::spawn(async move {
@@ -5540,6 +6042,7 @@ mod tests {
                 .await
                 .expect("session handle exists right after creation");
             let egfx = EgfxTestSession {
+                receipts: Arc::new(StdMutex::new(Vec::new())),
                 session: TestSession {
                     id,
                     cmd_tx,

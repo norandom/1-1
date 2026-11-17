@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Loader2, WifiOff } from 'lucide-react';
 
 import { parseFramePacket } from '../../lib/frame-protocol';
+import type { FrameListener } from '../../lib/session-runtime';
 import {
   compositeFrameRects,
   fitSurfaceToContainer,
@@ -26,7 +27,9 @@ interface SurfaceBuffer {
 }
 
 interface Props {
-  subscribeToFrames: (listener: (frame: Uint8Array) => void) => () => void;
+  subscribeToFrames: (listener: FrameListener) => () => void;
+  displayStalled?: boolean;
+  onRefreshDisplay?: () => void;
   status: SessionStatus;
   reconnectAttempts?: number;
   maxReconnectAttempts?: number;
@@ -44,6 +47,8 @@ interface Props {
 
 export function SessionCanvas({
   subscribeToFrames,
+  displayStalled = false,
+  onRefreshDisplay,
   status,
   reconnectAttempts = 0,
   maxReconnectAttempts = 5,
@@ -62,6 +67,8 @@ export function SessionCanvas({
   const containerRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<SurfaceBuffer | null>(null);
   const renderScheduledRef = useRef(false);
+  const pendingConsumptionRef = useRef<(() => void) | undefined>(undefined);
+  const animationFrameRef = useRef<number | null>(null);
   const [displaySize, setDisplaySize] = useState(() => ({
     width: surfaceWidth,
     height: surfaceHeight,
@@ -121,7 +128,8 @@ export function SessionCanvas({
 
       renderScheduledRef.current = true;
 
-      requestAnimationFrame(() => {
+      animationFrameRef.current = requestAnimationFrame(() => {
+        animationFrameRef.current = null;
         renderScheduledRef.current = false;
 
         const canvas = canvasRef.current;
@@ -156,6 +164,9 @@ export function SessionCanvas({
         );
 
         onFramePresented?.();
+        const consumed = pendingConsumptionRef.current;
+        pendingConsumptionRef.current = undefined;
+        consumed?.();
 
         if (surface.dirty) {
           draw();
@@ -193,7 +204,7 @@ export function SessionCanvas({
   }, [surfaceHeight, surfaceWidth]);
 
   useEffect(() => {
-    const unsubscribe = subscribeToFrames((frame) => {
+    const unsubscribe = subscribeToFrames((frame, consumed) => {
       // Decoded RGBA bitmap packets only (kinds 1/2, Req 4.4/9.4): the
       // H.264 kind-3 path was removed with its encoder/decoder (task 4.4).
       let packet;
@@ -219,12 +230,16 @@ export function SessionCanvas({
       }
 
       compositeFrameRects(surface, packet.rects);
+      pendingConsumptionRef.current = consumed;
 
       scheduleDraw();
     });
 
     return () => {
       unsubscribe();
+      if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+      pendingConsumptionRef.current = undefined;
       renderScheduledRef.current = false;
       surfaceRef.current = null;
     };
@@ -396,6 +411,12 @@ export function SessionCanvas({
         onMouseUp={handleMouseUp}
         onWheel={handleWheel}
       />
+      {displayStalled && (
+        <div role="alert" className="absolute top-3 left-3 right-3 flex items-center justify-between gap-3 rounded bg-amber-950 px-4 py-3 text-white">
+          <span>Display updates paused. Refresh to resume.</span>
+          <button type="button" className="rounded border px-3 py-1" onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} onClick={onRefreshDisplay}>Refresh display</button>
+        </div>
+      )}
       {status === 'reconnecting' && (
         <motion.div
           initial={{ opacity: 0 }}

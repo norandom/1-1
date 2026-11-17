@@ -1,4 +1,7 @@
 export type FramePayload = ArrayBuffer | Uint8Array;
+export interface FrameReceipt { generation: string; sequence: number }
+export interface FrameDeliveryMessage extends FrameReceipt { kind: 'frameDelivery'; sessionId: string }
+export type FrameMessage = FramePayload | FrameDeliveryMessage;
 
 export interface FrameRect {
   x: number;

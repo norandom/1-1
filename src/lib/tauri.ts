@@ -15,7 +15,7 @@ import type {
   KeyEvent,
   MouseEvent as RdpMouseEvent,
 } from '../types';
-import type { FramePayload } from './frame-protocol';
+import type { FrameMessage, FrameReceipt } from './frame-protocol';
 
 // ── Connection Management ───────────────────────────────────────────
 
@@ -82,8 +82,12 @@ export async function measureLatency(host: string, port: number): Promise<number
 
 // ── Session Management ──────────────────────────────────────────────
 
-export async function connect(connectionId: string, frameChannel: Channel<FramePayload>): Promise<string> {
+export async function connect(connectionId: string, frameChannel: Channel<FrameMessage>): Promise<string> {
   return await invoke<string>('connect', { connectionId, frameChannel });
+}
+
+export async function frameConsumed(sessionId: string, receipt: FrameReceipt, refresh = false): Promise<void> {
+  await invoke('frame_consumed', { sessionId, receipt, refresh });
 }
 
 export async function disconnect(sessionId: string): Promise<void> {

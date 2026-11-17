@@ -17,7 +17,7 @@ scaling are separate concerns. A requested flag is not proof of server acceptanc
 | Stage | Existing scope | Completion evidence | State |
 |---|---|---|---|
 | 1. Session navigation repair | Remediate 8.6; requirements 11.2, 11.4, 11.6, 11.7, 11.8, 11.9 | Two sessions cannot exchange frames; dashboard/return restores the correct display without reconnecting; close releases resources; terminal restart retains identity | Reviewed and verified |
-| 2. Bounded delivery | 9.5 | One in-flight frame, accumulated damage, generation-aware acknowledgement, visible five-second stall and full-refresh recovery; delayed/dropped/stale acknowledgement tests | Pending |
+| 2. Bounded delivery | 9.5 | One in-flight frame, accumulated damage, generation-aware acknowledgement, visible five-second stall and full-refresh recovery; delayed/dropped/stale acknowledgement tests | Reviewed and verified |
 | 3. Font smoothing | 10.1 then 10.2 | Default on; saved toggle; `.rdp` import; legacy default and explicit off preserved; outgoing flag verified; help describes server override and reconnect | Pending |
 | 4. Pixel fidelity | 10.3 | Native pixels and aspect-preserving fit; correct mouse coordinates and scrolling at 100/125/150/200% DPI; no double scaling | Pending |
 | 5. Three-target readability | Relevant 11.x interoperability/text/performance evidence | Same fixed text page, font, remote resolution and server scaling; record actual codec and smoothing request; compare decoded pixels, canvas and screenshots, plus human readability feedback | Pending |
@@ -40,18 +40,30 @@ test framework is planned for text readability. Use upstream capabilities.
 - Keep task-local review and focused validation. Run platform/group gates at
   their existing boundaries, not after every cosmetic change. Record real failures
   and avoid rerunning unaffected checks without a reason.
-- Existing group-boundary holds remain in effect. The 8.6 remediation restores
-  the group-8 checkpoint; resume explicitly before 9.5. Completion of 9.5 is the next
-  group-9 checkpoint; group 10 follows that checkpoint.
+- Existing group-boundary holds remain in effect. Task 9.5 completes the group-9
+  checkpoint; group 10 follows explicit resume, starting with 10.1.
+- Computer Use runs only for a bounded native check. Close the isolated test app,
+  send the completion summary, and reset the session afterward; restart only when
+  another UI check is needed (user preference, 2026-11-17).
 - Checkboxes in tasks.md remain authoritative for original implementation tasks.
   This roadmap does not mark unfinished tasks complete or reopen unrelated work.
 
 ## Current evidence
 
-At starting HEAD `e5183bf`, 45 of 61 original subtasks are checked; 9.5,
+After task 9.5, 46 of 61 original subtasks are checked;
 10.1-10.3 and 11.1-11.12 remain open. Earlier three-target smoke runs established
 connectivity/frame/reconnect behavior, not completed text-quality acceptance.
 The current connector does not yet request font smoothing.
+
+Task 9.5 passed independent review after correcting reactivation damage and
+stall-state handling. Checks: 443 frontend tests, 286 default Rust tests,
+304 test-support Rust tests (four existing skips each), lint/typecheck/build,
+formatting and doctests; Clippy retains two existing warnings. Actor tests
+reproduce delayed/dropped acknowledgements and smaller/same-size reactivation,
+then verify exact latest-image pixels. Final native test-support smoke confirmed
+dashboard return, two-session rendering and adjacent close without extra connects.
+Artifacts: `D:/BuildArtifacts/drift-rdp/task95`. The test app and Computer Use
+session were closed after verification.
 
 Session remediation passed independent review, 438 frontend tests, lint,
 typecheck and production frontend build. Native test-support runs verified

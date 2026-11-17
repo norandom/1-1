@@ -31,6 +31,7 @@ export type SessionStatus =
   | 'error';
 
 export interface SessionInfo {
+  displayStalled?: boolean;
   id: string;
   connectionId: string;
   connectionName: string;
