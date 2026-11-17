@@ -1590,6 +1590,7 @@ impl LibraryStore {
                 display_width: input.display_width,
                 display_height: input.display_height,
                 font_smoothing: input.font_smoothing,
+                host_profile: input.host_profile.unwrap_or_default(),
                 mock,
                 library_id,
                 folder_id: input.folder_id,
@@ -1629,6 +1630,9 @@ impl LibraryStore {
             existing.display_width = input.display_width;
             existing.display_height = input.display_height;
             existing.font_smoothing = input.font_smoothing;
+            if let Some(profile) = input.host_profile {
+                existing.host_profile = profile;
+            }
             existing.mock = merge_update_mock_flag(existing.mock, input.mock);
             existing.updated_at = Utc::now();
             let updated = existing.clone();
@@ -2250,6 +2254,7 @@ mod tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -2770,6 +2775,7 @@ mod migration_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: library.id.clone(),
             folder_id: None,
@@ -3304,6 +3310,7 @@ mod crud_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -3695,6 +3702,7 @@ mod move_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -4258,6 +4266,7 @@ mod folder_deletion_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -4588,6 +4597,7 @@ mod library_deletion_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -4858,6 +4868,7 @@ mod unification_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: library.id.clone(),
             folder_id: None,
@@ -4918,6 +4929,7 @@ mod unification_tests {
             .get_connection("11111111-1111-4111-8111-111111111111")
             .unwrap()
             .expect("legacy id preserved");
+        assert_eq!(alpha.host_profile, Default::default());
         assert_eq!(alpha.name, "Alpha DC");
         assert_eq!(alpha.host, "alpha.invalid");
         assert_eq!(alpha.port, 3389);
@@ -5253,6 +5265,7 @@ mod unification_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: String::new(),
             folder_id: None,
@@ -5286,6 +5299,7 @@ mod connection_crud_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: String::new(),
             folder_id: None,
@@ -5295,6 +5309,101 @@ mod connection_crud_tests {
 
     fn store_at(root: &std::path::Path) -> LibraryStore {
         LibraryStore::open_unified(root.join("connections.json"), root.join("libraries.json"))
+    }
+
+    #[test]
+    fn host_profile_survives_crud_duplicate_reopen_and_legacy_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let profile = serde_json::json!({
+            "displayMode":"native", "resizeMode":"fixed", "wallpaper":true,
+            "fullWindowDrag":false, "menuAnimations":true, "themes":true,
+            "cursorShadow":true, "cursorBlinking":false, "desktopComposition":true,
+            "networkHint":"satellite"
+        });
+        let mut value = serde_json::to_value(sample("Profile", "profile.invalid")).unwrap();
+        value["hostProfile"] = profile.clone();
+        let created = store
+            .create_connection(serde_json::from_value(value.clone()).unwrap())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&created).unwrap()["hostProfile"],
+            profile
+        );
+        value.as_object_mut().unwrap().remove("hostProfile");
+        value["name"] = serde_json::json!("Legacy updated");
+        let updated = store
+            .update_connection(&created.id, serde_json::from_value(value).unwrap())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&updated).unwrap()["hostProfile"],
+            profile
+        );
+        let duplicate = store.duplicate_connection(&created.id).unwrap();
+        assert_eq!(
+            serde_json::to_value(&duplicate).unwrap()["hostProfile"],
+            profile
+        );
+        drop(store);
+        let reopened = store_at(dir.path());
+        assert_eq!(
+            serde_json::to_value(reopened.get_connection(&created.id).unwrap().unwrap()).unwrap()["hostProfile"],
+            profile
+        );
+    }
+
+    #[test]
+    fn host_profile_partial_update_and_import_survive_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(dir.path());
+        let created = store
+            .create_connection(sample("Default", "test.invalid"))
+            .unwrap();
+        assert_eq!(created.host_profile, Default::default());
+        let mut payload = serde_json::to_value(sample("Changed", "test.invalid")).unwrap();
+        payload["hostProfile"] =
+            serde_json::json!({"fullWindowDrag":false, "cursorBlinking":false});
+        let updated = store
+            .update_connection(&created.id, serde_json::from_value(payload).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(!updated.host_profile.full_window_drag);
+        assert!(!updated.host_profile.cursor_blinking);
+        assert_eq!(
+            updated.host_profile.display_mode,
+            crate::store::connections::DisplayMode::Fit
+        );
+        let path = dir.path().join("host.rdp");
+        std::fs::write(
+            &path,
+            "full address:s:import.invalid\ndisable wallpaper:i:0\nconnection type:i:1\n",
+        )
+        .unwrap();
+        let imported = store
+            .create_connection(
+                crate::store::connections::parse_rdp_file(path.to_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+        drop(store);
+        let reopened = store_at(dir.path());
+        assert_eq!(
+            reopened
+                .get_connection(&created.id)
+                .unwrap()
+                .unwrap()
+                .host_profile,
+            updated.host_profile
+        );
+        let profile = reopened
+            .get_connection(&imported.id)
+            .unwrap()
+            .unwrap()
+            .host_profile;
+        assert!(profile.wallpaper);
+        assert_eq!(
+            profile.network_hint,
+            crate::store::connections::NetworkHint::Modem
+        );
     }
 
     #[test]
@@ -5786,6 +5895,7 @@ mod production_mock_inertness_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: library.id.clone(),
             folder_id: None,

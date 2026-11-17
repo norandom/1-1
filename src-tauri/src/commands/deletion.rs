@@ -303,6 +303,7 @@ mod tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),

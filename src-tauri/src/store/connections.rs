@@ -11,6 +11,64 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DisplayMode {
+    #[default]
+    Fit,
+    Native,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResizeMode {
+    #[default]
+    Dynamic,
+    Fixed,
+}
+/// An explicit connection hint, not measured bandwidth or a rate limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NetworkHint {
+    #[default]
+    Lan,
+    Wan,
+    BroadbandHigh,
+    BroadbandLow,
+    Satellite,
+    Modem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HostProfile {
+    pub display_mode: DisplayMode,
+    pub resize_mode: ResizeMode,
+    pub wallpaper: bool,
+    pub full_window_drag: bool,
+    pub menu_animations: bool,
+    pub themes: bool,
+    pub cursor_shadow: bool,
+    pub cursor_blinking: bool,
+    pub desktop_composition: bool,
+    pub network_hint: NetworkHint,
+}
+impl Default for HostProfile {
+    fn default() -> Self {
+        Self {
+            display_mode: DisplayMode::Fit,
+            resize_mode: ResizeMode::Dynamic,
+            wallpaper: false,
+            full_window_drag: true,
+            menu_animations: false,
+            themes: false,
+            cursor_shadow: false,
+            cursor_blinking: true,
+            desktop_composition: false,
+            network_hint: NetworkHint::Lan,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionConfig {
@@ -32,6 +90,8 @@ pub struct ConnectionConfig {
     pub display_height: Option<u32>,
     #[serde(default = "default_font_smoothing")]
     pub font_smoothing: bool,
+    #[serde(default)]
+    pub host_profile: HostProfile,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -77,6 +137,8 @@ pub struct ConnectionInput {
     pub display_height: Option<u32>,
     #[serde(default = "default_font_smoothing")]
     pub font_smoothing: bool,
+    #[serde(default)]
+    pub host_profile: Option<HostProfile>,
     /// Task 5.3: persisted mock flag (see `ConnectionConfig::mock`).
     /// Rejected on create in production builds (Req 12.10).
     #[serde(default)]
@@ -119,6 +181,7 @@ pub fn ssh_host_to_connection_input(host: &crate::utils::ssh_config::SshHost) ->
         display_width: None,
         display_height: None,
         font_smoothing: true,
+        host_profile: Default::default(),
         mock: false,
         library_id: String::new(),
         folder_id: None,
@@ -145,6 +208,7 @@ pub fn parse_rdp_file(path: &str) -> Result<ConnectionInput, String> {
     let mut width: Option<u32> = None;
     let mut height: Option<u32> = None;
     let mut font_smoothing = default_font_smoothing();
+    let mut host_profile = HostProfile::default();
 
     for line in content.lines() {
         let line = line.trim();
@@ -180,6 +244,34 @@ pub fn parse_rdp_file(path: &str) -> Result<ConnectionInput, String> {
                 "1" => font_smoothing = true,
                 _ => {}
             },
+            key if parts[1].trim() == "i" => {
+                if key == "connection type" {
+                    host_profile.network_hint = match value {
+                        "1" => NetworkHint::Modem,
+                        "2" => NetworkHint::BroadbandLow,
+                        "3" => NetworkHint::Satellite,
+                        "4" => NetworkHint::BroadbandHigh,
+                        "5" => NetworkHint::Wan,
+                        "6" => NetworkHint::Lan,
+                        _ => host_profile.network_hint,
+                    };
+                } else if let Some(enabled) = match value {
+                    "0" => Some(false),
+                    "1" => Some(true),
+                    _ => None,
+                } {
+                    match key {
+                        "disable wallpaper" => host_profile.wallpaper = !enabled,
+                        "disable full window drag" => host_profile.full_window_drag = !enabled,
+                        "disable menu anims" => host_profile.menu_animations = !enabled,
+                        "disable themes" => host_profile.themes = !enabled,
+                        "disable cursor shadow" => host_profile.cursor_shadow = !enabled,
+                        "disable cursor setting" => host_profile.cursor_blinking = !enabled,
+                        "allow desktop composition" => host_profile.desktop_composition = enabled,
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -201,6 +293,7 @@ pub fn parse_rdp_file(path: &str) -> Result<ConnectionInput, String> {
         display_width: width,
         display_height: height,
         font_smoothing,
+        host_profile: Some(host_profile),
         mock: false,
         library_id: String::new(),
         folder_id: None,
@@ -218,6 +311,62 @@ mod tests {
         f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    #[test]
+    fn host_profile_rdp_import_applies_disable_polarity() {
+        let f = write_temp_rdp(
+            "full address:s:profile.invalid\ndisable wallpaper:i:0\ndisable full window drag:i:1\ndisable menu anims:i:0\ndisable themes:i:0\ndisable cursor shadow:i:0\ndisable cursor setting:i:1\nallow desktop composition:i:1\nconnection type:i:3\nallow font smoothing:i:0\n",
+        );
+        let input = parse_rdp_file(f.path().to_str().unwrap()).unwrap();
+        let value = serde_json::to_value(input).unwrap();
+        assert_eq!(value["hostProfile"]["fullWindowDrag"], false);
+        assert_eq!(value["hostProfile"]["wallpaper"], true);
+        assert_eq!(value["hostProfile"]["networkHint"], "satellite");
+        assert_eq!(value["fontSmoothing"], false);
+    }
+
+    #[test]
+    fn host_profile_rdp_import_handles_each_value_and_ignores_unknowns() {
+        for (key, field, inverse) in [
+            ("disable wallpaper", "wallpaper", true),
+            ("disable full window drag", "fullWindowDrag", true),
+            ("disable menu anims", "menuAnimations", true),
+            ("disable themes", "themes", true),
+            ("disable cursor shadow", "cursorShadow", true),
+            ("disable cursor setting", "cursorBlinking", true),
+            ("allow desktop composition", "desktopComposition", false),
+        ] {
+            for enabled in [false, true] {
+                let file = write_temp_rdp(&format!(
+                    "full address:s:test.invalid\n{key}:i:{}\n",
+                    u8::from(enabled)
+                ));
+                let parsed = parse_rdp_file(file.path().to_str().unwrap()).unwrap();
+                assert_eq!(
+                    serde_json::to_value(parsed).unwrap()["hostProfile"][field],
+                    enabled != inverse
+                );
+            }
+        }
+        for (number, hint) in [
+            (1, "modem"),
+            (2, "broadbandLow"),
+            (3, "satellite"),
+            (4, "broadbandHigh"),
+            (5, "wan"),
+            (6, "lan"),
+            (7, "lan"),
+        ] {
+            let file = write_temp_rdp(&format!(
+                "full address:s:test.invalid\nconnection type:i:{number}\ndisable wallpaper:s:0\ndisable full window drag:i:9\nunknown:i:1\n"
+            ));
+            let parsed = parse_rdp_file(file.path().to_str().unwrap()).unwrap();
+            let profile = serde_json::to_value(parsed).unwrap()["hostProfile"].clone();
+            assert_eq!(profile["networkHint"], hint);
+            assert_eq!(profile["wallpaper"], false);
+            assert_eq!(profile["fullWindowDrag"], true);
+        }
     }
 
     #[test]

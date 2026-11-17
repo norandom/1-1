@@ -652,6 +652,7 @@ mod folder_deletion_tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: work.id.clone(),
             folder_id: Some(nested.id.clone()),

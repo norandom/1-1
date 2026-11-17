@@ -17,6 +17,7 @@ import type {
   KeyEvent,
   MouseEvent as RdpMouseEvent,
 } from '../types';
+import { normalizeConnection } from './host-profile';
 import { normalizeSessionInfo } from './session-info';
 import type { FrameMessage, FrameReceipt } from './frame-protocol';
 
@@ -24,7 +25,7 @@ import type { FrameMessage, FrameReceipt } from './frame-protocol';
 
 export async function listConnections(): Promise<ConnectionConfig[]> {
   try {
-    return await invoke<ConnectionConfig[]>('list_connections');
+    return (await invoke<ConnectionConfig[]>('list_connections')).map(normalizeConnection);
   } catch (e) {
     console.error('Failed to list connections:', e);
     return [];
@@ -33,7 +34,8 @@ export async function listConnections(): Promise<ConnectionConfig[]> {
 
 export async function getConnection(id: string): Promise<ConnectionConfig | null> {
   try {
-    return await invoke<ConnectionConfig>('get_connection', { id });
+    const connection = await invoke<ConnectionConfig | null>('get_connection', { id });
+    return connection ? normalizeConnection(connection) : null;
   } catch (e) {
     console.error('Failed to get connection:', e);
     return null;
@@ -43,14 +45,14 @@ export async function getConnection(id: string): Promise<ConnectionConfig | null
 export async function createConnection(
   config: ConnectionInput
 ): Promise<ConnectionConfig> {
-  return await invoke<ConnectionConfig>('create_connection', { config });
+  return normalizeConnection(await invoke<ConnectionConfig>('create_connection', { config }));
 }
 
 export async function updateConnection(
   id: string,
   config: Partial<ConnectionConfig>
 ): Promise<ConnectionConfig> {
-  return await invoke<ConnectionConfig>('update_connection', { id, config });
+  return normalizeConnection(await invoke<ConnectionConfig>('update_connection', { id, config }));
 }
 
 export async function deleteConnection(id: string): Promise<DeletionReport> {
@@ -64,7 +66,7 @@ export async function deleteConnection(id: string): Promise<DeletionReport> {
 /// Req 10.19: duplicate a connection (non-secret settings, same folder,
 /// fresh id + deterministic copy name; never a copied credential).
 export async function duplicateConnection(id: string): Promise<ConnectionConfig> {
-  return await invoke<ConnectionConfig>('duplicate_connection', { id });
+  return normalizeConnection(await invoke<ConnectionConfig>('duplicate_connection', { id }));
 }
 
 export async function testConnection(host: string, port: number = 3389): Promise<boolean> {
@@ -168,11 +170,11 @@ export async function importRdpFile(
   libraryId?: string,
   folderId?: string | null
 ): Promise<ConnectionConfig> {
-  return await invoke<ConnectionConfig>('import_rdp_file', {
+  return normalizeConnection(await invoke<ConnectionConfig>('import_rdp_file', {
     path,
     libraryId: libraryId ?? null,
     folderId: folderId ?? null,
-  });
+  }));
 }
 
 export async function importSshConfig(

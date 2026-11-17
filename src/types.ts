@@ -1,3 +1,16 @@
+export interface HostProfile {
+  displayMode: 'fit' | 'native';
+  resizeMode: 'dynamic' | 'fixed';
+  wallpaper: boolean;
+  fullWindowDrag: boolean;
+  menuAnimations: boolean;
+  themes: boolean;
+  cursorShadow: boolean;
+  cursorBlinking: boolean;
+  desktopComposition: boolean;
+  networkHint: 'lan' | 'wan' | 'broadbandHigh' | 'broadbandLow' | 'satellite' | 'modem';
+}
+
 // Task 6.6 (Req 10.1/10.19): `libraryId`/`folderId`/`mock` mirror the v2
 // Rust `ConnectionConfig` serde shape. They are optional here because this
 // interface doubles as the create/update payload base (the Rust
@@ -16,6 +29,7 @@ export interface ConnectionConfig {
   displayWidth: number | null;
   displayHeight: number | null;
   fontSmoothing: boolean;
+  hostProfile?: HostProfile;
   createdAt: string;
   updatedAt: string;
   lastConnectedAt?: string;

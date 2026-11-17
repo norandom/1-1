@@ -2315,6 +2315,7 @@ mod tests {
             display_width: Some(64),
             display_height: Some(64),
             font_smoothing: true,
+            host_profile: Default::default(),
             mock: false,
             library_id: String::new(),
             folder_id: None,

@@ -1,3 +1,4 @@
+import { DEFAULT_HOST_PROFILE } from '../host-profile';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import type { CascadedIds, ConnectionSummary, DeletionReport, Folder, Library, LibraryTree } from '../../types';
@@ -37,6 +38,7 @@ it.each([false, true])('connection writes preserve fontSmoothing=%s', async (fon
     domain: '', colorAccent: null, tags: [], displayWidth: null, displayHeight: null,
     fontSmoothing,
   };
+  invokeMock.mockResolvedValue({ ...config, id: 'font-id' });
   await createConnection(config);
   expect(invokeMock).toHaveBeenLastCalledWith('create_connection', { config });
   await updateConnection('font-id', config);
@@ -253,7 +255,7 @@ describe('move wrapper (task 6.5, Req 10.8/10.15)', () => {
 
 describe('connection wrappers (task 6.6, Req 1.1-1.5/10.19)', () => {
   it('duplicateConnection marshals the id and returns the copy', async () => {
-    const copy = { id: 'dup-1', name: 'Web copy' };
+    const copy = { id: 'dup-1', name: 'Web copy', hostProfile: DEFAULT_HOST_PROFILE };
     invokeMock.mockResolvedValueOnce(copy);
 
     await expect(duplicateConnection('conn-1')).resolves.toEqual(copy);
@@ -266,7 +268,7 @@ describe('connection wrappers (task 6.6, Req 1.1-1.5/10.19)', () => {
   });
 
   it('importRdpFile marshals the path and the optional destination', async () => {
-    const imported = { id: 'imp-1', name: 'host.invalid (imported)' };
+    const imported = { id: 'imp-1', name: 'host.invalid (imported)', hostProfile: DEFAULT_HOST_PROFILE };
     invokeMock.mockResolvedValueOnce(imported);
 
     await expect(
@@ -280,7 +282,7 @@ describe('connection wrappers (task 6.6, Req 1.1-1.5/10.19)', () => {
   });
 
   it('importRdpFile defaults the destination when none is given', async () => {
-    invokeMock.mockResolvedValueOnce(null);
+    invokeMock.mockResolvedValueOnce({ id: 'imported' });
     await importRdpFile('C:/tmp/host.rdp');
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith('import_rdp_file', {
       path: 'C:/tmp/host.rdp',

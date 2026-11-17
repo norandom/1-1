@@ -126,11 +126,43 @@ pub(crate) fn build_connector_config(
         Some(config.domain.clone())
     };
 
-    let mut performance_flags = PerformanceFlags::DISABLE_WALLPAPER
-        | PerformanceFlags::DISABLE_FULLWINDOWDRAG
-        | PerformanceFlags::DISABLE_MENUANIMATIONS
-        | PerformanceFlags::DISABLE_THEMING
-        | PerformanceFlags::DISABLE_CURSOR_SHADOW;
+    let profile = &config.host_profile;
+    let mut performance_flags = PerformanceFlags::empty();
+    for (flag, enabled) in [
+        (PerformanceFlags::DISABLE_WALLPAPER, profile.wallpaper),
+        (
+            PerformanceFlags::DISABLE_FULLWINDOWDRAG,
+            profile.full_window_drag,
+        ),
+        (
+            PerformanceFlags::DISABLE_MENUANIMATIONS,
+            profile.menu_animations,
+        ),
+        (PerformanceFlags::DISABLE_THEMING, profile.themes),
+        (
+            PerformanceFlags::DISABLE_CURSOR_SHADOW,
+            profile.cursor_shadow,
+        ),
+        (
+            PerformanceFlags::DISABLE_CURSORSETTINGS,
+            profile.cursor_blinking,
+        ),
+    ] {
+        performance_flags.set(flag, !enabled);
+    }
+    performance_flags.set(
+        PerformanceFlags::ENABLE_DESKTOP_COMPOSITION,
+        profile.desktop_composition,
+    );
+    use crate::store::connections::NetworkHint;
+    let connection_type = match profile.network_hint {
+        NetworkHint::Lan => ConnectionType::Lan,
+        NetworkHint::Wan => ConnectionType::Wan,
+        NetworkHint::BroadbandHigh => ConnectionType::BroadbandHigh,
+        NetworkHint::BroadbandLow => ConnectionType::BroadbandLow,
+        NetworkHint::Satellite => ConnectionType::Satellite,
+        NetworkHint::Modem => ConnectionType::Modem,
+    };
     // A client request for the next connection, independent of codec support.
     // Server policy can override this; it is not evidence of ClearType acceptance.
     performance_flags.set(
@@ -141,7 +173,7 @@ pub(crate) fn build_connector_config(
     // connector 0.12's Config has no `Default` — all fields are pub and the
     // literal is constructed explicitly (task 4.1 probe C8a shape). Values for
     // fields that the old 0.8 connector hardcoded internally are preserved:
-    // `connection_type: Lan` and empty `alternate_shell`/`work_dir` were 0.8
+    // Empty `alternate_shell`/`work_dir` were 0.8
     // constants; `enable_standard_rdp_security: false` matches 0.8, which
     // rejected standard RDP security at negotiation. Graphics advertisement
     // comes from CodecPolicy (task 9.1, single source of truth):
@@ -163,7 +195,7 @@ pub(crate) fn build_connector_config(
         keyboard_subtype: 0,
         keyboard_layout: 0,
         keyboard_functional_keys_count: 12,
-        connection_type: ConnectionType::Lan,
+        connection_type,
         ime_file_name: String::new(),
         dig_product_id: String::new(),
         desktop_size: connector::DesktopSize {
@@ -633,6 +665,8 @@ mod tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+
+            host_profile: Default::default(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             last_connected_at: None,
@@ -690,7 +724,6 @@ mod tests {
         assert_eq!(
             off.performance_flags,
             PerformanceFlags::DISABLE_WALLPAPER
-                | PerformanceFlags::DISABLE_FULLWINDOWDRAG
                 | PerformanceFlags::DISABLE_MENUANIMATIONS
                 | PerformanceFlags::DISABLE_THEMING
                 | PerformanceFlags::DISABLE_CURSOR_SHADOW
@@ -714,6 +747,87 @@ mod tests {
     // early-capability switch and the no-EGFX fast-path bitmap fallback
     // config both come from the policy, never from ad-hoc literals here.
     #[test]
+    fn host_profile_controls_protocol_flags_and_network_hint() {
+        use ironrdp_pdu::rdp::client_info::PerformanceFlags;
+        let saved = serde_json::json!({"id":"profile", "name":"profile", "host":"profile.invalid", "port":3389,
+            "createdAt":"2026-11-17T00:00:00Z", "updatedAt":"2026-11-17T00:00:00Z",
+            "hostProfile":{"wallpaper":true,"fullWindowDrag":true,"menuAnimations":true,"themes":true,
+                "cursorShadow":true,"cursorBlinking":false,"desktopComposition":true,"networkHint":"wan"}});
+        let config = serde_json::from_value(saved).unwrap();
+        let actual = build_connector_config(&config, "", 800, 600);
+        assert_eq!(
+            actual.performance_flags,
+            PerformanceFlags::ENABLE_FONT_SMOOTHING
+                | PerformanceFlags::DISABLE_CURSORSETTINGS
+                | PerformanceFlags::ENABLE_DESKTOP_COMPOSITION
+        );
+        assert_eq!(
+            actual.connection_type,
+            ironrdp_pdu::gcc::ConnectionType::Wan
+        );
+    }
+
+    #[test]
+    fn host_profile_each_preference_changes_only_its_protocol_bit() {
+        use ironrdp_pdu::rdp::client_info::PerformanceFlags as F;
+        let base = serde_json::json!({"id":"profile", "name":"Profile", "host":"profile.invalid", "port":3389,
+            "createdAt":"2026-11-17T00:00:00Z", "updatedAt":"2026-11-17T00:00:00Z"});
+        for (field, flag, default, positive) in [
+            ("wallpaper", F::DISABLE_WALLPAPER, false, false),
+            ("fullWindowDrag", F::DISABLE_FULLWINDOWDRAG, true, false),
+            ("menuAnimations", F::DISABLE_MENUANIMATIONS, false, false),
+            ("themes", F::DISABLE_THEMING, false, false),
+            ("cursorShadow", F::DISABLE_CURSOR_SHADOW, false, false),
+            ("cursorBlinking", F::DISABLE_CURSORSETTINGS, true, false),
+            (
+                "desktopComposition",
+                F::ENABLE_DESKTOP_COMPOSITION,
+                false,
+                true,
+            ),
+        ] {
+            let original: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
+            let before = build_connector_config(&original, "test", 800, 600);
+            assert_eq!(
+                before.performance_flags.contains(flag),
+                default == positive,
+                "{field} default"
+            );
+            let mut changed = base.clone();
+            changed["hostProfile"] = serde_json::json!({field: !default});
+            let after =
+                build_connector_config(&serde_json::from_value(changed).unwrap(), "test", 800, 600);
+            assert_eq!(
+                before.performance_flags ^ after.performance_flags,
+                flag,
+                "{field}"
+            );
+            assert_eq!(
+                before.support_dyn_vc_gfx_protocol,
+                after.support_dyn_vc_gfx_protocol
+            );
+            assert!(
+                after.enable_tls && after.enable_credssp && !after.enable_standard_rdp_security
+            );
+        }
+        use ironrdp_pdu::gcc::ConnectionType as C;
+        for (hint, expected) in [
+            ("lan", C::Lan),
+            ("wan", C::Wan),
+            ("broadbandHigh", C::BroadbandHigh),
+            ("broadbandLow", C::BroadbandLow),
+            ("satellite", C::Satellite),
+            ("modem", C::Modem),
+        ] {
+            let mut value = base.clone();
+            value["hostProfile"] = serde_json::json!({"networkHint":hint});
+            let config =
+                build_connector_config(&serde_json::from_value(value).unwrap(), "test", 800, 600);
+            assert_eq!(config.connection_type, expected);
+        }
+    }
+
+    #[test]
     fn connector_config_consumes_codec_policy() {
         use crate::rdp::codec_policy::CodecPolicy;
 
@@ -729,6 +843,8 @@ mod tests {
             display_width: None,
             display_height: None,
             font_smoothing: true,
+
+            host_profile: Default::default(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             last_connected_at: None,
