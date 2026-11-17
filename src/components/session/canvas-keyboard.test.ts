@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { matchKeyboardShortcut } from '../../lib/shortcuts';
-import { subscribeCanvasKeyboard } from './canvas-keyboard';
+import { subscribeCanvasKeyboard, subscribeSessionEscape } from './canvas-keyboard';
 
 class Key extends Event {
   code = '';
@@ -136,4 +136,37 @@ it.each(['menu', 'dialog', 'tablist'])('isolates portalled/local %s descendants 
   expect(down).toHaveBeenCalledTimes(1);
   expect(up.mock.calls.map(([e]) => e.code)).toEqual(['ShiftLeft']);
   cleanup();
+});
+
+it('does not open disconnect for menu-consumed Escape even when its target is BODY', () => {
+  const target = Object.assign(new EventTarget(), { tagName: 'BODY' });
+  const open = vi.fn();
+  const cleanup = subscribeSessionEscape(target, open);
+  const escape = new Key('keydown', { key: 'Escape', code: 'Escape' });
+  // Radix handles dismissal on document capture, before window listeners.
+  escape.preventDefault();
+  target.dispatchEvent(escape);
+  expect(open).not.toHaveBeenCalled();
+  cleanup();
+});
+
+it.each([true, false])('unconsumed canvas Escape opens one local prompt, never remote input (session first: %s)', (sessionFirst) => {
+  vi.stubGlobal('KeyboardEvent', Key);
+  const target = Object.assign(new EventTarget(), { tagName: 'CANVAS' });
+  const open = vi.fn();
+  const down = vi.fn();
+  const up = vi.fn();
+  let sessionCleanup = () => {};
+  if (sessionFirst) sessionCleanup = subscribeSessionEscape(target, open);
+  const canvasCleanup = subscribeCanvasKeyboard(target, null, down, up);
+  if (!sessionFirst) sessionCleanup = subscribeSessionEscape(target, open);
+  target.dispatchEvent(new Key('keydown', { key: 'Escape', code: 'Escape' }));
+  target.dispatchEvent(new Key('keyup', { key: 'Escape', code: 'Escape' }));
+  expect(open).toHaveBeenCalledOnce();
+  expect(down).not.toHaveBeenCalled();
+  expect(up).not.toHaveBeenCalled();
+  sessionCleanup();
+  canvasCleanup();
+  target.dispatchEvent(new Key('keydown', { key: 'Escape', code: 'Escape' }));
+  expect(open).toHaveBeenCalledOnce();
 });

@@ -13,7 +13,7 @@ import * as tauri from '../../lib/tauri';
 import { ctrlAltDelSequence } from '../../lib/input-mapper';
 import { normalizeHostProfile } from '../../lib/host-profile';
 import { physicalViewport } from '../../lib/viewport-size';
-import { isLocalInputTarget } from './canvas-keyboard';
+import { subscribeSessionEscape } from './canvas-keyboard';
 import { resolveSessionView, sessionForConnection } from '../../lib/session-route';
 import {
   createConnectController,
@@ -278,13 +278,8 @@ function SessionContent() {
 
   // Escape key to show disconnect confirm
   useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && status === 'connected' && !isLocalInputTarget(e.target)) {
-        setShowDisconnectConfirm(true);
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
+    if (status !== 'connected') return;
+    return subscribeSessionEscape(window, () => setShowDisconnectConfirm(true));
   }, [status]);
 
   // Resolved through the session (D1): the route id never names the

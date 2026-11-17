@@ -32,14 +32,14 @@ export function SessionOptionsMenu({ connection }: { connection: ConnectionConfi
           <Settings2 size={15} />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-64" data-local-input>
+      <DropdownMenuContent align="end" className="w-64" data-local-input onEscapeKeyDown={(event) => event.stopPropagation()}>
         <DropdownMenuLabel>Saved settings for {connection.name}</DropdownMenuLabel>
         {blocked && <p role="alert" className="px-2 py-1 text-xs text-destructive">Settings are read-only during storage recovery.</p>}
         {saving && <p role="status" className="px-2 py-1 text-xs">Saving…</p>}
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>Display</DropdownMenuSubTrigger>
           <DropdownMenuPortal>
-          <DropdownMenuSubContent className="w-72" data-local-input>
+          <DropdownMenuSubContent className="w-72" data-local-input onEscapeKeyDown={(event) => event.stopPropagation()}>
             <DropdownMenuLabel>Display size</DropdownMenuLabel>
             <DropdownMenuRadioGroup value={profile.displayMode} onValueChange={(displayMode) => void save({ hostProfile: { displayMode: displayMode as HostProfile['displayMode'] } })}>
               <DropdownMenuRadioItem disabled={disabled} value="fit" onSelect={(e) => e.preventDefault()}>Fit to window</DropdownMenuRadioItem>
@@ -58,7 +58,7 @@ export function SessionOptionsMenu({ connection }: { connection: ConnectionConfi
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>Visual effects</DropdownMenuSubTrigger>
           <DropdownMenuPortal>
-          <DropdownMenuSubContent className="w-80" data-local-input>
+          <DropdownMenuSubContent className="w-80" data-local-input onEscapeKeyDown={(event) => event.stopPropagation()}>
             <DropdownMenuLabel>Visual preset</DropdownMenuLabel>
             {PRESETS.map(([key, label]) => <DropdownMenuItem key={key} disabled={disabled} onSelect={(e) => { e.preventDefault(); void save(experiencePreset(key)); }}>{label}</DropdownMenuItem>)}
             <DropdownMenuSeparator />
@@ -70,7 +70,7 @@ export function SessionOptionsMenu({ connection }: { connection: ConnectionConfi
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>Connection</DropdownMenuSubTrigger>
           <DropdownMenuPortal>
-          <DropdownMenuSubContent className="w-72" data-local-input>
+          <DropdownMenuSubContent className="w-72" data-local-input onEscapeKeyDown={(event) => event.stopPropagation()}>
             <DropdownMenuLabel>Connection type</DropdownMenuLabel>
             <DropdownMenuRadioGroup value={profile.networkHint} onValueChange={(networkHint) => void save({ hostProfile: { networkHint: networkHint as HostProfile['networkHint'] } })}>
               {NETWORK_OPTIONS.map(([key, label]) => <DropdownMenuRadioItem key={key} value={key} disabled={disabled} onSelect={(e) => e.preventDefault()}>{label}</DropdownMenuRadioItem>)}
