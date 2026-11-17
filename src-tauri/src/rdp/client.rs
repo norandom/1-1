@@ -180,7 +180,7 @@ pub(crate) fn build_connector_config(
     // `support_dyn_vc_gfx_protocol` sets the
     // `SUPPORT_DYN_VC_GFX_PROTOCOL` early capability flag (Req 9.1) and the
     // embedded fast-path bitmap config is the no-EGFX fallback (Req 9.3).
-    // `multitransport_flags`/`compression_type` stay off,
+    // Multitransport stays off; bulk compression is an explicit per-host request.
     // `remote_application_mode` off.
     connector::Config {
         credentials: Credentials::UsernamePassword {
@@ -209,7 +209,10 @@ pub(crate) fn build_connector_config(
         device_scale_factor: None,
         monitor_extended_layout: None,
         relative_mouse_input: false,
-        bitmap: Some(crate::rdp::codec_policy::CodecPolicy::fastpath_bitmap()),
+        bitmap: Some(connector::BitmapConfig {
+            color_depth: profile.color_depth.bits(),
+            ..crate::rdp::codec_policy::CodecPolicy::fastpath_bitmap()
+        }),
         client_build: 0,
         client_name: "rdp-client".to_owned(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
@@ -231,7 +234,17 @@ pub(crate) fn build_connector_config(
         hardware_id: None,
         license_cache: None,
         timezone_info: TimezoneInfo::default(),
-        compression_type: None,
+        compression_type: {
+            use crate::store::connections::BulkCompression;
+            use ironrdp_pdu::rdp::client_info::CompressionType;
+            match profile.bulk_compression {
+                BulkCompression::Off => None,
+                BulkCompression::Rdp4 => Some(CompressionType::K8),
+                BulkCompression::Rdp5 => Some(CompressionType::K64),
+                BulkCompression::Rdp6 => Some(CompressionType::Rdp6),
+                BulkCompression::Rdp61 => Some(CompressionType::Rdp61),
+            }
+        },
         multitransport_flags: None,
         support_dyn_vc_gfx_protocol:
             crate::rdp::codec_policy::CodecPolicy::support_dyn_vc_gfx_protocol(),
@@ -746,6 +759,36 @@ mod tests {
     // single source of truth for graphics advertisement — the EGFX
     // early-capability switch and the no-EGFX fast-path bitmap fallback
     // config both come from the policy, never from ad-hoc literals here.
+    #[test]
+    fn graphics_preferences_map_to_connector_without_changing_security_or_codecs() {
+        use ironrdp_pdu::rdp::client_info::CompressionType;
+        for depth in [15, 16, 24, 32] {
+            for (name, expected) in [
+                ("off", None),
+                ("rdp4", Some(CompressionType::K8)),
+                ("rdp5", Some(CompressionType::K64)),
+                ("rdp6", Some(CompressionType::Rdp6)),
+                ("rdp61", Some(CompressionType::Rdp61)),
+            ] {
+                let value = serde_json::json!({"id":"graphics", "name":"Graphics", "host":"graphics.invalid", "port":3389,
+                    "createdAt":"2026-11-17T00:00:00Z", "updatedAt":"2026-11-17T00:00:00Z",
+                    "hostProfile":{"colorDepth":depth.to_string(),"bulkCompression":name}});
+                let config = serde_json::from_value(value).unwrap();
+                let actual = build_connector_config(&config, "", 800, 600);
+                assert_eq!(actual.bitmap.as_ref().unwrap().color_depth, depth);
+                assert_eq!(actual.compression_type, expected);
+                assert!(
+                    actual.enable_tls
+                        && actual.enable_credssp
+                        && !actual.enable_standard_rdp_security
+                );
+                assert!(actual.support_dyn_vc_gfx_protocol);
+                assert!(actual.bitmap.as_ref().unwrap().codecs.0.is_empty());
+                assert!(!actual.bitmap.as_ref().unwrap().lossy_compression);
+            }
+        }
+    }
+
     #[test]
     fn host_profile_controls_protocol_flags_and_network_hint() {
         use ironrdp_pdu::rdp::client_info::PerformanceFlags;

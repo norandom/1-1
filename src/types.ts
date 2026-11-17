@@ -1,4 +1,6 @@
 export interface HostProfile {
+  colorDepth: '15' | '16' | '24' | '32';
+  bulkCompression: 'off' | 'rdp4' | 'rdp5' | 'rdp6' | 'rdp61';
   displayMode: 'fit' | 'native';
   resizeMode: 'dynamic' | 'fixed';
   wallpaper: boolean;

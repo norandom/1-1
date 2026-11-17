@@ -5,11 +5,14 @@ export const DEFAULT_HOST_PROFILE: Readonly<HostProfile> = Object.freeze({
   fullWindowDrag: true, menuAnimations: false, themes: false,
   cursorShadow: false, cursorBlinking: true, desktopComposition: false,
   networkHint: 'lan',
+  colorDepth: '32', bulkCompression: 'off',
 });
 
 /** Defaults missing legacy fields without losing explicit false preferences. */
 export function normalizeHostProfile(profile?: Partial<HostProfile> | null): HostProfile {
   return {
+    colorDepth: profile?.colorDepth ?? DEFAULT_HOST_PROFILE.colorDepth,
+    bulkCompression: profile?.bulkCompression ?? DEFAULT_HOST_PROFILE.bulkCompression,
     displayMode: profile?.displayMode ?? DEFAULT_HOST_PROFILE.displayMode,
     resizeMode: profile?.resizeMode ?? DEFAULT_HOST_PROFILE.resizeMode,
     wallpaper: profile?.wallpaper ?? DEFAULT_HOST_PROFILE.wallpaper,

@@ -38,9 +38,45 @@ pub enum NetworkHint {
     Modem,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorDepth {
+    #[serde(rename = "15")]
+    Bpp15,
+    #[serde(rename = "16")]
+    Bpp16,
+    #[serde(rename = "24")]
+    Bpp24,
+    #[default]
+    #[serde(rename = "32")]
+    Bpp32,
+}
+impl ColorDepth {
+    pub fn bits(self) -> u32 {
+        match self {
+            Self::Bpp15 => 15,
+            Self::Bpp16 => 16,
+            Self::Bpp24 => 24,
+            Self::Bpp32 => 32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BulkCompression {
+    #[default]
+    Off,
+    Rdp4,
+    Rdp5,
+    Rdp6,
+    Rdp61,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HostProfile {
+    pub color_depth: ColorDepth,
+    pub bulk_compression: BulkCompression,
     pub display_mode: DisplayMode,
     pub resize_mode: ResizeMode,
     pub wallpaper: bool,
@@ -55,6 +91,8 @@ pub struct HostProfile {
 impl Default for HostProfile {
     fn default() -> Self {
         Self {
+            color_depth: ColorDepth::default(),
+            bulk_compression: BulkCompression::default(),
             display_mode: DisplayMode::Fit,
             resize_mode: ResizeMode::Dynamic,
             wallpaper: false,
@@ -245,7 +283,22 @@ pub fn parse_rdp_file(path: &str) -> Result<ConnectionInput, String> {
                 _ => {}
             },
             key if parts[1].trim() == "i" => {
-                if key == "connection type" {
+                if key == "session bpp" {
+                    host_profile.color_depth = match value {
+                        "15" => ColorDepth::Bpp15,
+                        "16" => ColorDepth::Bpp16,
+                        "24" => ColorDepth::Bpp24,
+                        "32" => ColorDepth::Bpp32,
+                        _ => host_profile.color_depth,
+                    };
+                } else if key == "compression" {
+                    host_profile.bulk_compression = match value {
+                        "0" => BulkCompression::Off,
+                        // The .rdp boolean enables the highest supported bulk mode.
+                        "1" => BulkCompression::Rdp61,
+                        _ => host_profile.bulk_compression,
+                    };
+                } else if key == "connection type" {
                     host_profile.network_hint = match value {
                         "1" => NetworkHint::Modem,
                         "2" => NetworkHint::BroadbandLow,
@@ -311,6 +364,27 @@ mod tests {
         f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    #[test]
+    fn graphics_preferences_default_validate_and_import() {
+        let defaults: HostProfile = serde_json::from_str("{}").unwrap();
+        let value = serde_json::to_value(defaults).unwrap();
+        assert_eq!(value["colorDepth"], "32");
+        assert_eq!(value["bulkCompression"], "off");
+        assert!(serde_json::from_str::<HostProfile>(r#"{"colorDepth":"8"}"#).is_err());
+        assert!(serde_json::from_str::<HostProfile>(r#"{"bulkCompression":"unknown"}"#).is_err());
+        for depth in [15, 16, 24, 32] {
+            for (compression, expected) in [(0, "off"), (1, "rdp61")] {
+                let f = write_temp_rdp(&format!(
+                    "full address:s:graphics.invalid\nsession bpp:i:{depth}\ncompression:i:{compression}\n"
+                ));
+                let imported = parse_rdp_file(f.path().to_str().unwrap()).unwrap();
+                let profile = serde_json::to_value(imported.host_profile.unwrap()).unwrap();
+                assert_eq!(profile["colorDepth"], depth.to_string());
+                assert_eq!(profile["bulkCompression"], expected);
+            }
+        }
     }
 
     #[test]

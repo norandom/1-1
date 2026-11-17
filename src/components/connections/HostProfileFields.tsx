@@ -1,5 +1,5 @@
 import type { HostProfile } from '../../types';
-import { COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
+import { COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
 import { Switch } from '@/components/ui/switch';
 
 interface Props {
@@ -24,6 +24,21 @@ export function HostProfileFields({ profile, fontSmoothing, onChange }: Props) {
         </select>
       </label>
       <p className="text-xs text-muted-foreground">Display size and automatic resizing apply immediately after saving. Fixed mode uses the saved resolution on the next connection.</p>
+    </fieldset>
+    <fieldset className="grid gap-2">
+      <legend className="mb-2 text-sm font-medium">Graphics</legend>
+      <label className="flex items-center justify-between gap-3 text-sm">Color depth
+        <select className={selectClass} aria-describedby="color-depth-help" value={profile.colorDepth} onChange={(e) => onChange({ ...profile, colorDepth: e.target.value as HostProfile['colorDepth'] }, fontSmoothing)}>
+          {COLOR_DEPTH_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+        </select>
+      </label>
+      <p id="color-depth-help" className="text-xs text-muted-foreground">{COLOR_DEPTH_HELP}</p>
+      <label className="flex items-center justify-between gap-3 text-sm">Bulk compression
+        <select className={selectClass} aria-describedby="compression-help" value={profile.bulkCompression} onChange={(e) => onChange({ ...profile, bulkCompression: e.target.value as HostProfile['bulkCompression'] }, fontSmoothing)}>
+          {COMPRESSION_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+        </select>
+      </label>
+      <p id="compression-help" className="text-xs text-muted-foreground">{COMPRESSION_HELP}</p>
     </fieldset>
     <details className="rounded border p-3">
       <summary className="cursor-pointer text-sm font-medium">Visual effects and connection</summary>

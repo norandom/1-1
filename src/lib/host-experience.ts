@@ -17,6 +17,15 @@ export const NETWORK_OPTIONS: readonly [HostProfile['networkHint'], string][] = 
 export const EXPERIENCE_HELP = 'Visual effects and connection hints apply on the next connection. Server policy can override these requests.';
 export const COMPOSITION_HELP = 'Desktop composition is a legacy, server-dependent effect requiring 32-bit color.';
 export const NETWORK_HELP = 'Connection type is a performance hint, not a bandwidth limit or automatic detection.';
+export const COLOR_DEPTH_OPTIONS: readonly [HostProfile['colorDepth'], string][] = [
+  ['32', '32-bit (default)'], ['24', '24-bit'], ['16', '16-bit'], ['15', '15-bit'],
+];
+export const COMPRESSION_OPTIONS: readonly [HostProfile['bulkCompression'], string][] = [
+  ['off', 'Off (default)'], ['rdp4', 'RDP 4 — MPPC 8 KB'], ['rdp5', 'RDP 5 — MPPC 64 KB'],
+  ['rdp6', 'RDP 6 — NCRUSH'], ['rdp61', 'RDP 6.1 — XCRUSH'],
+];
+export const COLOR_DEPTH_HELP = 'Requests color depth for standard bitmap updates. The graphics pipeline uses its own formats; the server may override this request. Reconnect to apply.';
+export const COMPRESSION_HELP = 'Requests RDP bulk compression, independently of graphics codecs. Off does not disable bitmap or graphics compression. Reconnect to apply.';
 export type ExperiencePreset = 'low' | 'balanced' | 'quality';
 export const PRESETS: readonly [ExperiencePreset, string][] = [['low', 'Low bandwidth'], ['balanced', 'Balanced'], ['quality', 'Full visual quality']];
 

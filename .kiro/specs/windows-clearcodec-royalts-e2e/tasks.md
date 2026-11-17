@@ -301,6 +301,10 @@ User-directed priority: finish the professional controls below before resuming t
 - [x] 11.0f Size initial dynamic connections from the actual viewport through existing IPC. Correct DPR/bounds, fixed-mode preservation, no transient size persistence, first-connect/restart/navigation regression coverage. _Boundary: Session viewport and connection admission. Depends: 11.0e. Requirements: 3.3,14.9._
 
 - [x] 11.0g Add a persisted status-bar auto-hide setting and readable host labels. Reclaim session height when hidden; reserve layout space on reveal and resize dynamic sessions through the existing debounce to prevent overlap. Preserve fixed resolution and stable bottom-edge/keyboard access, and retain normal status display outside sessions. Verify legacy/default/false settings persistence and all lifecycle labels without internal IDs. _Boundary: Application settings and status bar. Requirements: 14.11,14.12._
+- [x] 11.0h Add supported per-host colour-depth and bulk-compression controls, with accurate scope/reconnect help, persistence/import and connector mapping. _Boundary: Host profile, connection form/session menu, connector configuration and relevant tests. Requirements: 14.13,14.14. User-directed amendment approved 2026-11-17._
+- [ ] 11.0i Delay auto-hidden status-bar pointer reveal by one second; keep keyboard reveal immediate and cancel pending timers safely. _Boundary: Status bar and focused tests. Requirements: 14.15. User request 2026-11-17._
+- [ ] 11.0j Add reliable clipboard direction controls, active-session isolation, operational status and status-bar Resync clipboard using existing text support; handle reconnect/failures truthfully and preserve remote-input boundaries. _Boundary: Clipboard backend/session commands, shared host settings, frontend clipboard controller and status bar. Requirements: 14.16,14.17,14.19. User-approved direction 2026-11-17._
+- [ ] 11.0k Add bounded bidirectional image/screenshot clipboard transfer using supported formats and local clipboard facilities; verify repeated transfers and failure recovery. _Boundary: Clipboard conversion/backend, typed IPC and frontend/native clipboard integration. Depends: 11.0j. Requirements: 14.18,14.19. User-approved direction 2026-11-17._
 
 Release-harness prerequisites (remaining):
 - [ ] 11.0a Establish the shared harness and Windows adapter
@@ -425,3 +429,8 @@ Release-harness prerequisites (remaining):
 - 2026-11-17 user correction: status-bar reveal/hide must resize the session viewport to avoid overlap; the earlier overlay behavior is superseded. Reopened 11.0g for this bounded layout amendment. Native check had verified setting on, 28-pixel gain (Windows940x764), readable label, and corrected menu Escape. Keyboard traversal from the menu reaches the canvas before the reveal target; ensure a reachable local keyboard reveal path while preserving remote Tab. Test app stopped, CUA completed/reset, three test credentials removed.
 
 - 2026-11-17: User-directed 11.0g flow amendment independently APPROVED. Revealed bar reserves 28 pixels in normal layout and existing resize handling sees the changed viewport; stationary edge trigger plus pointer/focus state avoids oscillation. Ctrl+Alt+Shift+S provides reachable local reveal without remote forwarding. 534 full frontend tests; independent61 focused tests/tsc/lint/Vite pass. No backend changes. Native resize confirmation pending. Evidence: group11/review-status-flow-*.log.
+
+
+
+
+- 2026-11-17: 11.0h independently APPROVED; 15/16/24/32-bit bitmap requests and off/MPPC8K/64K/RDP6/RDP6.1 bulk compression persist per host, apply on reconnect, import and preserve independent presets. Independent536 frontend/310Rust4skip/docs0, actual app TypeScript/ESLint/Vite pass; implementer328 feature-tier4skip/fmt/clippy pass with two existing warnings. Native negotiation/performance not claimed. Use tsc -p tsconfig.app.json --noEmit (root references-only tsc is insufficient).
