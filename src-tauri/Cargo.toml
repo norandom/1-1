@@ -90,3 +90,13 @@ tempfile = "3"
 [dev-dependencies]
 # Tokio "full" does not include test-util; paused-clock tests (task 3.2) need it.
 tokio = { version = "1", features = ["test-util"] }
+
+# Keep iterative app/test builds bounded; dependencies retain their existing cache.
+# Override temporarily only for an explicit debugger investigation, then clean it.
+[profile.dev.package.rdp-client]
+debug = 0
+incremental = false
+
+[profile.test.package.rdp-client]
+debug = 0
+incremental = false
