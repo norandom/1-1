@@ -481,6 +481,11 @@ impl CodecErrorPolicy {
         }
     }
 
+    /// A bitmap callback can precede the EndFrame that exposes the painted region.
+    pub fn has_bitmap_delivery(&self) -> bool {
+        self.state.lock().unwrap().delivered_bitmaps_since_sample > 0
+    }
+
     /// Loop-side: evaluate the decode outcome of the PDU batch the session
     /// loop just processed, using the upstream failure counter, and return
     /// the terminal error once the policy trips.

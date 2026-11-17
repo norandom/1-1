@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use ironrdp_pdu::input::fast_path::FastPathInputEvent;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::{Mutex, mpsc, watch};
@@ -16,6 +16,7 @@ use crate::rdp::frame_delivery::{FrameDelivery, FrameReceipt};
 use crate::rdp::frame_transport::{
     encode_full_frame_packet, encode_full_frame_packet_from_parts, encode_image_update_packet,
 };
+use crate::rdp::idle_preview::{DisplayAction, IdlePreview, IdlePreviewState, encode_action};
 use crate::rdp::network_metrics::{NetworkCounters, NetworkMetrics, NetworkSampler};
 // Task 5.4 (Req 12.4/12.10): frame-kind spy module, compiled ONLY in
 // test-support builds.
@@ -65,6 +66,9 @@ impl PerformanceMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
+    #[serde(default)]
+    pub idle_preview_state: IdlePreviewState,
+    pub idle_preview_updated_at: Option<DateTime<Utc>>,
     pub network: Option<NetworkMetrics>,
     pub graphics: crate::rdp::codec_policy::GraphicsObservation,
     pub display_stalled: bool,
@@ -238,6 +242,8 @@ impl SessionEventSink {
 /// It receives commands via an mpsc channel and publishes session info via a watch channel.
 /// Frames are streamed to the frontend via a Tauri channel.
 struct SessionActor {
+    idle_preview: IdlePreview,
+    idle_preview_updated_at: Option<DateTime<Utc>>,
     clipboard_epoch: String,
     id: String,
     config: ConnectionConfig,
@@ -289,6 +295,8 @@ impl SessionActor {
 
         Self {
             id,
+            idle_preview: IdlePreview::new(false, false, tokio::time::Instant::now()),
+            idle_preview_updated_at: None,
             config,
             password,
             state: SessionState::Connecting,
@@ -335,6 +343,12 @@ impl SessionActor {
             sample.tx_bytes_per_second = 0.0;
         }
         SessionInfo {
+            idle_preview_state: if self.state == SessionState::Connected {
+                self.idle_preview.state()
+            } else {
+                IdlePreviewState::Off
+            },
+            idle_preview_updated_at: self.idle_preview_updated_at,
             network: network.clone(),
             graphics: self.graphics.clone(),
             display_stalled: self.delivery.stalled,
@@ -796,6 +810,7 @@ impl SessionActor {
                 // Update dimensions from the server's negotiated desktop size
                 self.width = connection_result.desktop_size.width as u32;
                 self.height = connection_result.desktop_size.height as u32;
+                self.reset_idle_preview(connection_result.suppress_output_support);
                 self.publish_info();
 
                 // Run the real RDP session loop
@@ -877,6 +892,33 @@ impl SessionActor {
         }
     }
 
+    fn reset_idle_preview(&mut self, supported: bool) {
+        self.idle_preview = IdlePreview::new(
+            self.config.host_profile.idle_preview,
+            supported,
+            tokio::time::Instant::now(),
+        );
+        self.idle_preview_updated_at = None;
+    }
+
+    async fn write_display_action<SW: ironrdp_tokio::FramedWrite>(
+        &mut self,
+        action: DisplayAction,
+        stage: &mut ironrdp_session::ActiveStage,
+        size: (u16, u16),
+        writer: &mut ironrdp_tokio::Framed<SW>,
+    ) -> Result<(), DisconnectReason> {
+        use ironrdp_tokio::FramedWrite as _;
+        let frame = encode_action(stage, action, size.0, size.1).map_err(|error| {
+            self.last_error = Some(format!("Idle preview encoding failed: {error}"));
+            DisconnectReason::ConnectionLost
+        })?;
+        writer.write_all(&frame).await.map_err(|error| {
+            self.last_error = Some(format!("Idle preview transport failed: {error}"));
+            DisconnectReason::ConnectionLost
+        })
+    }
+
     /// Transport-generic real session loop.
     ///
     /// Split into its own function (task 7.4) so the production TLS framing
@@ -908,6 +950,7 @@ impl SessionActor {
         // starts fresh per connection.
         let mut delivered_surface: Option<(u16, u16)> = None;
         let mut held_modifiers = std::collections::BTreeSet::new();
+        let mut deferred_commands = VecDeque::new();
         let mut network_sampler = self
             .network_counters
             .clone()
@@ -944,6 +987,11 @@ impl SessionActor {
             }
             tokio::select! {
                 _ = metrics_tick.tick() => {
+                    if let Some(action) = self.idle_preview.on_timer(tokio::time::Instant::now())
+                        && let Err(reason) = self.write_display_action(action, &mut active_stage, (image.width(), image.height()), &mut writer).await
+                    {
+                        return reason;
+                    }
                     self.network = network_sampler.as_mut().map(|s| s.sample(tokio::time::Instant::now()));
                     self.graphics = codec_policy.observation();
                     self.publish_info();
@@ -987,6 +1035,9 @@ impl SessionActor {
                     // path — the configuration is incompatible, retrying it
                     // would repeat the failure (Req 9.6; transport loss
                     // stays `ConnectionLost` for the Req 2.3 reconnect).
+                    let collect_idle_cost = matches!(self.idle_preview.state(),
+                        IdlePreviewState::Live | IdlePreviewState::Preview | IdlePreviewState::Suppressed);
+                    let egfx_bitmap = collect_idle_cost && codec_policy.has_bitmap_delivery();
                     if let Some(terminal) = codec_policy.evaluate_decode_outcome(
                         active_stage
                             .get_dvc_mut::<ironrdp_egfx::client::GraphicsPipelineClient>()
@@ -1072,10 +1123,20 @@ impl SessionActor {
                                 &mut image,
                                 &mut reader,
                                 &mut writer,
+                                &mut deferred_commands,
                             )
                             .await
                         {
-                            ReactivationOutcome::Reactivated => {
+                            ReactivationOutcome::Reactivated { suppress_supported } => {
+                                let was_suppressed = self.idle_preview.state() == IdlePreviewState::Suppressed;
+                                self.reset_idle_preview(suppress_supported);
+                                // Resume on the new share with its negotiated dimensions and share ID.
+                                if was_suppressed && suppress_supported
+                                    && let Err(reason) = self.write_display_action(DisplayAction::Allow, &mut active_stage, (image.width(), image.height()), &mut writer).await
+                                {
+                                    return reason;
+                                }
+                                self.publish_info();
                                 // Skip the pending region packet and the
                                 // clipboard flush: pre-deactivation image
                                 // content is stale until the reactivated
@@ -1086,6 +1147,25 @@ impl SessionActor {
                         }
                     }
 
+                    if collect_idle_cost {
+                        let (live_bytes, completed_update) = match action {
+                            ironrdp_pdu::Action::FastPath => fast_path_desktop_update(&payload),
+                            _ if egfx_bitmap || !updated_regions.is_empty() => (payload.len(), true),
+                            _ => (0, false),
+                        };
+                        let desktop_painted = completed_update && !updated_regions.is_empty();
+                        // Account for every inbound frame throughout the trial. A fragmented
+                        // graphics message may only identify its channel or paint on its last PDU.
+                        let bytes = if self.idle_preview.state() == IdlePreviewState::Live {
+                            live_bytes
+                        } else {
+                            payload.len()
+                        };
+                        self.idle_preview.on_transfer(tokio::time::Instant::now(), bytes, desktop_painted);
+                        if desktop_painted {
+                            self.idle_preview_updated_at = Some(Utc::now());
+                        }
+                    }
                     if !updated_regions.is_empty() {
                         // Task 9.4 (design L316; Reqs 4.1/4.4/9.8): merge
                         // every dirty region drained from this processed
@@ -1202,8 +1282,25 @@ impl SessionActor {
                 }
 
                 // Process commands from the frontend
-                cmd = self.cmd_rx.recv() => {
+                cmd = async {
+                    match deferred_commands.pop_front() {
+                        Some(cmd) => Some(cmd),
+                        None => self.cmd_rx.recv().await,
+                    }
+                } => {
+                    if matches!(cmd, Some(SessionCommand::ResumeDisplay | SessionCommand::SendKey { .. }
+                        | SessionCommand::SendMouse { .. } | SessionCommand::ClipboardPaste { .. }
+                        | SessionCommand::Resize { .. })) {
+                        let before = self.idle_preview.state();
+                        if let Some(action) = self.idle_preview.on_activity(tokio::time::Instant::now())
+                            && let Err(reason) = self.write_display_action(action, &mut active_stage, (image.width(), image.height()), &mut writer).await
+                        {
+                            return reason;
+                        }
+                        if before != self.idle_preview.state() { self.publish_info(); }
+                    }
                     match cmd {
+                        Some(SessionCommand::ResumeDisplay) => {}
                         Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
                             let was_stalled = self.delivery.stalled;
                             if self.delivery.acknowledge(&receipt, refresh) {
@@ -1363,6 +1460,7 @@ impl SessionActor {
         image: &mut ironrdp_session::image::DecodedImage,
         reader: &mut ironrdp_tokio::Framed<SR>,
         writer: &mut ironrdp_tokio::Framed<SW>,
+        deferred: &mut VecDeque<SessionCommand>,
     ) -> ReactivationOutcome
     where
         SR: ironrdp_tokio::FramedRead,
@@ -1376,6 +1474,9 @@ impl SessionActor {
 
         let mut sequence = factory.create();
         let mut buf = ironrdp_core::WriteBuf::new();
+        let replay_deadline = || tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut replay_full_deadline =
+            (deferred.len() == self.cmd_rx.max_capacity()).then(replay_deadline);
         log::info!(
             "Session {} driving deactivation-reactivation sequence",
             self.id
@@ -1391,6 +1492,11 @@ impl SessionActor {
                 // Wait for the next server PDU while staying responsive to
                 // commands (cancel mirrors Req 2.4's intent).
                 let (_action, payload) = tokio::select! {
+                    _ = tokio::time::sleep_until(replay_full_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                        if replay_full_deadline.is_some() => {
+                        self.last_error = Some("Server failed to reactivate before its input queue filled.".into());
+                        return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
+                    }
                     _ = crate::rdp::frame_delivery::wait_for_stall(self.delivery.deadline()) => {
                         self.check_display_stall();
                         continue;
@@ -1402,7 +1508,7 @@ impl SessionActor {
                             return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
                         }
                     },
-                    cmd = self.cmd_rx.recv() => {
+                    cmd = self.cmd_rx.recv(), if deferred.len() < self.cmd_rx.max_capacity() => {
                         match cmd {
                             Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
                                 let was_stalled = self.delivery.stalled;
@@ -1426,14 +1532,13 @@ impl SessionActor {
                                 self.pending_resize = Some(normalize_remote_resolution(width, height));
                                 continue;
                             }
-                            // Input against a deactivated share cannot be
-                            // encoded; the window is a handful of PDUs.
+                            // Preserve input order until the replacement share is ready.
+                            // Stop draining commands when the replay queue fills.
                             Some(other) => {
-                                log::debug!(
-                                    "Session {} dropping command during reactivation: {:?}",
-                                    self.id,
-                                    other
-                                );
+                                deferred.push_back(other);
+                                if deferred.len() == self.cmd_rx.max_capacity() {
+                                    replay_full_deadline = Some(replay_deadline());
+                                }
                                 continue;
                             }
                         }
@@ -1469,6 +1574,7 @@ impl SessionActor {
             match sequence.connection_activation_state() {
                 ConnectionActivationState::Finalized {
                     desktop_size,
+                    suppress_output_support,
                     share_id,
                     static_channel_chunk_size,
                     enable_server_pointer,
@@ -1494,23 +1600,25 @@ impl SessionActor {
 
                     let new_width = u32::from(desktop_size.width);
                     let new_height = u32::from(desktop_size.height);
-                    if new_width != self.width || new_height != self.height {
-                        self.width = new_width;
-                        self.height = new_height;
+                    if (image.width(), image.height()) != (desktop_size.width, desktop_size.height)
+                    {
                         *image = DecodedImage::new(
                             PixelFormat::RgbA32,
                             desktop_size.width,
                             desktop_size.height,
                         );
-                        self.publish_info();
                     }
+                    self.width = new_width;
+                    self.height = new_height;
 
                     log::info!(
                         "Session {} reactivated in place (share id {})",
                         self.id,
                         share_id
                     );
-                    return ReactivationOutcome::Reactivated;
+                    return ReactivationOutcome::Reactivated {
+                        suppress_supported: suppress_output_support,
+                    };
                 }
                 // A mid-session redirect cannot be honored without tearing
                 // this transport down; same policy as the connect path
@@ -1529,6 +1637,7 @@ impl SessionActor {
         let mut attempt = 0u32;
 
         while attempt < MAX_RECONNECT_ATTEMPTS {
+            self.idle_preview_updated_at = None;
             self.network_counters = None;
             self.network = None;
             self.graphics = Default::default();
@@ -1602,6 +1711,7 @@ impl SessionActor {
                     self.last_error = None;
                     self.width = connection_result.desktop_size.width as u32;
                     self.height = connection_result.desktop_size.height as u32;
+                    self.reset_idle_preview(connection_result.suppress_output_support);
                     self.publish_info();
                     log::info!(
                         "Reconnected session {} (real RDP) on attempt {}",
@@ -1749,6 +1859,7 @@ impl SessionActor {
                         return DisconnectReason::ConnectionLost;
                     }
                 }
+                Some(SessionCommand::ResumeDisplay) => {}
                 Some(SessionCommand::SendKey { key_code, is_down }) => {
                     log::debug!(
                         "Session {} key event: code={}, down={}",
@@ -1820,11 +1931,43 @@ enum SessionTransport {
 enum ReactivationOutcome {
     /// The server completed the sequence; the existing stage is re-armed and
     /// the session loop continues in place (same actor, same session id).
-    Reactivated,
+    Reactivated { suppress_supported: bool },
     /// The sequence cannot complete on this transport (transport drop,
     /// protocol failure, server redirection, user disconnect). The actor
     /// must unwind with the carried reason.
     Stop(DisconnectReason),
+}
+
+/// Return encoded desktop bytes (including fragments) and whether a desktop
+/// update ended in this PDU. A software cursor can dirty the image on its own.
+fn fast_path_desktop_update(payload: &[u8]) -> (usize, bool) {
+    use ironrdp_core::{ReadCursor, decode_cursor};
+    use ironrdp_pdu::fast_path::{FastPathHeader, FastPathUpdatePdu, Fragmentation, UpdateCode};
+    let mut cursor = ReadCursor::new(payload);
+    if decode_cursor::<FastPathHeader>(&mut cursor).is_err() {
+        return (0, false);
+    }
+    let mut size = 0;
+    let mut completed = false;
+    while !cursor.is_empty() {
+        let Ok(pdu) = decode_cursor::<FastPathUpdatePdu>(&mut cursor) else {
+            break;
+        };
+        if matches!(
+            pdu.update_code,
+            UpdateCode::Bitmap
+                | UpdateCode::SurfaceCommands
+                | UpdateCode::Orders
+                | UpdateCode::Palette
+        ) {
+            size += pdu.data.len();
+            completed |= matches!(
+                pdu.fragmentation,
+                Fragmentation::Single | Fragmentation::Last
+            );
+        }
+    }
+    (size, completed)
 }
 
 /// Keep one request while the server opens the channel and sends capabilities.
@@ -2146,6 +2289,8 @@ impl SessionManager {
 
         // Build initial info for the watch channel
         let initial_info = SessionInfo {
+            idle_preview_state: IdlePreviewState::Off,
+            idle_preview_updated_at: None,
             network: None,
             graphics: Default::default(),
             display_stalled: false,
@@ -4890,6 +5035,14 @@ mod tests {
         }
 
         fn demand_active_frame_for(width: u16, height: u16) -> Vec<u8> {
+            demand_active_with_suppression(width, height, false)
+        }
+
+        fn demand_active_with_suppression(
+            width: u16,
+            height: u16,
+            suppress_output_support: bool,
+        ) -> Vec<u8> {
             use ironrdp_pdu::rdp::capability_sets::{
                 Bitmap, BitmapDrawingFlags, CapabilitySet, DemandActive, General, PROTOCOL_VER,
                 ServerDemandActive,
@@ -4902,6 +5055,7 @@ mod tests {
                         capability_sets: vec![
                             CapabilitySet::General(General {
                                 protocol_version: PROTOCOL_VER,
+                                suppress_output_support,
                                 ..Default::default()
                             }),
                             CapabilitySet::Bitmap(Bitmap {
@@ -5079,10 +5233,182 @@ mod tests {
             }
         }
 
+        fn expected_first_key_pair() -> Vec<u8> {
+            use ironrdp_graphics::image_processing::PixelFormat;
+            use ironrdp_session::{ActiveStageOutput, image::DecodedImage};
+            let mut stage = crate::rdp::client::active_stage_from_connection_result(
+                crate::rdp::baseline::synthetic_connection_result(64, 64),
+            );
+            let mut image = DecodedImage::new(PixelFormat::RgbA32, 64, 64);
+            let mut wire = Vec::new();
+            for down in [true, false] {
+                for out in stage
+                    .process_fastpath_input(
+                        &mut image,
+                        &[encode_keyboard_fastpath_event(0x1e, down).unwrap()],
+                    )
+                    .unwrap()
+                {
+                    if let ActiveStageOutput::ResponseFrame(frame) = out {
+                        wire.extend_from_slice(&frame);
+                    }
+                }
+            }
+            wire
+        }
+
+        async fn send_first_key_pair(sender: &mpsc::Sender<SessionCommand>) {
+            for is_down in [true, false] {
+                sender
+                    .send(SessionCommand::SendKey {
+                        key_code: 0x1e,
+                        is_down,
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+
+        async fn suppressed_session() -> (SessionManager, String, tokio::io::DuplexStream) {
+            use crate::rdp::baseline::synthetic_connection_result;
+            use ironrdp_pdu::geometry::InclusiveRectangle;
+            use tokio::io::AsyncWriteExt;
+            use tokio::time::{Duration, advance};
+
+            let manager = SessionManager::new();
+            let (client, mut peer) = tokio::io::duplex(64 * 1024);
+            let client = std::sync::Mutex::new(Some(client));
+            let connect: ConnectFn = Arc::new(move |_, _, _, _| {
+                let client = client.lock().unwrap().take().unwrap();
+                Box::pin(async move {
+                    let mut result = synthetic_connection_result(64, 64);
+                    result.suppress_output_support = true;
+                    ConnectionOutcome::RealSessionLocal {
+                        connection_result: Box::new(result),
+                        framed: Box::new(ironrdp_tokio::TokioFramed::new(client)),
+                        codec_policy: Arc::new(CodecErrorPolicy::new()),
+                    }
+                })
+            });
+            let mut config = test_config("idle-wake");
+            config.host_profile.idle_preview = true;
+            let (events, _) = RecordedEvents::new();
+            let id = manager
+                .create_session_with_transport(
+                    config,
+                    None,
+                    scripted_frame_channel(&manager, FrameScript::Ok, Default::default()),
+                    SessionEventSink::recorded(events),
+                    false,
+                    None,
+                    connect,
+                )
+                .await
+                .unwrap();
+            settle_actor().await;
+            let tile = InclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 31,
+                bottom: 31,
+            };
+            advance(Duration::from_secs(290)).await;
+            for i in 0..10 {
+                for frame in bitmap_wire_frames(tile.clone(), &[i; 2048]) {
+                    peer.write_all(&frame).await.unwrap();
+                }
+                settle_actor().await;
+                advance(Duration::from_secs(1)).await;
+                settle_actor().await;
+            }
+            assert_eq!(
+                manager
+                    .get_session_info(&id)
+                    .await
+                    .unwrap()
+                    .idle_preview_state,
+                IdlePreviewState::Suppressed
+            );
+            (manager, id, peer)
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn idle_preview_resumes_before_first_key_pair_on_same_transport() {
+            use crate::rdp::baseline::synthetic_connection_result;
+            use tokio::io::AsyncReadExt;
+            use tokio::time::Duration;
+            let (manager, id, mut peer) = suppressed_session().await;
+            let sender = manager.get_cmd_sender(&id).await.unwrap();
+            let (reply, wait) = tokio::sync::oneshot::channel();
+            sender
+                .send(SessionCommand::ClipboardContext { reply })
+                .await
+                .unwrap();
+            assert!(!wait.await.unwrap().epoch.is_empty());
+            send_first_key_pair(&sender).await;
+            settle_actor().await;
+            let reference = crate::rdp::client::active_stage_from_connection_result(
+                synthetic_connection_result(64, 64),
+            );
+            let mut expected = reference
+                .request_full_redraw(64, 64, false, true)
+                .unwrap()
+                .concat();
+            expected.extend_from_slice(&expected_first_key_pair());
+            let mut actual = vec![0; expected.len()];
+            tokio::time::timeout(Duration::from_secs(1), peer.read_exact(&mut actual))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                actual, expected,
+                "suppress, allow, make, break on the original stream"
+            );
+            let state = serde_json::to_value(manager.get_session_info(&id).await.unwrap()).unwrap();
+            assert_eq!(state["idlePreviewState"], "live");
+            manager.remove_session(&id).await.unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn idle_preview_renegotiates_capability_and_resumes_the_replacement_share() {
+            use crate::rdp::baseline::synthetic_connection_result;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for supported in [true, false] {
+                let (manager, id, mut peer) = suppressed_session().await;
+                let mut script = reactivation_script_frames();
+                script[1] = demand_active_with_suppression(96, 80, supported);
+                for frame in script {
+                    peer.write_all(&frame).await.unwrap();
+                }
+                settle_actor().await;
+                let info = manager.get_session_info(&id).await.unwrap();
+                let expected_state = if supported {
+                    IdlePreviewState::Live
+                } else {
+                    IdlePreviewState::Unsupported
+                };
+                assert_eq!(info.idle_preview_state, expected_state);
+                assert!(info.idle_preview_updated_at.is_none());
+                assert_eq!((info.width, info.height), (96, 80));
+                let mut share = synthetic_connection_result(96, 80);
+                share.share_id = REACTIVATION_SHARE_ID;
+                let stage = crate::rdp::client::active_stage_from_connection_result(share);
+                let allow = encode_action(&stage, DisplayAction::Allow, 96, 80).unwrap();
+                let mut wire = vec![0; 64 * 1024];
+                let len =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), peer.read(&mut wire))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(wire[..len].ends_with(&allow), supported);
+                manager.remove_session(&id).await.unwrap();
+            }
+        }
+
         async fn verify_delivery_reactivation(size: u16, ack_during_activation: bool) {
             use crate::rdp::baseline::full_frame_rect;
             use ironrdp_pdu::geometry::InclusiveRectangle;
-            use tokio::io::AsyncWriteExt as _;
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
             let manager = SessionManager::new();
             let (client_end, mut server_end) = tokio::io::duplex(64 * 1024);
             let stream = std::sync::Mutex::new(Some(client_end));
@@ -5156,6 +5482,7 @@ mod tests {
                 // handled by drive_reactivation, not the main actor loop.
                 server_end.write_all(&activation[0]).await.unwrap();
                 settle_actor().await;
+                send_first_key_pair(&sender).await;
                 sender
                     .send(SessionCommand::Resize {
                         width: 800,
@@ -5195,6 +5522,19 @@ mod tests {
                 for frame in &activation[1..] {
                     server_end.write_all(frame).await.unwrap();
                 }
+                settle_actor().await;
+                let mut written = vec![0; 64 * 1024];
+                let len = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    server_end.read(&mut written),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(
+                    written[..len].ends_with(&expected_first_key_pair()),
+                    "queued key make and break must follow activation on the same connection"
+                );
             } else {
                 for frame in activation {
                     server_end.write_all(&frame).await.unwrap();
@@ -5263,6 +5603,30 @@ mod tests {
         #[tokio::test(start_paused = true)]
         async fn ack_during_same_size_reactivation_publishes_stall_recovery() {
             verify_delivery_reactivation(64, true).await;
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn stalled_reactivation_with_full_replay_queue_allows_bounded_shutdown() {
+            let manager = SessionManager::new();
+            let mut frames = reactivation_script_frames();
+            frames.truncate(1); // DeactivateAll; this server never sends the new share.
+            let session =
+                create_scripted_real_session(&manager, "stalled-input", false, frames, true).await;
+            settle_actor().await;
+            for _ in 0..session.cmd_tx.max_capacity() {
+                session
+                    .cmd_tx
+                    .send(SessionCommand::SendKey {
+                        key_code: 0x1e,
+                        is_down: true,
+                    })
+                    .await
+                    .unwrap();
+            }
+            settle_actor().await;
+            // remove_session's normal stop deadline must still be attainable.
+            manager.remove_session(&session.id).await.unwrap();
+            assert!(session.cmd_tx.is_closed());
         }
 
         /// Task 7.4 acceptance (Req 11.4): DeactivateAll during an active

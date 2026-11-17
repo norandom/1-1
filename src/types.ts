@@ -1,4 +1,5 @@
 export interface HostProfile {
+  idlePreview: boolean;
   clipboardDirection: 'off' | 'bidirectional' | 'localToRemote' | 'remoteToLocal';
   colorDepth: '15' | '16' | '24' | '32';
   bulkCompression: 'off' | 'rdp4' | 'rdp5' | 'rdp6' | 'rdp61';
@@ -54,6 +55,8 @@ export type SessionStatus =
   | 'error';
 
 export interface SessionInfo {
+  idlePreviewState?: 'off' | 'unsupported' | 'live' | 'suppressed' | 'preview';
+  idlePreviewUpdatedAt?: string | null;
   /** TCP payload I/O below TLS; excludes IP/TCP headers and retransmissions. */
   network?: NetworkMetrics | null;
   graphics?: GraphicsObservation;

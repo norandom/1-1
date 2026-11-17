@@ -1,4 +1,5 @@
 import type { HostProfile } from '../../types';
+import { IDLE_PREVIEW_HELP, IDLE_PREVIEW_LABEL } from '../../lib/idle-preview';
 import { CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
 import { Switch } from '@/components/ui/switch';
 
@@ -39,6 +40,12 @@ export function HostProfileFields({ profile, fontSmoothing, onChange }: Props) {
         </select>
       </label>
       <p id="compression-help" className="text-xs text-muted-foreground">{COMPRESSION_HELP}</p>
+      <label className="flex items-center justify-between gap-3 text-sm">
+        {IDLE_PREVIEW_LABEL}
+        <Switch checked={profile.idlePreview} aria-label={IDLE_PREVIEW_LABEL} aria-describedby="idle-preview-help"
+          onCheckedChange={(idlePreview) => onChange({ ...profile, idlePreview }, fontSmoothing)} />
+      </label>
+      <p id="idle-preview-help" className="text-xs text-muted-foreground">{IDLE_PREVIEW_HELP}</p>
     </fieldset>
     <fieldset className="grid gap-2">
       <legend className="mb-2 text-sm font-medium">Clipboard</legend>

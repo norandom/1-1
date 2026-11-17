@@ -100,6 +100,10 @@ export async function disconnect(sessionId: string): Promise<void> {
   await invoke('disconnect', { sessionId });
 }
 
+export async function resumeDisplay(sessionId: string): Promise<void> {
+  await invoke('resume_display', { sessionId });
+}
+
 export async function cancelReconnect(sessionId: string): Promise<void> {
   await invoke('cancel_reconnect', { sessionId });
 }

@@ -57,6 +57,7 @@
 - Quick Connect via `Cmd+K` &mdash; search and connect in seconds
 - Connection cards with color accents, tags, and latency indicators
 - Performance HUD with render FPS, transport receive/send rates and totals, resolution, and observed graphics diagnostics (development branch; not yet in alpha.3). Network counters include TLS payload overhead but exclude TCP/IP headers and retransmissions; they are separate from decoded local frame delivery.
+- The Windows development preview has a per-host **Graphics → Idle preview after 5 minutes** setting. Enable it and reconnect. On supported hosts, a busy unattended desktop can refresh about once a minute. A quiet editor stays live. Returning to the tab, sending input, or choosing **Resume** restores live updates.
 - Settings page with theme, display, and network configuration
 - Keyboard shortcut overlay (`Cmd+?`)
 - Dark and light themes

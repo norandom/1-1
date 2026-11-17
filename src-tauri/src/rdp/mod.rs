@@ -19,6 +19,7 @@ pub mod frame_delivery;
 #[cfg(feature = "test-support")]
 pub mod frame_spy;
 pub mod frame_transport;
+pub mod idle_preview;
 pub mod input;
 pub mod network_metrics;
 pub mod session;

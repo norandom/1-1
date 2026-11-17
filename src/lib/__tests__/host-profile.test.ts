@@ -6,6 +6,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const mock = vi.mocked(invoke);
 beforeEach(() => mock.mockReset());
 it('defaults graphics preferences and retains independent explicit choices', () => {
+  expect(normalizeHostProfile().idlePreview).toBe(false);
+  expect(normalizeHostProfile({ idlePreview: true }).idlePreview).toBe(true);
   expect(normalizeHostProfile()).toMatchObject({ colorDepth: '32', bulkCompression: 'off' });
   expect(normalizeHostProfile({ colorDepth: '16', bulkCompression: 'rdp61' }))
     .toMatchObject({ colorDepth: '16', bulkCompression: 'rdp61' });

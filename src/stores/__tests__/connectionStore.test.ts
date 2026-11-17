@@ -1,4 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { DEFAULT_HOST_PROFILE } from '../../lib/host-profile';
 
 // Mock the tauri module before importing the store
 vi.mock('../../lib/tauri', () => ({
@@ -168,7 +169,7 @@ describe('connectionStore', () => {
 });
 
 it('merges saved host changes against latest data and serializes overlapping updates', async () => {
-  const original = { ...sampleConnection, id: 'profile', createdAt: '', updatedAt: '', hostProfile: { displayMode: 'fit' as const, resizeMode: 'dynamic' as const, wallpaper: false, fullWindowDrag: true, menuAnimations: false, themes: false, cursorShadow: false, cursorBlinking: true, desktopComposition: false, networkHint: 'lan' as const, clipboardDirection: 'bidirectional' as const, colorDepth: '16' as const, bulkCompression: 'rdp61' as const } };
+  const original = { ...sampleConnection, id: 'profile', createdAt: '', updatedAt: '', hostProfile: { ...DEFAULT_HOST_PROFILE, idlePreview: true, colorDepth: '16' as const, bulkCompression: 'rdp61' as const } };
   useConnectionStore.setState({ connections: [original] });
   let finish!: (value: typeof original) => void;
   vi.mocked(tauri.updateConnection).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));

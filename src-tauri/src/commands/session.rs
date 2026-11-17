@@ -40,6 +40,21 @@ fn initial_config(
 }
 
 #[tauri::command]
+pub async fn resume_display(
+    session_id: String,
+    session_mgr: State<'_, SessionManager>,
+) -> Result<(), String> {
+    let sender = session_mgr
+        .get_cmd_sender(&session_id)
+        .await
+        .ok_or_else(|| "Session not found".to_string())?;
+    sender
+        .send(SessionCommand::ResumeDisplay)
+        .await
+        .map_err(|_| "Session stopped".to_string())
+}
+
+#[tauri::command]
 pub async fn frame_consumed(
     session_id: String,
     receipt: crate::rdp::frame_delivery::FrameReceipt,

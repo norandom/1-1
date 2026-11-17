@@ -93,6 +93,7 @@ impl ClipboardDirection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HostProfile {
+    pub idle_preview: bool,
     pub clipboard_direction: ClipboardDirection,
     pub color_depth: ColorDepth,
     pub bulk_compression: BulkCompression,
@@ -110,6 +111,7 @@ pub struct HostProfile {
 impl Default for HostProfile {
     fn default() -> Self {
         Self {
+            idle_preview: false,
             clipboard_direction: ClipboardDirection::default(),
             color_depth: ColorDepth::default(),
             bulk_compression: BulkCompression::default(),
@@ -391,6 +393,7 @@ mod tests {
         let defaults: HostProfile = serde_json::from_str("{}").unwrap();
         let value = serde_json::to_value(defaults).unwrap();
         assert_eq!(value["colorDepth"], "32");
+        assert_eq!(value["idlePreview"], false);
         assert_eq!(value["bulkCompression"], "off");
         assert!(serde_json::from_str::<HostProfile>(r#"{"colorDepth":"8"}"#).is_err());
         assert!(serde_json::from_str::<HostProfile>(r#"{"bulkCompression":"unknown"}"#).is_err());
@@ -402,6 +405,7 @@ mod tests {
                 let imported = parse_rdp_file(f.path().to_str().unwrap()).unwrap();
                 let profile = serde_json::to_value(imported.host_profile.unwrap()).unwrap();
                 assert_eq!(profile["colorDepth"], depth.to_string());
+                assert_eq!(profile["idlePreview"], false);
                 assert_eq!(profile["bulkCompression"], expected);
             }
         }

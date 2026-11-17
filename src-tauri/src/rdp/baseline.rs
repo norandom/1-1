@@ -1,7 +1,6 @@
 //! Task 3.5 — reproducible performance and interoperability baselines.
 //!
-//! Two explicitly-invoked harnesses live here, plus the deterministic pure
-//! helpers they share. Neither harness runs in normal test tiers:
+//! The host and workload probes run on explicit request.
 //!
 //! - [`real_server_tls_nla_smoke`] (`#[ignore]`): protocol-level, headless
 //!   old-stack TLS/NLA smoke against the LAN hosts staged in
@@ -22,6 +21,8 @@
 //!   p50/p95 decode-ready-to-packet-emitted latency and delivered FPS.
 //!   Process CPU/memory sampling is performed by the runner script
 //!   (`scripts/Invoke-Baseline.ps1`), which polls the test process.
+//! - `idle_preview_probe` compares live and suppressed Windows desktop
+//!   traffic in equal time windows and measures the first update after wake.
 //!
 //! Fixture route (recorded honestly in every artifact): the only
 //! server-update route the old stack decodes headlessly without a live
@@ -34,7 +35,7 @@
 //! canvas-consumed suffix is a recorded gap with a budget proposal.
 //!
 //! Measurement code (real wall-clock pacing and timing) is intentionally
-//! isolated in the two `#[ignore]`d harnesses; the `tests` module below is
+//! isolated in the `#[ignore]`d harnesses; the `tests` module below is
 //! fully deterministic (Req 12.7 isolation: no filesystem, no network, no
 //! sleeps).
 
@@ -840,6 +841,37 @@ impl log::Log for TranscriptLogger {
     }
 }
 
+#[cfg(test)]
+mod idle_preview_probe;
+
+fn smoke_config(
+    n: &str,
+    host: &str,
+    port: u16,
+    user: &str,
+) -> crate::store::connections::ConnectionConfig {
+    crate::store::connections::ConnectionConfig {
+        id: format!("baseline-smoke-{n}"),
+        name: format!("baseline-smoke-{n}"),
+        host: host.to_string(),
+        port,
+        username: user.to_string(),
+        domain: String::new(),
+        color_accent: None,
+        tags: vec!["baseline-smoke".to_string()],
+        display_width: Some(1920),
+        display_height: Some(1080),
+        font_smoothing: true,
+        host_profile: Default::default(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        last_connected_at: None,
+        mock: false,
+        library_id: String::new(),
+        folder_id: None,
+    }
+}
+
 fn read_smoke_env() -> Vec<(&'static str, String, u16, String, String)> {
     // The staged estate is a numbered host list in the env file
     // (maintainer-defined 2026-11-12: host1 Windows 11 native RDP, host2
@@ -1016,8 +1048,6 @@ async fn smoke_host(
     codecs: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) -> HostSmokeReport {
     use crate::rdp::client::{ConnectionOutcome, attempt_rdp_connection};
-    use crate::store::connections::ConnectionConfig;
-
     eprintln!("SMOKE host{n}={host}:{port} user=<user{n}> starting");
     // Per-CYCLE drain (debug-round root cause 2): the accumulators are NOT
     // drained at host start — the previous host drained them after its own
@@ -1027,26 +1057,7 @@ async fn smoke_host(
     let mut notable_taken: Vec<String> = Vec::new();
     let mut codec_taken: Vec<String> = Vec::new();
 
-    let mut config = ConnectionConfig {
-        id: format!("baseline-smoke-{n}"),
-        name: format!("baseline-smoke-{n}"),
-        host: host.to_string(),
-        port,
-        username: user.to_string(),
-        domain: String::new(),
-        color_accent: None,
-        tags: vec!["baseline-smoke".to_string()],
-        display_width: Some(1920),
-        display_height: Some(1080),
-        font_smoothing: true,
-        host_profile: Default::default(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        last_connected_at: None,
-        mock: false,
-        library_id: String::new(),
-        folder_id: None,
-    };
+    let mut config = smoke_config(n, host, port, user);
 
     let mut report = HostSmokeReport {
         host_label: format!("host{n}"),

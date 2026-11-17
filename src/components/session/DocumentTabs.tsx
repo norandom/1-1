@@ -225,7 +225,7 @@ export function DocumentTabs() {
         <Plus size={14} />
       </Button>
     </div>
-      {activeConnection && <SessionOptionsMenu key={activeConnection.id} connection={activeConnection} />}
+      {activeConnection && <SessionOptionsMenu key={activeConnection.id} connection={activeConnection} session={sessions.get(activeTabId ?? '')} />}
     </div>
   );
 }

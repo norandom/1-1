@@ -1,11 +1,9 @@
 <#
 .SYNOPSIS
-  Task 3.5 baseline runner: old-stack real-server TLS/NLA smoke and the
-  design workload-matrix benchmark (explicit invocation only).
+  Run the requested RDP connection, workload or idle graphics experiment.
 
 .DESCRIPTION
-  Builds the lib test binary and invokes the two #[ignore]d harnesses in
-  src-tauri/src/rdp/baseline.rs directly:
+  Builds the lib test binary and invokes the selected ignored Rust test.
 
     -Mode Smoke    real-server TLS/NLA smoke against the staged LAN hosts
                    (numbered triples RDP_SMOKE_HOSTn/USERn/PASSn, read
@@ -22,7 +20,10 @@
                    while it runs (design: report CPU and process memory;
                    first-vs-last 10 s averages derive from these samples).
 
-  Both modes record a hardware/build snapshot (CPU, RAM, GPU, OS, commit)
+    -Mode IdlePreview  measure host1 TCP traffic on a quiet desktop, forcing
+                   one suppression/preview cycle and a wake on the same connection.
+
+  The modes record a hardware/build snapshot (CPU, RAM, GPU, OS, commit)
   and perform a redaction self-check: if any secret VALUE from the env file
   appears in any produced artifact, the run FAILS loudly (the value itself
   is never printed).
@@ -30,11 +31,12 @@
 .EXAMPLE
   pwsh -NoProfile -File scripts/Invoke-Baseline.ps1 -Mode Smoke
   pwsh -NoProfile -File scripts/Invoke-Baseline.ps1 -Mode Workload
+  pwsh -NoProfile -File scripts/Invoke-Baseline.ps1 -Mode IdlePreview
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Smoke', 'Workload')]
+    [ValidateSet('Smoke', 'Workload', 'IdlePreview')]
     [string]$Mode,
 
     [string]$SecretsPath = 'D:\BuildArtifacts\drift-rdp\secrets\rdp-smoke.env',
@@ -287,6 +289,47 @@ if ($Mode -eq 'Smoke') {
 
 Write-HardwareSnapshot -Directory $runDir -BuildId $buildId
 $testBinary = Get-TestBinary -ManifestPath $manifest -Release:$Release
+
+if ($Mode -eq 'IdlePreview') {
+    # Supply only host1's credentials to the test process, after compilation.
+    $probe = [Diagnostics.ProcessStartInfo]::new($testBinary)
+    $probe.UseShellExecute = $false
+    $probe.RedirectStandardOutput = $true
+    $probe.RedirectStandardError = $true
+    $probe.Arguments = 'rdp::baseline::idle_preview_probe::windows_idle_preview_traffic --exact --ignored --nocapture'
+    foreach ($line in Get-Content -LiteralPath $SecretsPath) {
+        if ($line -match '^\s*(RDP_SMOKE_(?:HOST|USER|PASS)1)\s*=(.+)$') {
+            $probe.Environment[$Matches[1]] = $Matches[2]
+            $secrets[$Matches[1]] = $Matches[2]
+        }
+    }
+    if ($secrets.Count -ne 3) { throw 'The idle preview experiment needs all three host1 variables.' }
+    $process = [Diagnostics.Process]::Start($probe)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(210000)) {
+            $process.Kill()
+            throw 'Windows idle preview probe exceeded its time limit.'
+        }
+        $logPath = Join-Path $runDir 'idle-preview.txt'
+        @($stdout.GetAwaiter().GetResult(), $stderr.GetAwaiter().GetResult()) |
+            Set-Content -LiteralPath $logPath -Encoding utf8
+        Assert-NoSecretsInArtifacts -Directory $runDir -SecretValues $secrets
+        Get-Content -LiteralPath $logPath
+        if ($process.ExitCode -ne 0) { throw 'Windows idle preview probe failed.' }
+        $report = Get-Content -LiteralPath $logPath -Raw
+        if ($report -notmatch 'test result: ok\. 1 passed;') { throw 'The idle preview test did not run.' }
+        if ($report -match 'suppress_output=false') {
+            Write-Warning 'This host did not negotiate graphics suppression. No comparison was possible.'
+        } elseif ($report -notmatch '(?m)^wake 8s .*first_graphics_ms=Some\(') {
+            throw 'The idle preview probe did not record a completed wake.'
+        }
+    } finally {
+        $process.Dispose()
+    }
+    return
+}
 
 if ($Mode -eq 'Smoke') {
     $console = Join-Path $runDir 'smoke-run-console.txt'

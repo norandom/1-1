@@ -6,13 +6,14 @@ import { experiencePreset, presetName, VISUAL_OPTIONS, NETWORK_OPTIONS } from '.
 import { HostProfileFields } from '../../components/connections/HostProfileFields';
 import { SessionCanvas } from '../../components/session/SessionCanvas';
 it('exposes graphics requests with scope help and preserves them across visual presets', () => {
-  const profile = { ...DEFAULT_HOST_PROFILE, colorDepth: '16' as const, bulkCompression: 'rdp61' as const };
+  const profile = { ...DEFAULT_HOST_PROFILE, colorDepth: '16' as const, bulkCompression: 'rdp61' as const, idlePreview: true };
   for (const preset of ['low', 'balanced', 'quality'] as const) {
-    expect({ ...profile, ...experiencePreset(preset).hostProfile }).toMatchObject({ colorDepth: '16', bulkCompression: 'rdp61' });
+    expect({ ...profile, ...experiencePreset(preset).hostProfile }).toMatchObject({ colorDepth: '16', bulkCompression: 'rdp61', idlePreview: true });
   }
   const html = renderToStaticMarkup(createElement(HostProfileFields, { profile, fontSmoothing: true, onChange: () => {} }));
   for (const label of ['15-bit', '16-bit', '24-bit', '32-bit', 'MPPC 8 KB', 'MPPC 64 KB', 'NCRUSH', 'XCRUSH']) expect(html).toContain(label);
   expect(html).toContain('standard bitmap');
+  expect(html).toContain('aria-label="Idle preview after 5 minutes"');
   expect(html).toContain('Reconnect');
 });
 

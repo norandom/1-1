@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react';
 import { Settings2 } from 'lucide-react';
-import type { ConnectionConfig, HostProfile } from '../../types';
+import type { ConnectionConfig, HostProfile, SessionInfo } from '../../types';
+import { IDLE_PREVIEW_HELP, IDLE_PREVIEW_LABEL, idleDisplayLabel } from '../../lib/idle-preview';
+import { resumeDisplay } from '../../lib/tauri';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { selectIsWriteBlocked, useLibraryStore } from '../../stores/libraryStore';
 import { normalizeHostProfile } from '../../lib/host-profile';
@@ -8,7 +10,7 @@ import { CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTION
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuPortal, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuCheckboxItem, DropdownMenuItem } from '@/components/ui/dropdown-menu';
 
-export function SessionOptionsMenu({ connection }: { connection: ConnectionConfig }) {
+export function SessionOptionsMenu({ connection, session }: { connection: ConnectionConfig; session?: SessionInfo }) {
   const update = useConnectionStore((s) => s.updateConnection);
   const blocked = useLibraryStore(selectIsWriteBlocked);
   const busy = useRef(false);
@@ -25,7 +27,13 @@ export function SessionOptionsMenu({ connection }: { connection: ConnectionConfi
     finally { busy.current = false; setSaving(false); }
   };
   const disabled = saving || blocked;
-  return <div className="relative ml-auto shrink-0 px-1" data-local-input>
+  const idleLabel = session && idleDisplayLabel(session);
+  return <div className="relative ml-auto flex items-center shrink-0 px-1" data-local-input>
+    {session && idleLabel && <Button type="button" variant="ghost" size="xs" className="h-6 text-xs"
+      aria-label={`${idleLabel}. Resume live updates`} title="Resume live updates"
+      onClick={() => { void resumeDisplay(session.id).catch((e) => setError(`Unable to resume display: ${String(e)}`)); }}>
+      {idleLabel} · Resume
+    </Button>}
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button id="session-options-trigger" variant="ghost" size="icon-sm" aria-label={`Session options for ${connection.name}`} aria-keyshortcuts="Control+Alt+Shift+P" title="Session options (Ctrl+Alt+Shift+P)" className="h-7 w-8">
@@ -81,6 +89,14 @@ export function SessionOptionsMenu({ connection }: { connection: ConnectionConfi
               {COMPRESSION_OPTIONS.map(([key, label]) => <DropdownMenuRadioItem key={key} value={key} disabled={disabled} onSelect={(e) => e.preventDefault()}>{label}</DropdownMenuRadioItem>)}
             </DropdownMenuRadioGroup>
             <p className="px-2 py-2 text-xs text-muted-foreground">{COMPRESSION_HELP}</p>
+            <DropdownMenuSeparator />
+            <DropdownMenuCheckboxItem checked={profile.idlePreview} disabled={disabled}
+              onSelect={(e) => e.preventDefault()} onCheckedChange={(idlePreview) => void save({ hostProfile: { idlePreview } })}>
+              {IDLE_PREVIEW_LABEL}
+            </DropdownMenuCheckboxItem>
+            <p className="px-2 py-1 text-xs text-muted-foreground">{IDLE_PREVIEW_HELP}</p>
+            {session?.status === 'connected' && session.idlePreviewState === 'unsupported' &&
+              <p className="px-2 py-1 text-xs text-muted-foreground">This host does not support pausing display updates.</p>}
           </DropdownMenuSubContent>
           </DropdownMenuPortal>
         </DropdownMenuSub>

@@ -1,6 +1,6 @@
 # Coding and agentic bandwidth optimization
 
-Research date: 2026-11-17. User priority: sharp code/terminal text, immediate input response, reliable clipboard, and long-running remote agent sessions. Native acceptance scope: Windows only. No claimed measured savings yet.
+Research date: 2026-11-17. The user prioritizes sharp code and terminal text, immediate input response, reliable clipboard, and long-running remote agent sessions. The native experiment below covers Windows.
 
 ## Findings
 
@@ -66,4 +66,16 @@ Sources:
 
 Use local session activity and measured traffic, not one fixed FPS everywhere. Live interaction prioritizes immediate input forwarding and prompt sharp updates; reading an unchanged screen retains the existing framebuffer and accepts ordinary deltas. Unattended agent output becomes a candidate for opt-in suppression after five minutes. Resume immediately on input/focus return without lowering text quality.
 
-Do not suppress solely because five minutes elapsed: an optional adaptive mode should compare measured graphics-idle costs with preview refresh costs over bounded windows. A static desktop may be cheaper left live than refreshed once a minute; streaming output is a stronger candidate. TCP totals also contain clipboard/protocol traffic, so totals alone must not be treated as exact graphics costs. Attribute traffic more precisely or run controlled comparisons before automating the decision. Avoid rapid switching with minimum dwell times, retain a manual override, and report the actual state and age of the last preview. No predicted bandwidth savings, automatic adaptive policy or new FPS limit is implemented yet.
+The development prototype starts a trial after five minutes of local inactivity when desktop changes recur and their encoded size totals at least 4 KiB over the recent ten seconds. This gate lets quiet desktops continue receiving ordinary deltas. A two-second preview around each minute gives the server time to send a redraw. The trial ends when updates settle or the projected live traffic no longer exceeds the observed trial cost by 25%. Input and explicit Resume take precedence. The existing session chrome shows the age of the last observed desktop update. These thresholds are initial settings for evaluation.
+
+### Windows host measurement
+
+At 1280 × 720 the lab host negotiated graphics suppression. After a twelve-second warmup, the probe ran two consecutive one-minute windows on the same quiet desktop. It forced the protocol requests to measure the cost of a preview on a desktop the automatic policy would leave live. Values are measured TCP payload bytes and include TLS overhead.
+
+| Window | Received | Sent | Desktop batches |
+| --- | ---: | ---: | ---: |
+| Ordinary live updates for 60 seconds | 275 B | 66 B | 1 |
+| Suppressed for 58 seconds | 0 B | 58 B | 0 |
+| Allowed for the remaining 2 seconds | 33,494 B | 870 B | 4 |
+
+After a separate three-second pause, the same connection delivered its first graphics update 84 ms after the resume request. This measures first-update latency. Measuring settled text clarity, typing latency and savings during a sustained agent workload requires a busy-host run. Repeat the experiment with `scripts/Invoke-Baseline.ps1 -Mode IdlePreview`. The runner writes the per-phase counters to `idle-preview.txt` in its timestamped output directory.

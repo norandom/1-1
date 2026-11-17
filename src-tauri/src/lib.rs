@@ -204,6 +204,7 @@ pub fn run() {
             // Session commands
             commands::session::connect,
             commands::session::frame_consumed,
+            commands::session::resume_display,
             commands::session::disconnect,
             commands::session::list_sessions,
             commands::session::get_session_info,

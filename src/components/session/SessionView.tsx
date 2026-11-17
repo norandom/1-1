@@ -12,6 +12,7 @@ import { PerformanceHUD } from './PerformanceHUD';
 import * as tauri from '../../lib/tauri';
 import { ctrlAltDelSequence } from '../../lib/input-mapper';
 import { normalizeHostProfile } from '../../lib/host-profile';
+import { onSessionViewReturn } from '../../lib/idle-preview';
 import { physicalViewport } from '../../lib/viewport-size';
 import { subscribeSessionEscape } from './canvas-keyboard';
 import { resolveSessionView, sessionForConnection } from '../../lib/session-route';
@@ -90,6 +91,17 @@ function SessionContent() {
     ? connections.find((c) => c.id === resolvedConnectionId)
     : undefined;
   const profile = normalizeHostProfile(connectionInfo?.hostProfile);
+  useEffect(() => {
+    if (!sessionId || status !== 'connected') return;
+    return onSessionViewReturn(window, document, () => {
+      // Read current runtime policy on focus. Periodic session snapshots never
+      // re-arm this listener or turn idle previews into synthetic activity.
+      const state = useSessionStore.getState().sessions.get(sessionId)?.idlePreviewState;
+      if (state === 'live' || state === 'suppressed' || state === 'preview') {
+        void tauri.resumeDisplay(sessionId).catch((error) => console.warn('Resume display failed', error));
+      }
+    });
+  }, [sessionId, status]);
   useEffect(() => {
     if (sessionId === null || profile.resizeMode === 'fixed') return;
     const viewport = viewportRef.current;
