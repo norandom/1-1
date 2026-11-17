@@ -19,7 +19,6 @@ interface SessionRuntime {
   unlisten: (() => void) | null;
   timer: ReturnType<typeof setInterval> | null;
   frames: number;
-  bytes: number;
 }
 
 // Transports belong to open sessions, not mounted React views. Each session
@@ -102,7 +101,7 @@ async function startSession(connectionId: string, existing?: SessionInfo, initia
   if (old) dispose(old, false);
   const runtime: SessionRuntime = {
     disposed: false, channel: null, metadata: null, completion: null, listeners, surface: null,
-    unlisten: null, timer: null, frames: 0, bytes: 0,
+    unlisten: null, timer: null, frames: 0,
   };
   // Publish ownership before restart awaits IPC, so close/delete can cancel it.
   if (existing) runtimes.set(existing.id, runtime);
@@ -131,7 +130,6 @@ async function startSession(connectionId: string, existing?: SessionInfo, initia
         }
         compositeFrameRects(runtime.surface, packet.rects);
         runtime.surface.dirty = null;
-        runtime.bytes += bytes.byteLength;
         let sent = false;
         const consumed = (refresh = false) => {
           if (runtime.disposed || (sent && !refresh)) return;
@@ -169,7 +167,7 @@ async function startSession(connectionId: string, existing?: SessionInfo, initia
       if (runtime.disposed) return;
       const current = useSessionStore.getState().sessions.get(sessionId);
       useSessionStore.getState().updateSession(sessionId, {
-        ...info, fps: current?.fps ?? 0, bandwidth: current?.bandwidth ?? 0,
+        ...info, fps: current?.fps ?? 0,
       });
     };
     const unlisten = await listen<SessionInfoWire>(`session-info-${id}`, (event) => {
@@ -185,9 +183,8 @@ async function startSession(connectionId: string, existing?: SessionInfo, initia
     if (info && !eventReceived) applyInfo(info);
     if (runtime.disposed) return id;
     runtime.timer = setInterval(() => {
-      useSessionStore.getState().updateSession(sessionId, { fps: runtime.frames, bandwidth: runtime.bytes });
+      useSessionStore.getState().updateSession(sessionId, { fps: runtime.frames });
       runtime.frames = 0;
-      runtime.bytes = 0;
     }, 1000);
     return id;
   } catch (error) {

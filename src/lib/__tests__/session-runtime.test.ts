@@ -69,6 +69,21 @@ afterEach(() => {
 });
 
 describe('session-owned frame channels (8.6 integration remediation)', () => {
+  it('keeps backend transport rates when local frame traffic and FPS timers run', async () => {
+    const id = await connectSession('network');
+    const network = { rxBytes: 1000, txBytes: 90, rxBytesPerSecond: 480, txBytesPerSecond: 12 };
+    const graphics = { channels: ['egfx'], codecs: ['clearcodec'] };
+    const info = { ...useSessionStore.getState().sessions.get(id)!, bandwidth: 480, network, graphics };
+    transport.statuses.get(`session-info-${id}`)!({ payload: info });
+    send('network', packet(5));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(useSessionStore.getState().sessions.get(id)?.bandwidth).toBe(480);
+    expect(useSessionStore.getState().sessions.get(id)?.network).toEqual(network);
+    expect(useSessionStore.getState().sessions.get(id)?.graphics).toEqual(graphics);
+    transport.statuses.get(`session-info-${id}`)!({ payload: { ...info, bandwidth: 0 } });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(useSessionStore.getState().sessions.get(id)?.bandwidth).toBe(0);
+  });
   it('uses fresh measured dimensions on connect/restart but never reconnects on attachment', async () => {
     const first = { width: 1200, height: 700 };
     const id = await connectSession('viewport', false, first);

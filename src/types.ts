@@ -54,6 +54,9 @@ export type SessionStatus =
   | 'error';
 
 export interface SessionInfo {
+  /** TCP payload I/O below TLS; excludes IP/TCP headers and retransmissions. */
+  network?: NetworkMetrics | null;
+  graphics?: GraphicsObservation;
   displayStalled?: boolean;
   id: string;
   connectionId: string;
@@ -69,6 +72,18 @@ export interface SessionInfo {
   reconnectAttempts: number;
   maxReconnectAttempts: number;
   lastError?: string | null;
+}
+
+export interface NetworkMetrics {
+  rxBytes: number;
+  txBytes: number;
+  rxBytesPerSecond: number;
+  txBytesPerSecond: number;
+}
+
+export interface GraphicsObservation {
+  channels: string[];
+  codecs: string[];
 }
 
 /** Rust's externally tagged SessionState::Error carries its message. */

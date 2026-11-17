@@ -8,6 +8,7 @@ use ironrdp_tokio::TokioFramed;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 
 use crate::rdp::clipboard::SessionClipboardBackend;
+use crate::rdp::network_metrics::{MeasuredStream, NetworkCounters};
 use crate::store::connections::ConnectionConfig;
 
 /// Commands that can be sent to a running session actor.
@@ -71,7 +72,7 @@ impl std::fmt::Display for RdpError {
 impl std::error::Error for RdpError {}
 
 /// The framed TLS stream type used after TLS upgrade.
-pub type TlsFramed = TokioFramed<ironrdp_tls::TlsStream<TcpStream>>;
+pub type TlsFramed = TokioFramed<ironrdp_tls::TlsStream<MeasuredStream<TcpStream>>>;
 
 /// Outcome of the RDP connection attempt.
 pub enum ConnectionOutcome {
@@ -79,6 +80,7 @@ pub enum ConnectionOutcome {
     RealSession {
         connection_result: Box<ConnectionResult>,
         framed: Box<TlsFramed>,
+        network_counters: std::sync::Arc<NetworkCounters>,
         /// The session's shared codec-error policy (task 9.3): the EGFX
         /// handler attached during this connection reports into it and the
         /// session loop samples the upstream decode-failure counter.
@@ -338,7 +340,8 @@ pub async fn attempt_rdp_connection(
     // `support_dyn_vc_gfx_protocol`.
     crate::rdp::egfx::attach_to_connector(&mut connector, &codec_policy);
 
-    let mut framed = TokioFramed::new(tcp_stream);
+    let network_counters = std::sync::Arc::new(NetworkCounters::default());
+    let mut framed = TokioFramed::new(MeasuredStream::new(tcp_stream, network_counters.clone()));
 
     let should_upgrade = match ironrdp_tokio::connect_begin(&mut framed, &mut connector).await {
         Ok(su) => su,
@@ -466,6 +469,7 @@ pub async fn attempt_rdp_connection(
     ConnectionOutcome::RealSession {
         connection_result: Box::new(connection_result),
         framed: Box::new(tls_framed),
+        network_counters,
         codec_policy,
     }
 }

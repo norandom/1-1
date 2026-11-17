@@ -20,4 +20,5 @@ pub mod frame_delivery;
 pub mod frame_spy;
 pub mod frame_transport;
 pub mod input;
+pub mod network_metrics;
 pub mod session;

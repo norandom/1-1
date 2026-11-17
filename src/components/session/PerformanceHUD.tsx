@@ -5,15 +5,17 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { formatBandwidth, fpsLevel, latencyLevel } from '../../lib/hud-format';
+import type { GraphicsObservation, NetworkMetrics } from '../../types';
 
 interface Props {
   fps: number;
   latency: number;
-  bandwidth: number;
+  network?: NetworkMetrics | null;
+  graphics?: GraphicsObservation;
   resolution: string;
 }
 
-export function PerformanceHUD({ fps, latency, bandwidth, resolution }: Props) {
+export function PerformanceHUD({ fps, latency, network, graphics, resolution }: Props) {
   const show = useSessionStore((s) => s.showPerformanceHud);
 
   const fpsTrend = fpsLevel(fps);
@@ -58,8 +60,14 @@ export function PerformanceHUD({ fps, latency, bandwidth, resolution }: Props) {
               />
               <HUDRow
                 icon={Gauge}
-                label="Bandwidth"
-                value={formatBandwidth(bandwidth)}
+                label="Receive"
+                value={network ? formatBandwidth(network.rxBytesPerSecond) : 'Unknown'}
+                level="info"
+              />
+              <HUDRow
+                icon={Gauge}
+                label="Send"
+                value={network ? formatBandwidth(network.txBytesPerSecond) : 'Unknown'}
                 level="info"
               />
               <HUDRow
@@ -68,6 +76,14 @@ export function PerformanceHUD({ fps, latency, bandwidth, resolution }: Props) {
                 value={resolution}
                 level="neutral"
               />
+              <div className="text-[10px] text-white/60 break-words" title="Observed on this connection, not requested capabilities. Unknown means the wire encoding is not identified.">
+                <div>Channel: {graphics?.channels.join(', ') || 'Unknown'}</div>
+                <div>Codecs: {graphics?.codecs.join(', ') || 'Unknown'}</div>
+              </div>
+              <div className="text-[9px] text-white/50" title="Includes RDP negotiation and TLS overhead. Excludes TCP/IP headers, retransmissions and separate authentication sockets. Totals reset on reconnect.">
+                TCP payload · includes TLS
+                {network && <div>Received {formatBandwidth(network.rxBytes).replace('/s', '')} · Sent {formatBandwidth(network.txBytes).replace('/s', '')}</div>}
+              </div>
             </div>
           </Card>
         </motion.div>

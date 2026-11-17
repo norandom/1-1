@@ -61,3 +61,9 @@ Sources:
 - https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/d64cfae6-f30a-47e7-9655-d019d3d8fb0f
 - https://learn.microsoft.com/en-us/troubleshoot/windows-server/remote/frame-rate-limited-to-30-fps
 - Pinned ironrdp-egfx-0.5.0/src/client.rs handle_end_frame and frame_ack_queue_depth_is_not_a_frame_count.
+
+## Adaptive policy for coding and agentic work
+
+Use local session activity and measured traffic, not one fixed FPS everywhere. Live interaction prioritizes immediate input forwarding and prompt sharp updates; reading an unchanged screen retains the existing framebuffer and accepts ordinary deltas. Unattended agent output becomes a candidate for opt-in suppression after five minutes. Resume immediately on input/focus return without lowering text quality.
+
+Do not suppress solely because five minutes elapsed: an optional adaptive mode should compare measured graphics-idle costs with preview refresh costs over bounded windows. A static desktop may be cheaper left live than refreshed once a minute; streaming output is a stronger candidate. TCP totals also contain clipboard/protocol traffic, so totals alone must not be treated as exact graphics costs. Attribute traffic more precisely or run controlled comparisons before automating the decision. Avoid rapid switching with minimum dwell times, retain a manual override, and report the actual state and age of the last preview. No predicted bandwidth savings, automatic adaptive policy or new FPS limit is implemented yet.

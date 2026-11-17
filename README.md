@@ -30,7 +30,7 @@
 
 ## About 1-1
 
-Connect to remote desktops, manage saved hosts, and work with several sessions in one window.
+1-1 focuses on remote coding and agentic workflows: sharp code and terminal text, responsive input, reliable clipboard, and efficient long-running sessions. Manage saved hosts and work with several sessions in one window. H.264/AVC remains disabled.
 
 - **Native performance** &mdash; GPU-rendered frames via wgpu (Metal/Vulkan). No Electron, no browser overhead.
 - **Real RDP protocol** &mdash; Full IronRDP implementation with TLS + CredSSP/NLA authentication.
@@ -56,7 +56,7 @@ Connect to remote desktops, manage saved hosts, and work with several sessions i
 **Interface**
 - Quick Connect via `Cmd+K` &mdash; search and connect in seconds
 - Connection cards with color accents, tags, and latency indicators
-- Real-time performance HUD (FPS, latency, bandwidth, resolution)
+- Performance HUD with render FPS, transport receive/send rates and totals, resolution, and observed graphics diagnostics (development branch; not yet in alpha.3). Network counters include TLS payload overhead but exclude TCP/IP headers and retransmissions; they are separate from decoded local frame delivery.
 - Settings page with theme, display, and network configuration
 - Keyboard shortcut overlay (`Cmd+?`)
 - Dark and light themes

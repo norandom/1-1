@@ -16,6 +16,7 @@ use crate::rdp::frame_delivery::{FrameDelivery, FrameReceipt};
 use crate::rdp::frame_transport::{
     encode_full_frame_packet, encode_full_frame_packet_from_parts, encode_image_update_packet,
 };
+use crate::rdp::network_metrics::{NetworkCounters, NetworkMetrics, NetworkSampler};
 // Task 5.4 (Req 12.4/12.10): frame-kind spy module, compiled ONLY in
 // test-support builds.
 #[cfg(feature = "test-support")]
@@ -64,6 +65,8 @@ impl PerformanceMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
+    pub network: Option<NetworkMetrics>,
+    pub graphics: crate::rdp::codec_policy::GraphicsObservation,
     pub display_stalled: bool,
     pub id: String,
     pub connection_id: String,
@@ -241,6 +244,9 @@ struct SessionActor {
     password: Option<String>,
     state: SessionState,
     metrics: PerformanceMetrics,
+    network_counters: Option<Arc<NetworkCounters>>,
+    network: Option<NetworkMetrics>,
+    graphics: crate::rdp::codec_policy::GraphicsObservation,
     width: u32,
     height: u32,
     connected_at: Option<DateTime<Utc>>,
@@ -287,6 +293,9 @@ impl SessionActor {
             password,
             state: SessionState::Connecting,
             metrics: PerformanceMetrics::new(),
+            network_counters: None,
+            network: None,
+            graphics: Default::default(),
             width,
             height,
             connected_at: None,
@@ -311,7 +320,23 @@ impl SessionActor {
 
     /// Build a SessionInfo snapshot from the current actor state.
     fn build_info(&self) -> SessionInfo {
+        let mut network = self.network.clone().or_else(|| {
+            self.network_counters
+                .as_ref()
+                .map(|_| NetworkMetrics::default())
+        });
+        if let (Some(sample), Some(counters)) = (&mut network, &self.network_counters) {
+            (sample.rx_bytes, sample.tx_bytes) = counters.totals();
+        }
+        if self.state != SessionState::Connected
+            && let Some(ref mut sample) = network
+        {
+            sample.rx_bytes_per_second = 0.0;
+            sample.tx_bytes_per_second = 0.0;
+        }
         SessionInfo {
+            network: network.clone(),
+            graphics: self.graphics.clone(),
             display_stalled: self.delivery.stalled,
             id: self.id.clone(),
             connection_id: self.config.id.clone(),
@@ -320,7 +345,10 @@ impl SessionActor {
             status: self.state.clone(),
             fps: self.metrics.fps,
             latency: self.metrics.latency_ms,
-            bandwidth: self.metrics.bandwidth_kbps,
+            // Compatibility field: network receive bytes/sec, never decoded IPC bytes.
+            bandwidth: network
+                .as_ref()
+                .map_or(0, |n| n.rx_bytes_per_second.min(u32::MAX as f64) as u32),
             width: self.width,
             height: self.height,
             connected_at: self.connected_at,
@@ -731,11 +759,15 @@ impl SessionActor {
                 connection_result,
                 framed,
                 codec_policy,
-            } => Some((
-                *connection_result,
-                SessionTransport::Tls(framed),
-                codec_policy,
-            )),
+                network_counters,
+            } => {
+                self.network_counters = Some(network_counters);
+                Some((
+                    *connection_result,
+                    SessionTransport::Tls(framed),
+                    codec_policy,
+                ))
+            }
             ConnectionOutcome::RealSessionLocal {
                 connection_result,
                 framed,
@@ -876,6 +908,18 @@ impl SessionActor {
         // starts fresh per connection.
         let mut delivered_surface: Option<(u16, u16)> = None;
         let mut held_modifiers = std::collections::BTreeSet::new();
+        let mut network_sampler = self
+            .network_counters
+            .clone()
+            .map(|counters| NetworkSampler::new(counters, tokio::time::Instant::now()));
+        self.network = network_sampler
+            .as_mut()
+            .map(|s| s.sample(tokio::time::Instant::now()));
+        self.graphics = codec_policy.observation();
+        let period = std::time::Duration::from_secs(1);
+        let mut metrics_tick =
+            tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        metrics_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.delivery.reset();
 
         self.clipboard_epoch = Uuid::new_v4().to_string();
@@ -899,6 +943,11 @@ impl SessionActor {
                 }
             }
             tokio::select! {
+                _ = metrics_tick.tick() => {
+                    self.network = network_sampler.as_mut().map(|s| s.sample(tokio::time::Instant::now()));
+                    self.graphics = codec_policy.observation();
+                    self.publish_info();
+                },
                 _ = crate::rdp::frame_delivery::wait_for_stall(self.delivery.deadline()) => self.check_display_stall(),
                 // Read PDUs from the server
                 pdu_result = reader.read_pdu() => {
@@ -966,6 +1015,9 @@ impl SessionActor {
                                     }
                             }
                             ActiveStageOutput::GraphicsUpdate(region) => {
+                                if action == ironrdp_pdu::Action::FastPath {
+                                    codec_policy.note_graphics_channel("fast-path");
+                                }
                                 updated_regions.push(region);
                             }
                             ActiveStageOutput::Terminate(reason) => {
@@ -1477,6 +1529,9 @@ impl SessionActor {
         let mut attempt = 0u32;
 
         while attempt < MAX_RECONNECT_ATTEMPTS {
+            self.network_counters = None;
+            self.network = None;
+            self.graphics = Default::default();
             attempt += 1;
             self.reconnect_attempts = attempt;
             self.state = SessionState::Reconnecting;
@@ -1514,11 +1569,15 @@ impl SessionActor {
                     connection_result,
                     framed,
                     codec_policy,
-                } => Some((
-                    *connection_result,
-                    SessionTransport::Tls(framed),
-                    codec_policy,
-                )),
+                    network_counters,
+                } => {
+                    self.network_counters = Some(network_counters);
+                    Some((
+                        *connection_result,
+                        SessionTransport::Tls(framed),
+                        codec_policy,
+                    ))
+                }
                 ConnectionOutcome::RealSessionLocal {
                     connection_result,
                     framed,
@@ -2087,6 +2146,8 @@ impl SessionManager {
 
         // Build initial info for the watch channel
         let initial_info = SessionInfo {
+            network: None,
+            graphics: Default::default(),
             display_stalled: false,
             id: session_id.clone(),
             connection_id: config.id.clone(),
@@ -2483,6 +2544,106 @@ mod tests {
             updated_at: Utc::now(),
             last_connected_at: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn network_metrics_publish_without_frames_and_stop_rates_on_disconnect() {
+        use crate::rdp::network_metrics::MeasuredStream;
+        let initial: SessionInfo = serde_json::from_value(serde_json::json!({
+            "network": null, "graphics": {"channels": [], "codecs": []},
+            "displayStalled": false, "id": "metrics", "connectionId": "conn-metrics",
+            "connectionName": "metrics", "host": "test.invalid", "status": "connecting",
+            "fps": 0, "latency": 0, "bandwidth": 0, "width": 64, "height": 64,
+            "connectedAt": null, "reconnectAttempts": 0, "maxReconnectAttempts": 5, "lastError": null
+        })).unwrap();
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (info_tx, info_rx) = watch::channel(initial);
+        let (clipboard_tx, _) = watch::channel(None);
+        let (events, _) = RecordedEvents::new();
+        let connect: ConnectFn =
+            Arc::new(|_, _, _, _| Box::pin(async { ConnectionOutcome::Failed("unused".into()) }));
+        let mut actor = SessionActor::new(
+            "metrics".into(),
+            test_config("metrics"),
+            None,
+            cmd_rx,
+            info_tx,
+            clipboard_tx,
+            Channel::new(|_| Ok(())),
+            SessionEventSink::recorded(events),
+            false,
+            None,
+            connect,
+        );
+        let counters = Arc::new(NetworkCounters::default());
+        actor.network_counters = Some(counters.clone());
+        actor.state = SessionState::Connected;
+        let (local, _server) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = ironrdp_tokio::split_tokio_framed(ironrdp_tokio::TokioFramed::new(
+            MeasuredStream::new(local, counters),
+        ));
+        let result = crate::rdp::baseline::synthetic_connection_result(64, 64);
+        let activation = result.activation_factory.clone();
+        let stage = crate::rdp::client::active_stage_from_connection_result(result);
+        let task = tokio::spawn(async move {
+            actor
+                .run_framed_session_loop(
+                    activation,
+                    stage,
+                    reader,
+                    writer,
+                    Arc::new(CodecErrorPolicy::new()),
+                )
+                .await;
+            actor
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        cmd_tx
+            .send(SessionCommand::SendKey {
+                key_code: 0x1e,
+                is_down: true,
+            })
+            .await
+            .unwrap();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let first = info_rx
+            .borrow()
+            .network
+            .clone()
+            .expect("periodic sample without graphics");
+        assert!(first.tx_bytes > 0 && first.tx_bytes_per_second > 0.0);
+        assert_eq!(first.rx_bytes, 0);
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let idle = info_rx.borrow().network.clone().unwrap();
+        assert_eq!(idle.tx_bytes, first.tx_bytes);
+        assert_eq!(idle.tx_bytes_per_second, 0.0);
+        cmd_tx.send(SessionCommand::Disconnect).await.unwrap();
+        let mut actor = task.await.unwrap();
+        actor.network = Some(first);
+        actor.state = SessionState::Disconnected;
+        assert!(
+            actor.build_info().network.unwrap().tx_bytes >= idle.tx_bytes,
+            "terminal totals include writes after the final periodic sample"
+        );
+        assert_eq!(actor.build_info().network.unwrap().tx_bytes_per_second, 0.0);
+        assert_eq!(actor.build_info().bandwidth, 0);
+        // A new attempt must not retain totals, rates or graphics from the old connection.
+        actor.graphics.channels.push("egfx".into());
+        cmd_tx.send(SessionCommand::Disconnect).await.unwrap();
+        actor.run_reconnect_loop().await;
+        assert!(actor.build_info().network.is_none());
+        assert!(actor.build_info().graphics.channels.is_empty());
     }
 
     // Existing fixtures model an immediately consuming UI. Withheld-consumption

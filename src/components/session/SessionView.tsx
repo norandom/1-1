@@ -47,7 +47,8 @@ function SessionContent() {
     status,
     fps,
     latency,
-    bandwidth,
+    network,
+    graphics,
     reconnectAttempts,
     maxReconnectAttempts,
     displayStalled,
@@ -323,7 +324,8 @@ function SessionContent() {
               <PerformanceHUD
                 fps={fps}
                 latency={latency}
-                bandwidth={bandwidth}
+                network={network}
+                graphics={graphics}
                 resolution={displayResolution}
               />
             </>

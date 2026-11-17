@@ -339,7 +339,17 @@ pub struct CodecErrorPolicy {
     state: std::sync::Mutex<PolicyState>,
 }
 
+/// Observed on this connection, not a list of advertised capabilities.
+/// Empty lists mean unknown; some decoded callbacks do not retain wire encoding.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphicsObservation {
+    pub channels: Vec<String>,
+    pub codecs: Vec<String>,
+}
+
 struct PolicyState {
+    observation: GraphicsObservation,
     /// First terminal error wins; later observations cannot soften it.
     terminal: Option<String>,
     /// Decoded-bitmap deliveries since the loop's last evaluation — the
@@ -362,11 +372,34 @@ impl CodecErrorPolicy {
     pub fn new() -> Self {
         Self {
             state: std::sync::Mutex::new(PolicyState {
+                observation: GraphicsObservation::default(),
                 terminal: None,
                 delivered_bitmaps_since_sample: 0,
                 dropped_baseline: None,
                 consecutive_failures: 0,
             }),
+        }
+    }
+
+    pub fn observation(&self) -> GraphicsObservation {
+        self.state.lock().unwrap().observation.clone()
+    }
+
+    pub fn note_graphics_channel(&self, channel: &str) {
+        let mut state = self.state.lock().unwrap();
+        if !state.observation.channels.iter().any(|v| v == channel) {
+            state.observation.channels.push(channel.to_string());
+        }
+    }
+
+    pub fn note_progressive_wire(&self) {
+        self.note_observed_codec("rfx-progressive");
+    }
+
+    fn note_observed_codec(&self, codec: &str) {
+        let mut state = self.state.lock().unwrap();
+        if !state.observation.codecs.iter().any(|v| v == codec) {
+            state.observation.codecs.push(codec.to_string());
         }
     }
 
@@ -414,6 +447,14 @@ impl CodecErrorPolicy {
     /// design.md L207 requires a terminal actionable error rather than
     /// rendering foreign pixels (Req 9.6).
     pub fn note_bitmap_delivered(&self, codec: Codec1Type) {
+        self.note_graphics_channel("egfx");
+        // Uncompressed is ambiguous: upstream uses it for decoded progressive
+        // tiles too. Only the wire-to-surface2 callback identifies progressive.
+        match codec {
+            Codec1Type::ClearCodec => self.note_observed_codec("clearcodec"),
+            Codec1Type::Planar => self.note_observed_codec("planar"),
+            _ => {}
+        }
         match ObservedCodec::from_wire_codec1(codec) {
             ObservedCodec::Supported(_) => {
                 self.state.lock().unwrap().delivered_bitmaps_since_sample += 1;

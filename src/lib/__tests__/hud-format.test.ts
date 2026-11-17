@@ -8,12 +8,12 @@ describe('formatBandwidth', () => {
     expect(formatBandwidth(1023)).toBe('1023 B/s');
   });
 
-  it('formats KB/s and MB/s at their boundaries', () => {
-    expect(formatBandwidth(1024)).toBe('1.0 KB/s');
-    expect(formatBandwidth(1536)).toBe('1.5 KB/s');
-    expect(formatBandwidth(1024 * 1024 - 1)).toBe('1024.0 KB/s');
-    expect(formatBandwidth(1024 * 1024)).toBe('1.0 MB/s');
-    expect(formatBandwidth(3 * 1024 * 1024)).toBe('3.0 MB/s');
+  it('formats KiB/s and MiB/s at their boundaries', () => {
+    expect(formatBandwidth(1024)).toBe('1.0 KiB/s');
+    expect(formatBandwidth(1536)).toBe('1.5 KiB/s');
+    expect(formatBandwidth(1024 * 1024 - 1)).toBe('1024.0 KiB/s');
+    expect(formatBandwidth(1024 * 1024)).toBe('1.0 MiB/s');
+    expect(formatBandwidth(3 * 1024 * 1024)).toBe('3.0 MiB/s');
   });
 });
 

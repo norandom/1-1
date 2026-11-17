@@ -110,6 +110,8 @@ export function useRdpSession(viewSessionId?: string) {
     fps: session?.fps ?? 0,
     latency: session?.latency ?? 0,
     bandwidth: session?.bandwidth ?? 0,
+    network: session?.network,
+    graphics: session?.graphics,
     reconnectAttempts: session?.reconnectAttempts ?? 0,
     maxReconnectAttempts: session?.maxReconnectAttempts ?? 5,
     subscribeToFrames, reportFramePresented, connect, restart, disconnect, cancelReconnect,

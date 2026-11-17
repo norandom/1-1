@@ -62,6 +62,14 @@ impl DriftGfxHandler {
 }
 
 impl GraphicsPipelineHandler for DriftGfxHandler {
+    fn on_capabilities_confirmed(&mut self, _caps: &CapabilitySet) {
+        self.policy.note_graphics_channel("egfx");
+    }
+
+    fn on_wire_to_surface2(&mut self, _pdu: &ironrdp_egfx::pdu::WireToSurface2Pdu) {
+        self.policy.note_progressive_wire();
+    }
+
     /// Capability sets advertised in RDPGFX_CAPS_ADVANCE: the CodecPolicy
     /// set — ClearCodec/Planar/Uncompressed/RFX-Progressive selectable, no
     /// AVC variant (Req 9.1). Upstream additionally filters AVC-implying
@@ -742,6 +750,50 @@ mod tests {
         assert!(
             frames.iter().any(|f| f.len() > 16),
             "channel creation responded with the caps advertise payload"
+        );
+    }
+
+    #[test]
+    fn graphics_observation_distinguishes_wire_progressive_from_decoded_uncompressed() {
+        use ironrdp_egfx::client::GraphicsPipelineHandler;
+        let policy = Arc::new(CodecErrorPolicy::new());
+        let mut handler = super::DriftGfxHandler::new(policy.clone());
+        let _ = handler.capabilities();
+        assert!(
+            policy.observation().channels.is_empty(),
+            "advertisement is not observation"
+        );
+        assert!(policy.observation().codecs.is_empty());
+        handler.on_capabilities_confirmed(&CodecPolicy::egfx_caps()[0]);
+        assert_eq!(policy.observation().channels, ["egfx"]);
+        assert!(
+            policy.observation().codecs.is_empty(),
+            "EGFX alone is not ClearCodec"
+        );
+        handler.on_wire_to_surface2(&ironrdp_egfx::pdu::WireToSurface2Pdu {
+            surface_id: 1,
+            codec_id: ironrdp_egfx::pdu::Codec2Type::RemoteFxProgressive,
+            codec_context_id: 7,
+            pixel_format: ironrdp_egfx::pdu::PixelFormat::XRgb,
+            bitmap_data: vec![],
+        });
+        policy.note_bitmap_delivered(Codec1Type::Uncompressed);
+        assert_eq!(
+            policy.observation().codecs,
+            ["rfx-progressive"],
+            "decoded tile tag is not raw wire encoding"
+        );
+        policy.note_bitmap_delivered(Codec1Type::ClearCodec);
+        policy.note_bitmap_delivered(Codec1Type::Planar);
+        policy.note_bitmap_delivered(Codec1Type::ClearCodec);
+        assert_eq!(
+            policy.observation().codecs,
+            ["rfx-progressive", "clearcodec", "planar"]
+        );
+        assert_eq!(
+            CodecErrorPolicy::new().observation(),
+            Default::default(),
+            "new connection resets observations"
         );
     }
 
