@@ -536,6 +536,8 @@ struct HostSmokeReport {
     session_error_first: Option<String>,
     fastpath_mouse_move: Option<String>,
     display_control_resize: Option<String>,
+    resize_outcome: String,
+    session_end: Option<String>,
     /// Unlike the interactive actor, diagnostic graphics evidence excludes cursor composition.
     software_cursor_composited: bool,
     resize_observations: Vec<ResizeObservation>,
@@ -991,6 +993,17 @@ fn real_server_tls_nla_smoke() {
         "SMOKE gate: PASS ({} hosts: TLS+NLA route evidence, first frame, clean shutdown)",
         reports.len()
     );
+    for report in &reports {
+        eprintln!(
+            "SMOKE resize {}: {} ({})",
+            report.host_label,
+            report.resize_outcome,
+            report
+                .display_control_resize
+                .as_deref()
+                .unwrap_or("not-run")
+        );
+    }
 }
 
 async fn smoke_host(
@@ -1062,6 +1075,8 @@ async fn smoke_host(
         session_error_first: None,
         fastpath_mouse_move: None,
         display_control_resize: None,
+        resize_outcome: "not-run".into(),
+        session_end: None,
         software_cursor_composited: SMOKE_SOFTWARE_POINTER,
         resize_observations: Vec::new(),
         graceful_shutdown: None,
@@ -1205,21 +1220,16 @@ async fn smoke_host(
                 )),
             );
             // immediately release the second session
-            use ironrdp_session::ActiveStageOutput;
-            use ironrdp_tokio::FramedWrite as _;
             let stage = crate::rdp::client::active_stage_from_connection_result(*cr2);
             let (mut _r, mut w) = ironrdp_tokio::split_tokio_framed(*f2);
-            if let Ok(outputs) = stage.graceful_shutdown() {
-                for out in outputs {
-                    if let ActiveStageOutput::ResponseFrame(frame) = out {
-                        let _ = w.write_all(&frame).await;
-                    }
-                }
-            }
-            cycle2.insert(
-                "shutdown".into(),
-                serde_json::json!("graceful_shutdown sent"),
-            );
+            let shutdown = match stage.graceful_shutdown() {
+                Ok(outputs) => match smoke_consume_outputs(&mut w, outputs).await {
+                    Ok(_) => "graceful_shutdown sent".into(),
+                    Err(error) => error,
+                },
+                Err(_) => "shutdown-encode-failed".into(),
+            };
+            cycle2.insert("shutdown".into(), serde_json::json!(shutdown));
         }
         ConnectionOutcome::Failed(reason) => {
             cycle2.insert(
@@ -1252,6 +1262,68 @@ async fn smoke_host(
 // Diagnostic-only policy: desktop graphics evidence must not include cursor
 // composition. The interactive actor retains its production pointer settings.
 const SMOKE_SOFTWARE_POINTER: bool = false;
+const SMOKE_WRITE_BUDGET: Duration = Duration::from_secs(3);
+
+// Error text supplied by peers or transports may contain identifying data.
+// Report only the phase and ErrorKind; a timed-out partial write is terminal.
+async fn smoke_write_frame<W: ironrdp_tokio::FramedWrite>(
+    writer: &mut W,
+    frame: &[u8],
+) -> Result<(), String> {
+    match tokio::time::timeout(SMOKE_WRITE_BUDGET, writer.write_all(frame)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("write-failed: {:?}", error.kind())),
+        Err(_) => Err("write-timeout".into()),
+    }
+}
+
+fn smoke_resize_outcome(observations: &[ResizeObservation]) -> &'static str {
+    if observations.is_empty() {
+        "not-run"
+    } else if observations.len() == 2 && observations.iter().all(|o| o.status == "confirmed") {
+        "confirmed-shrink-and-restore"
+    } else {
+        "incomplete"
+    }
+}
+
+#[derive(Default, Debug)]
+struct SmokeOutputEffects {
+    graphics: bool,
+    deactivate: bool,
+    writes: usize,
+}
+
+async fn smoke_consume_outputs<W: ironrdp_tokio::FramedWrite>(
+    writer: &mut W,
+    outputs: Vec<ironrdp_session::ActiveStageOutput>,
+) -> Result<SmokeOutputEffects, String> {
+    use ironrdp_session::ActiveStageOutput;
+    let mut effects = SmokeOutputEffects::default();
+    for output in outputs {
+        match output {
+            ActiveStageOutput::GraphicsUpdate(_) => effects.graphics = true,
+            ActiveStageOutput::DeactivateAll => effects.deactivate = true,
+            ActiveStageOutput::ResponseFrame(frame) if !frame.is_empty() => {
+                smoke_write_frame(writer, &frame)
+                    .await
+                    .map_err(|error| format!("response-{error}"))?;
+                effects.writes += 1;
+            }
+            ActiveStageOutput::Terminate(reason) => {
+                use ironrdp_session::GracefulDisconnectReason;
+                let category = match reason {
+                    GracefulDisconnectReason::UserInitiated => "user-initiated",
+                    GracefulDisconnectReason::ServerInitiated => "server-initiated",
+                    GracefulDisconnectReason::Other(_) => "other",
+                };
+                return Err(format!("server-terminated: {category}"));
+            }
+            _ => {}
+        }
+    }
+    Ok(effects)
+}
 
 fn smoke_stage_from_result(mut result: ConnectionResult) -> ironrdp_session::ActiveStage {
     result.pointer_software_rendering = SMOKE_SOFTWARE_POINTER;
@@ -1328,9 +1400,7 @@ async fn session_layer_checks(
     framed: crate::rdp::client::TlsFramed,
 ) {
     use ironrdp_graphics::image_processing::PixelFormat;
-    use ironrdp_session::ActiveStageOutput;
     use ironrdp_session::image::DecodedImage;
-    use ironrdp_tokio::FramedWrite as _;
 
     // Task 4.3 harness fix (found behavior): size the decode image from the
     // NEGOTIATED desktop, mirroring production session.rs (which sizes its
@@ -1387,14 +1457,14 @@ async fn session_layer_checks(
             if observation.sent_ms.is_none() && stage.display_control_ready() == Some(true) {
                 let (width, height) = observation.requested;
                 match stage.encode_resize(u32::from(width), u32::from(height), None, None) {
-                    Some(Ok(frame)) => match writer.write_all(&frame).await {
+                    Some(Ok(frame)) => match smoke_write_frame(&mut writer, &frame).await {
                         Ok(()) => {
                             observation.sent_ms = Some(loop_start.elapsed().as_secs_f64() * 1000.0);
                             observation.status = "awaiting-server-confirmation".into();
                             resize_started = std::time::Instant::now();
                         }
                         Err(error) => {
-                            read_failure = Some(format!("resize write failed: {error}"));
+                            read_failure = Some(format!("resize-{error}"));
                             break;
                         }
                     },
@@ -1421,7 +1491,7 @@ async fn session_layer_checks(
         let pdu = match tokio::time::timeout(Duration::from_secs(1), reader.read_pdu()).await {
             Ok(Ok(pdu)) => pdu,
             Ok(Err(error)) => {
-                read_failure = Some(format!("connection-lost: {error}"));
+                read_failure = Some(format!("connection-lost: {:?}", error.kind()));
                 break;
             }
             Err(_) => continue,
@@ -1456,21 +1526,14 @@ async fn session_layer_checks(
         {
             observation.egfx_reset_dimensions = Some(current_surface);
         }
-        let mut got_graphics = false;
-        let mut deactivate = false;
-        for out in outputs {
-            match out {
-                ActiveStageOutput::GraphicsUpdate(_) => {
-                    got_graphics = true;
-                }
-                ActiveStageOutput::ResponseFrame(frame) if !frame.is_empty() => {
-                    let _ = writer.write_all(&frame).await;
-                }
-                ActiveStageOutput::DeactivateAll => deactivate = true,
-                _ => {}
+        let effects = match smoke_consume_outputs(&mut writer, outputs).await {
+            Ok(effects) => effects,
+            Err(error) => {
+                read_failure = Some(error);
+                break;
             }
-        }
-        if deactivate {
+        };
+        if effects.deactivate {
             let result = tokio::time::timeout(
                 RESIZE_BUDGET,
                 smoke_reactivate(
@@ -1491,13 +1554,17 @@ async fn session_layer_checks(
                     }
                 }
                 result => {
-                    read_failure = Some(format!("reactivation-failed: {result:?}"));
+                    read_failure = Some(if result.is_err() {
+                        "reactivation-timeout".into()
+                    } else {
+                        "reactivation-failed".into()
+                    });
                     break;
                 }
             }
             continue;
         }
-        if got_graphics {
+        if effects.graphics {
             frames += 1;
             if first_frame_ms.is_none() {
                 first_frame_ms = Some(loop_start.elapsed().as_secs_f64() * 1000.0);
@@ -1519,21 +1586,20 @@ async fn session_layer_checks(
                     y_position: 16,
                 });
                 match stage.process_fastpath_input(&mut image, &[event]) {
-                    Ok(outs) => {
-                        let mut sent = false;
-                        for out in outs {
-                            if let ActiveStageOutput::ResponseFrame(frame) = out
-                                && !frame.is_empty()
-                            {
-                                sent = writer.write_all(&frame).await.is_ok();
-                            }
+                    Ok(outs) => match smoke_consume_outputs(&mut writer, outs).await {
+                        Ok(effects) => {
+                            report.fastpath_mouse_move = Some(if effects.writes > 0 {
+                                "sent-ok".into()
+                            } else {
+                                "encoded-no-response".into()
+                            });
                         }
-                        report.fastpath_mouse_move = Some(if sent {
-                            "sent-ok".into()
-                        } else {
-                            "encoded-no-response".into()
-                        });
-                    }
+                        Err(error) => {
+                            report.fastpath_mouse_move = Some(format!("input-{error}"));
+                            read_failure = Some(format!("input-{error}"));
+                            break;
+                        }
+                    },
                     Err(e) => report.fastpath_mouse_move = Some(format!("error: {e}")),
                 }
             }
@@ -1556,6 +1622,8 @@ async fn session_layer_checks(
             .clone()
             .unwrap_or_else(|| "no-initial-frame".into());
     }
+    report.session_end = read_failure.clone();
+    report.resize_outcome = smoke_resize_outcome(&report.resize_observations).into();
     report.display_control_resize = Some(
         report
             .resize_observations
@@ -1573,17 +1641,16 @@ async fn session_layer_checks(
 
     // Graceful teardown through the production path.
     let t_teardown = std::time::Instant::now();
-    let mut clean = false;
-    if let Ok(outputs) = stage.graceful_shutdown() {
-        for out in outputs {
-            if let ActiveStageOutput::ResponseFrame(frame) = out
-                && !frame.is_empty()
-            {
-                let _ = writer.write_all(&frame).await;
-            }
+    let shutdown_result = if read_failure.is_some() {
+        Err("not-requested-session-ended".to_string())
+    } else {
+        match stage.graceful_shutdown() {
+            Ok(outputs) => smoke_consume_outputs(&mut writer, outputs)
+                .await
+                .map(|_| ()),
+            Err(_) => Err("shutdown-encode-failed".into()),
         }
-        clean = true;
-    }
+    };
     // Drain briefly so the shutdown PDU is flushed and the server's reaction
     // (close or continued streaming) is observed. Bounded at 10s total (task
     // 4.2): the 0.12 connector negotiates the MCS message channel and network
@@ -1596,7 +1663,7 @@ async fn session_layer_checks(
     let drain_deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut drained = 0usize;
     let mut server_closed = false;
-    loop {
+    while shutdown_result.is_ok() {
         if std::time::Instant::now() >= drain_deadline {
             break;
         }
@@ -1609,17 +1676,18 @@ async fn session_layer_checks(
             Err(_) => break, // quiet: >2s without a PDU
         }
     }
-    report.teardown_observation = Some(if server_closed {
+    report.teardown_observation = Some(if shutdown_result.is_err() {
+        "shutdown not sent successfully; drain skipped".into()
+    } else if server_closed {
         format!("server closed the connection after the shutdown request ({drained} pdus drained)")
     } else {
         format!(
             "server kept streaming after the shutdown request; drain bounded at 10s ({drained} pdus drained)"
         )
     });
-    report.graceful_shutdown = Some(if clean {
-        "clean".into()
-    } else {
-        "graceful_shutdown errored".into()
+    report.graceful_shutdown = Some(match shutdown_result {
+        Ok(()) => "clean".into(),
+        Err(error) => error,
     });
     report.teardown_ms = Some(t_teardown.elapsed().as_secs_f64() * 1000.0);
     eprintln!(
@@ -1944,6 +2012,128 @@ fn workload_matrix_baseline() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DiagnosticWriter {
+        fail: bool,
+        writes: usize,
+    }
+
+    impl ironrdp_tokio::FramedWrite for DiagnosticWriter {
+        type WriteAllFut<'a> = std::future::Ready<std::io::Result<()>>;
+        fn write_all<'a>(&'a mut self, _: &'a [u8]) -> Self::WriteAllFut<'a> {
+            self.writes += 1;
+            std::future::ready(if self.fail {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "private-server-data",
+                ))
+            } else {
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn smoke_diagnostics_response_write_failure_is_terminal_and_redacted() {
+        use ironrdp_session::ActiveStageOutput;
+        let mut writer = DiagnosticWriter {
+            fail: true,
+            writes: 0,
+        };
+        let result = smoke_consume_outputs(
+            &mut writer,
+            vec![
+                ActiveStageOutput::ResponseFrame(vec![1]),
+                ActiveStageOutput::ResponseFrame(vec![2]),
+            ],
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "response-write-failed: BrokenPipe");
+        assert_eq!(writer.writes, 1);
+    }
+
+    #[tokio::test]
+    async fn smoke_diagnostics_termination_stops_output_processing_without_reason_payload() {
+        use ironrdp_session::{ActiveStageOutput, GracefulDisconnectReason};
+        let mut writer = DiagnosticWriter {
+            fail: false,
+            writes: 0,
+        };
+        let result = smoke_consume_outputs(
+            &mut writer,
+            vec![
+                ActiveStageOutput::Terminate(GracefulDisconnectReason::Other(
+                    "private-server-data".into(),
+                )),
+                ActiveStageOutput::ResponseFrame(vec![1]),
+            ],
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "server-terminated: other");
+        assert_eq!(writer.writes, 0);
+    }
+
+    struct PendingDiagnosticWriter;
+
+    impl ironrdp_tokio::FramedWrite for PendingDiagnosticWriter {
+        type WriteAllFut<'a> = std::future::Pending<std::io::Result<()>>;
+        fn write_all<'a>(&'a mut self, _: &'a [u8]) -> Self::WriteAllFut<'a> {
+            std::future::pending()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn smoke_diagnostics_response_write_timeout_is_bounded() {
+        let start = tokio::time::Instant::now();
+        let result = smoke_consume_outputs(
+            &mut PendingDiagnosticWriter,
+            vec![ironrdp_session::ActiveStageOutput::ResponseFrame(vec![1])],
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "response-write-timeout");
+        assert_eq!(start.elapsed(), SMOKE_WRITE_BUDGET);
+    }
+
+    #[tokio::test]
+    async fn smoke_diagnostics_success_preserves_response_and_deactivation() {
+        use ironrdp_session::ActiveStageOutput;
+        let mut writer = DiagnosticWriter {
+            fail: false,
+            writes: 0,
+        };
+        let effects = smoke_consume_outputs(
+            &mut writer,
+            vec![
+                ActiveStageOutput::ResponseFrame(vec![]),
+                ActiveStageOutput::ResponseFrame(vec![1]),
+                ActiveStageOutput::DeactivateAll,
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(effects.writes, 1);
+        assert_eq!(writer.writes, 1);
+        assert!(effects.deactivate);
+        assert!(!effects.graphics);
+    }
+
+    #[test]
+    fn smoke_diagnostics_resize_summary_requires_both_confirmations() {
+        assert_eq!(smoke_resize_outcome(&[]), "not-run");
+        let mut observations = vec![
+            ResizeObservation::new((1280, 720)),
+            ResizeObservation::new((1920, 1080)),
+        ];
+        assert_eq!(smoke_resize_outcome(&observations), "incomplete");
+        observations[0].status = "confirmed".into();
+        observations[1].status = "timeout-awaiting-server-resize-and-frame".into();
+        assert_eq!(smoke_resize_outcome(&observations), "incomplete");
+        observations[1].status = "confirmed".into();
+        assert_eq!(
+            smoke_resize_outcome(&observations),
+            "confirmed-shrink-and-restore"
+        );
+    }
 
     use ironrdp_graphics::image_processing::PixelFormat;
     use ironrdp_pdu::Action;
@@ -2712,6 +2902,8 @@ mod tests {
             session_error_first: None,
             fastpath_mouse_move: Some("sent-ok".into()),
             display_control_resize: Some("encode_resize-returned-None".into()),
+            resize_outcome: "not-run".into(),
+            session_end: None,
             software_cursor_composited: SMOKE_SOFTWARE_POINTER,
             resize_observations: Vec::new(),
             graceful_shutdown: Some("clean".into()),

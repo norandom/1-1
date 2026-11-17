@@ -295,8 +295,16 @@ if ($Mode -eq 'Smoke') {
         ForEach-Object { "$_" } | Tee-Object -FilePath $console
     $exit = $LASTEXITCODE
     Assert-NoSecretsInArtifacts -Directory $runDir -SecretValues $secrets
+    $connectionGate = if ($exit -eq 0) { 'PASS' } else { 'FAIL' }
+    [Console]::WriteLine("SMOKE CONNECTION GATE: $connectionGate (TLS/NLA, first frame, shutdown only) — report: $(Join-Path $runDir 'smoke-report.json')")
+    $hostReports = @(Get-Content -LiteralPath (Join-Path $runDir 'smoke-report.json') -Raw | ConvertFrom-Json)
+    $resizeConfirmed = @($hostReports | Where-Object { $_.resize_outcome -eq 'confirmed-shrink-and-restore' }).Count
+    if ($hostReports.Count -gt 0 -and $resizeConfirmed -eq $hostReports.Count) {
+        [Console]::WriteLine("SMOKE RESIZE: PASS — shrink and restore confirmed on $resizeConfirmed hosts")
+    } else {
+        [Console]::WriteLine("SMOKE RESIZE: INCOMPLETE — $resizeConfirmed/$($hostReports.Count) hosts confirmed shrink and restore; inspect per-host resize_observations")
+    }
     if ($exit -ne 0) { throw "smoke harness failed with exit code $exit — evidence incomplete, upgrade gate blocked (run dir: $runDir)" }
-    [Console]::WriteLine("SMOKE: PASS — report: $(Join-Path $runDir 'smoke-report.json')")
 } else {
     $env:DRIFT_BENCH_BUILD_ID = $buildId
     $console = Join-Path $runDir 'bench-run-console.txt'
