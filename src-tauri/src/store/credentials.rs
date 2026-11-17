@@ -651,6 +651,7 @@ mod folder_deletion_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: work.id.clone(),
             folder_id: Some(nested.id.clone()),

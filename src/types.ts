@@ -15,6 +15,7 @@ export interface ConnectionConfig {
   tags: string[];
   displayWidth: number | null;
   displayHeight: number | null;
+  fontSmoothing: boolean;
   createdAt: string;
   updatedAt: string;
   lastConnectedAt?: string;
@@ -22,6 +23,11 @@ export interface ConnectionConfig {
   folderId?: string | null;
   mock?: boolean;
 }
+
+// Legacy create payloads may omit the preference; Rust defaults it to true.
+export type ConnectionInput = Omit<ConnectionConfig, 'id' | 'createdAt' | 'updatedAt' | 'fontSmoothing'> & {
+  fontSmoothing?: boolean;
+};
 
 export type SessionStatus =
   | 'disconnected'

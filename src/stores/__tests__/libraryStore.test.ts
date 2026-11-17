@@ -75,6 +75,7 @@ function fullConnection(id: string, tags: string[]): ConnectionConfig {
     tags,
     displayWidth: null,
     displayHeight: null,
+    fontSmoothing: true,
     createdAt: '2026-11-01T00:00:00Z',
     updatedAt: '2026-11-01T00:00:00Z',
     libraryId: summary.libraryId,

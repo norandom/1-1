@@ -589,6 +589,7 @@ mod tests {
             tags: vec![],
             display_width: Some(64),
             display_height: Some(64),
+            font_smoothing: true,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             last_connected_at: None,

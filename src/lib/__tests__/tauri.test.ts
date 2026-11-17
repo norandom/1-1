@@ -4,6 +4,8 @@ import type { CascadedIds, ConnectionSummary, DeletionReport, Folder, Library, L
 
 import {
   createFolder,
+  createConnection,
+  updateConnection,
   frameConsumed,
   createLibrary,
   deleteConnection,
@@ -27,6 +29,18 @@ const invokeMock = vi.mocked(invoke);
 
 beforeEach(() => {
   invokeMock.mockReset();
+});
+
+it.each([false, true])('connection writes preserve fontSmoothing=%s', async (fontSmoothing) => {
+  const config = {
+    name: 'Font test', host: 'font-test.invalid', port: 3389, username: 'user',
+    domain: '', colorAccent: null, tags: [], displayWidth: null, displayHeight: null,
+    fontSmoothing,
+  };
+  await createConnection(config);
+  expect(invokeMock).toHaveBeenLastCalledWith('create_connection', { config });
+  await updateConnection('font-id', config);
+  expect(invokeMock).toHaveBeenLastCalledWith('update_connection', { id: 'font-id', config });
 });
 
 it('frameConsumed scopes consumption and recovery to session and exact receipt', async () => {

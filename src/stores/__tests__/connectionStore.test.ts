@@ -27,6 +27,7 @@ vi.mock('../../lib/tauri', () => ({
       tags: [],
       displayWidth: null,
       displayHeight: null,
+      fontSmoothing: true,
       libraryId: 'lib-1',
       folderId: null,
       mock: false,
@@ -49,6 +50,7 @@ const sampleConnection = {
   tags: [],
   displayWidth: null,
   displayHeight: null,
+  fontSmoothing: true,
 };
 
 describe('connectionStore', () => {

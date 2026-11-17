@@ -1589,6 +1589,7 @@ impl LibraryStore {
                 tags: input.tags,
                 display_width: input.display_width,
                 display_height: input.display_height,
+                font_smoothing: input.font_smoothing,
                 mock,
                 library_id,
                 folder_id: input.folder_id,
@@ -1627,6 +1628,7 @@ impl LibraryStore {
             existing.tags = input.tags;
             existing.display_width = input.display_width;
             existing.display_height = input.display_height;
+            existing.font_smoothing = input.font_smoothing;
             existing.mock = merge_update_mock_flag(existing.mock, input.mock);
             existing.updated_at = Utc::now();
             let updated = existing.clone();
@@ -2247,6 +2249,7 @@ mod tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -2766,6 +2769,7 @@ mod migration_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: library.id.clone(),
             folder_id: None,
@@ -3299,6 +3303,7 @@ mod crud_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -3689,6 +3694,7 @@ mod move_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -4251,6 +4257,7 @@ mod folder_deletion_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -4580,6 +4587,7 @@ mod library_deletion_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),
@@ -4849,6 +4857,7 @@ mod unification_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: library.id.clone(),
             folder_id: None,
@@ -5243,6 +5252,7 @@ mod unification_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: String::new(),
             folder_id: None,
@@ -5275,6 +5285,7 @@ mod connection_crud_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: String::new(),
             folder_id: None,
@@ -5774,6 +5785,7 @@ mod production_mock_inertness_tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: library.id.clone(),
             folder_id: None,
@@ -5863,5 +5875,103 @@ mod test_support_mock_flag_tests {
             dir.path().join("libraries.json"),
         );
         assert!(reopened.get_connection(&created.id).unwrap().unwrap().mock);
+    }
+}
+
+#[cfg(test)]
+mod font_smoothing_tests {
+    use super::*;
+    use crate::store::connections::parse_rdp_file;
+    use serde_json::{Value, json};
+
+    fn open(root: &Path) -> LibraryStore {
+        LibraryStore::open_unified(root.join("connections.json"), root.join("libraries.json"))
+    }
+
+    #[test]
+    fn font_smoothing_import_save_update_and_restart_preserve_all_values() {
+        for (setting, expected) in [(None, true), (Some(false), false), (Some(true), true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("font.rdp");
+            let mut text = "full address:s:font-test.invalid\n".to_string();
+            if let Some(value) = setting {
+                text.push_str(&format!("allow font smoothing:i:{}\n", u8::from(value)));
+            }
+            std::fs::write(&path, text).unwrap();
+            let input = parse_rdp_file(path.to_str().unwrap()).unwrap();
+            assert_eq!(input.font_smoothing, expected, "import {setting:?}");
+            let store = open(dir.path());
+            let created = store.create_connection(input.clone()).unwrap();
+            assert_eq!(created.font_smoothing, expected);
+            drop(store);
+            let store = open(dir.path());
+            assert_eq!(
+                store
+                    .get_connection(&created.id)
+                    .unwrap()
+                    .unwrap()
+                    .font_smoothing,
+                expected
+            );
+            let mut changed = input;
+            changed.font_smoothing = !expected;
+            store.update_connection(&created.id, changed).unwrap();
+            drop(store);
+            assert_eq!(
+                open(dir.path())
+                    .get_connection(&created.id)
+                    .unwrap()
+                    .unwrap()
+                    .font_smoothing,
+                !expected
+            );
+        }
+    }
+
+    #[test]
+    fn font_smoothing_legacy_and_v2_missing_true_false_survive_reload() {
+        for legacy in [false, true] {
+            for setting in [None, Some(false), Some(true)] {
+                let dir = tempfile::tempdir().unwrap();
+                let store = open(dir.path());
+                let input: ConnectionInput =
+                    serde_json::from_value(json!({"name":"Font", "host":"font-test.invalid"}))
+                        .unwrap();
+                assert!(input.font_smoothing, "new connections default on");
+                let created = store.create_connection(input).unwrap();
+                drop(store);
+                let path = dir.path().join("connections.json");
+                let mut document: Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let connection = &mut document["connections"][0];
+                if let Some(value) = setting {
+                    connection["fontSmoothing"] = json!(value);
+                } else {
+                    connection.as_object_mut().unwrap().remove("fontSmoothing");
+                }
+                let fixture = if legacy {
+                    document["connections"].clone()
+                } else {
+                    document
+                };
+                std::fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+                let loaded = open(dir.path());
+                assert_eq!(
+                    loaded
+                        .get_connection(&created.id)
+                        .unwrap()
+                        .unwrap()
+                        .font_smoothing,
+                    setting.unwrap_or(true),
+                    "legacy={legacy}, setting={setting:?}"
+                );
+                // Persist the normalized config then restart, preserving explicit false.
+                loaded.duplicate_connection(&created.id).unwrap();
+                drop(loaded);
+                for connection in open(dir.path()).list_connections().unwrap() {
+                    assert_eq!(connection.font_smoothing, setting.unwrap_or(true));
+                }
+            }
+        }
     }
 }

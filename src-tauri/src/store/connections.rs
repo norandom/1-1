@@ -30,6 +30,8 @@ pub struct ConnectionConfig {
     pub display_width: Option<u32>,
     #[serde(default)]
     pub display_height: Option<u32>,
+    #[serde(default = "default_font_smoothing")]
+    pub font_smoothing: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -73,6 +75,8 @@ pub struct ConnectionInput {
     pub display_width: Option<u32>,
     #[serde(default)]
     pub display_height: Option<u32>,
+    #[serde(default = "default_font_smoothing")]
+    pub font_smoothing: bool,
     /// Task 5.3: persisted mock flag (see `ConnectionConfig::mock`).
     /// Rejected on create in production builds (Req 12.10).
     #[serde(default)]
@@ -94,6 +98,10 @@ fn default_port() -> u16 {
     3389
 }
 
+fn default_font_smoothing() -> bool {
+    true
+}
+
 /// Map a parsed SSH-config host entry into a connection input (Req 1.3):
 /// host, PORT (where available — regression for baseline defect B3-3,
 /// which hardcoded 3389 and discarded the parsed Port), username, the
@@ -110,6 +118,7 @@ pub fn ssh_host_to_connection_input(host: &crate::utils::ssh_config::SshHost) ->
         tags: vec!["ssh-import".to_string()],
         display_width: None,
         display_height: None,
+        font_smoothing: true,
         mock: false,
         library_id: String::new(),
         folder_id: None,
@@ -135,6 +144,7 @@ pub fn parse_rdp_file(path: &str) -> Result<ConnectionInput, String> {
     let mut domain = String::new();
     let mut width: Option<u32> = None;
     let mut height: Option<u32> = None;
+    let mut font_smoothing = default_font_smoothing();
 
     for line in content.lines() {
         let line = line.trim();
@@ -165,6 +175,11 @@ pub fn parse_rdp_file(path: &str) -> Result<ConnectionInput, String> {
             "domain" => domain = value.to_string(),
             "desktopwidth" => width = value.parse().ok(),
             "desktopheight" => height = value.parse().ok(),
+            "allow font smoothing" if parts[1].trim() == "i" => match value {
+                "0" => font_smoothing = false,
+                "1" => font_smoothing = true,
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -185,6 +200,7 @@ pub fn parse_rdp_file(path: &str) -> Result<ConnectionInput, String> {
         tags: vec!["imported".to_string()],
         display_width: width,
         display_height: height,
+        font_smoothing,
         mock: false,
         library_id: String::new(),
         folder_id: None,

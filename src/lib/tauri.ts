@@ -3,6 +3,7 @@ import type { Channel } from '@tauri-apps/api/core';
 import type {
   CascadedIds,
   ConnectionConfig,
+  ConnectionInput,
   ConnectionSummary,
   DeletionReport,
   Folder,
@@ -38,7 +39,7 @@ export async function getConnection(id: string): Promise<ConnectionConfig | null
 }
 
 export async function createConnection(
-  config: Omit<ConnectionConfig, 'id' | 'createdAt' | 'updatedAt'>
+  config: ConnectionInput
 ): Promise<ConnectionConfig> {
   return await invoke<ConnectionConfig>('create_connection', { config });
 }

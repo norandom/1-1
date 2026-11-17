@@ -14,6 +14,7 @@ describe('Type definitions', () => {
       tags: [],
       displayWidth: null,
       displayHeight: null,
+      fontSmoothing: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -34,6 +35,7 @@ describe('Type definitions', () => {
       tags: [],
       displayWidth: null,
       displayHeight: null,
+      fontSmoothing: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       libraryId: 'lib-1',

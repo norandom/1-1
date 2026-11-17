@@ -242,6 +242,7 @@ mod tests {
             tags: Vec::new(),
             display_width: None,
             display_height: None,
+            font_smoothing: true,
             mock: false,
             library_id: library_id.to_string(),
             folder_id: folder_id.map(str::to_string),

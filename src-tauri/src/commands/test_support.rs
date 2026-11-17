@@ -53,6 +53,7 @@ pub async fn seed_mock_connections(
             tags: vec!["e2e-mock".to_string()],
             display_width: Some(64),
             display_height: Some(64),
+            font_smoothing: true,
             mock: true,
             library_id: String::new(),
             folder_id: None,

@@ -25,6 +25,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
+import { Switch } from '@/components/ui/switch';
 
 interface Props {
   connection: ConnectionConfig | null;
@@ -42,6 +43,7 @@ const RESOLUTIONS = [
 export function ConnectionForm({ connection, onClose }: Props) {
   const createConnection = useConnectionStore((s) => s.createConnection);
   const updateConnection = useConnectionStore((s) => s.updateConnection);
+  const fetchTree = useLibraryStore((s) => s.fetchTree);
   const defaultPort = useSettingsStore((s) => s.settings.defaultPort);
   const addToast = useToastStore((s) => s.addToast);
   // Task 8.2 (Req 10.1): create files into the selected library/folder
@@ -68,6 +70,7 @@ export function ConnectionForm({ connection, onClose }: Props) {
   const [domain, setDomain] = useState(connection?.domain ?? '');
   const [colorAccent, setColorAccent] = useState(connection?.colorAccent || PRESET_COLORS[0]);
   const [tagsInput, setTagsInput] = useState(connection?.tags.join(', ') ?? '');
+  const [fontSmoothing, setFontSmoothing] = useState(connection?.fontSmoothing ?? true);
   const [resolution, setResolution] = useState(
     connection ? `${connection.displayWidth ?? 1920}x${connection.displayHeight ?? 1080}` : '1920x1080'
   );
@@ -103,10 +106,12 @@ export function ConnectionForm({ connection, onClose }: Props) {
       if (isEdit && connection) {
         // Edit keeps the connection in its own library/folder — moving is
         // the dedicated move action (task 8.4), never a save side effect.
-        await updateConnection(connection.id, { name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, libraryId: connection.libraryId, folderId: connection.folderId ?? null });
+        await updateConnection(connection.id, { name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, fontSmoothing, libraryId: connection.libraryId, folderId: connection.folderId ?? null });
       } else {
-        await createConnection({ name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, lastConnectedAt: undefined, libraryId: destination?.libraryId, folderId: destination?.folderId });
+        await createConnection({ name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, fontSmoothing, lastConnectedAt: undefined, libraryId: destination?.libraryId, folderId: destination?.folderId });
       }
+      // The tree also supplies dashboard membership, names and tag filters.
+      await fetchTree();
       addToast({ message: 'Connection saved', type: 'success' });
       onClose();
     } catch (e) {
@@ -210,6 +215,11 @@ export function ConnectionForm({ connection, onClose }: Props) {
           <div className="grid gap-2">
             <Label htmlFor="tags">Tags</Label>
             <Input id="tags" value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} placeholder="production, web-server" />
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="font-smoothing">Font smoothing</Label>
+            <Switch id="font-smoothing" checked={fontSmoothing} onCheckedChange={setFontSmoothing} />
           </div>
 
           {/* Resolution */}

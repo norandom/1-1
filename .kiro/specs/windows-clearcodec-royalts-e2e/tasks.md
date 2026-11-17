@@ -272,7 +272,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 9.8,4.1,4.3_
 
 - [ ] 10. Font smoothing and display fidelity
-- [ ] 10.1 Persist and import the smoothing preference
+- [x] 10.1 Persist and import the smoothing preference
   - Reuse serde default and mirrored types, form and existing RDP parser; preserve explicit false and legacy default true.
   - Done: Import/save/reload/migration tests pass for missing/true/false preferences.
   - _Boundary: Connection preferences_
@@ -351,6 +351,7 @@ This replaces the earlier 44-item task plan; no implementation tasks were comple
   - _Requirements: 7.1,7.2,7.3,8.1,8.2,8.3,8.4,8.5,8.6,12.1,12.6,12.8,12.9,13.1,13.2,13.3,13.4_
 
 ## Implementation Notes
+- 2026-11-17: 10.1 independently APPROVED. Default-on serde/read models and form switch preserve explicit false through `.rdp` import, create/update, restart, v1 migration, v2 load and duplicate. VERIFIED: 445 frontend/288 default Rust tests (four existing skips), lint/typecheck/build/fmt/doctests; test-support Clippy passes with two existing warnings. Prior ConnectionForm tree-refresh fix is preserved in this commit. Protocol application/help remain 10.2; native integrated UI verification follows 10.3. Evidence: `D:/BuildArtifacts/drift-rdp/group10/preference-*.log`.
 - 2026-11-17: 9.5 independently APPROVED after reactivation remediation. One in-flight receipt plus accumulated damage; ordered same-channel metadata keeps binary bytes unchanged; active canvas acknowledges after painting, background runtime after compositing. Five-second stall/full-refresh recovery and smaller/same-size reactivation are covered by real actor pixel tests. VERIFIED: 443 frontend tests, 286 default Rust and 304 test-support Rust tests (four existing skips each), lint/typecheck/build/fmt/doctests, Clippy with two existing warnings. Final native test-support smoke verified dashboard return, two-session rendering and adjacent close; two explicit connects/two actors. Artifacts: `D:/BuildArtifacts/drift-rdp/task95`. Group 9 checkpoint; next 10.1. Native synthetic evidence is not real-server text-quality acceptance.
 - 2026-11-17: 8.6 remediation independently APPROVED after one rejected round. Session-owned channels/latest composed image survive view navigation; connection-keyed views reset input state; synchronous route/removal fixes adjacent-tab close. VERIFIED: 438 frontend tests, lint/typecheck/build; native dashboard return and close B to existing A with pixels retained. No checkbox count change (45/61). Native failure acceptance remains unproven because existing B3-7 backend fallback turns failed real connects into mock Connected sessions; resolve before 11.x server acceptance. Roadmap: `.kiro/steering/roadmap.md`.
 - Controller sweep owed (before 11.12 audit): baseline-coverage.md rows need updating for 6.6 — B3-1/B3-2/B3-3 FIXED (regression tests in library.rs connection_crud_tests), B3-4 OBSOLETED (fail-closed v2 store), row 1.3/B3-5 pin intact (restored verbatim); B3-2 keyring-half remains convention+E2E covered (see test doc at library.rs ~L4683).

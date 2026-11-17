@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ConnectionConfig } from '../types';
+import type { ConnectionConfig, ConnectionInput } from '../types';
 import * as tauri from '../lib/tauri';
 
 interface ConnectionState {
@@ -15,7 +15,7 @@ interface ConnectionState {
   setViewMode: (mode: 'grid' | 'list') => void;
   fetchConnections: () => Promise<void>;
   createConnection: (
-    config: Omit<ConnectionConfig, 'id' | 'createdAt' | 'updatedAt'>
+    config: ConnectionInput
   ) => Promise<ConnectionConfig>;
   updateConnection: (id: string, config: Partial<ConnectionConfig>) => Promise<void>;
   deleteConnection: (id: string) => Promise<void>;
