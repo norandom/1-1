@@ -284,21 +284,32 @@ function SessionContent() {
           routes — it no longer renders inside the session view. */}
 
       <div className="relative flex-1 overflow-hidden">
-        {/* Toolbar */}
-        <SessionToolbar
-          hostname={hostname}
-          resolution={displayResolution}
-          fps={fps}
-          latency={latency}
-          onFullscreen={handleFullscreen}
-          onCtrlAltDel={handleCtrlAltDel}
-          onScreenshot={handleScreenshot}
-          onDisconnect={() => setShowDisconnectConfirm(true)}
-          isFullscreen={isFullscreen}
-        />
-
         {/* Canvas */}
         <SessionCanvas
+          overlays={
+            <>
+              {/* Toolbar */}
+              <SessionToolbar
+                hostname={hostname}
+                resolution={displayResolution}
+                fps={fps}
+                latency={latency}
+                onFullscreen={handleFullscreen}
+                onCtrlAltDel={handleCtrlAltDel}
+                onScreenshot={handleScreenshot}
+                onDisconnect={() => setShowDisconnectConfirm(true)}
+                isFullscreen={isFullscreen}
+              />
+
+              {/* Performance HUD */}
+              <PerformanceHUD
+                fps={fps}
+                latency={latency}
+                bandwidth={bandwidth}
+                resolution={displayResolution}
+              />
+            </>
+          }
           displayStalled={displayStalled}
           onRefreshDisplay={refreshDisplay}
           key={sessionId ?? id}
@@ -316,14 +327,6 @@ function SessionContent() {
           onMouseUp={(e, rect) => sendMouse(e, 'up', rect)}
           onWheel={(e, rect) => sendWheel(e, rect)}
           onResize={handleResize}
-        />
-
-        {/* Performance HUD */}
-        <PerformanceHUD
-          fps={fps}
-          latency={latency}
-          bandwidth={bandwidth}
-          resolution={displayResolution}
         />
       </div>
 

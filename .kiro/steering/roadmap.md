@@ -48,6 +48,9 @@ test framework is planned for text readability. Use upstream capabilities.
   approved harness as separate 11.0a Windows/shared, 11.0b macOS and 11.0c Linux/
   matrix slices. Only then run 11.1's storage journeys. This separates omitted
   prerequisites from acceptance work; it introduces no new product/driver choice.
+- Keep the delivery order above: after the native UI repairs, resolve B3-7 and
+  resume the staged real-RDP/readability checks. The 11.0 harness slices are
+  prerequisites for later release journeys, not for inspecting the staged servers.
 - Computer Use runs only for a bounded native check. Close the isolated test app,
   send the completion summary, and reset the session afterward; restart only when
   another UI check is needed (user preference, 2026-11-17).
@@ -85,6 +88,13 @@ and a shortcut collision with the performance HUD; fix these before harness work
 Both test-app sessions were closed and Computer Use reset. Real-server text
 quality and canvas-readback acceptance remain unverified. Follow-up artifacts:
 `D:/BuildArtifacts/drift-rdp/group11`.
+
+The display-control remediation is independently reviewed: 475 frontend tests and
+lint/typecheck/build pass. Native inspection confirmed readable labels, toolbar
+separation and Native pixels selection with the synthetic frame intact. Keyboard
+focus via the display shortcut remains inconclusive through Computer Use; a
+separate Ctrl+Shift+P probe opened WebView2 Print and was cancelled. Keep native
+shortcut acceptance open in 11.2. The test app and Computer Use were closed/reset.
 
 Task 9.5 passed independent review after correcting reactivation damage and
 stall-state handling. Checks: 443 frontend tests, 286 default Rust tests,

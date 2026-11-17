@@ -80,6 +80,7 @@ export interface ShortcutKeyEvent {
   metaKey: boolean;
   ctrlKey: boolean;
   shiftKey: boolean;
+  altKey?: boolean;
   key: string;
 }
 
@@ -91,6 +92,8 @@ export interface ShortcutKeyEvent {
  * `ctrlKey` only). Match order mirrors the original handler sequence.
  */
 export function matchKeyboardShortcut(e: ShortcutKeyEvent): ShortcutAction | null {
+  // Alt chords belong to the session (including its display-size escape).
+  if (e.altKey) return null;
   const isMod = e.metaKey || e.ctrlKey;
   if (isMod && e.key === 'k') return 'quick-connect';
   if (isMod && e.key === 'n') return 'new-connection';

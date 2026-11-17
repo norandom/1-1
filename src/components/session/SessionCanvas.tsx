@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Loader2, WifiOff } from 'lucide-react';
 
 import { parseFramePacket } from '../../lib/frame-protocol';
-import { isDisplayModeShortcut, releaseForwardedKeys } from '../../lib/input-mapper';
+import { subscribeCanvasKeyboard } from './canvas-keyboard';
 import type { FrameListener } from '../../lib/session-runtime';
 import {
   compositeFrameRects,
@@ -30,6 +30,7 @@ interface SurfaceBuffer {
 }
 
 interface Props {
+  overlays?: React.ReactNode;
   subscribeToFrames: (listener: FrameListener) => () => void;
   displayStalled?: boolean;
   onRefreshDisplay?: () => void;
@@ -49,6 +50,7 @@ interface Props {
 }
 
 export function SessionCanvas({
+  overlays,
   subscribeToFrames,
   displayStalled = false,
   onRefreshDisplay,
@@ -299,44 +301,7 @@ export function SessionCanvas({
 
   // Keyboard events — listen on window so keys work even if canvas loses focus
   useEffect(() => {
-    const forwardedKeys = new Set<string>();
-    const releaseKeys = () => releaseForwardedKeys(forwardedKeys, (code) =>
-      onKeyUp(new KeyboardEvent('keyup', { code })));
-    const handleDown = (e: globalThis.KeyboardEvent) => {
-      if (isDisplayModeShortcut(e)) {
-        e.preventDefault();
-        releaseKeys();
-        displayModeSelectRef.current?.focus();
-        return;
-      }
-      // Only capture when the session view is active (not typing in a dialog/input)
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      e.preventDefault();
-      forwardedKeys.add(e.code);
-      onKeyDown(e);
-    };
-
-    const handleUp = (e: globalThis.KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (isDisplayModeShortcut(e)) return;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      e.preventDefault();
-      forwardedKeys.delete(e.code);
-      onKeyUp(e);
-    };
-
-    window.addEventListener('keydown', handleDown);
-    window.addEventListener('keyup', handleUp);
-    const select = displayModeSelectRef.current;
-    select?.addEventListener('focus', releaseKeys);
-
-    return () => {
-      window.removeEventListener('keydown', handleDown);
-      window.removeEventListener('keyup', handleUp);
-      select?.removeEventListener('focus', releaseKeys);
-      releaseKeys();
-    };
+    return subscribeCanvasKeyboard(window, displayModeSelectRef.current, onKeyDown, onKeyUp);
   }, [onKeyDown, onKeyUp, status]);
 
   const getMouseBounds = useCallback((): MouseSurfaceBounds | null => {
@@ -433,14 +398,14 @@ export function SessionCanvas({
 
   return (
     <div className="flex flex-col w-full h-full bg-black">
-      <label className="flex shrink-0 items-center justify-end gap-2 px-3 py-1 text-xs text-white bg-[var(--color-surface-1)]">
+      <label className="flex shrink-0 items-center justify-end gap-2 px-3 py-1 text-xs text-[var(--color-text-primary)] bg-[var(--color-surface-1)]">
         Display size
         <select
           ref={displayModeSelectRef}
           aria-label="Display size"
           aria-keyshortcuts="Control+Alt+Shift+P"
           title="Display size (Ctrl+Alt+Shift+P)"
-          className="rounded bg-[var(--color-surface-2)] px-2 py-1 focus-visible:outline-2 focus-visible:outline-white"
+          className="rounded bg-[var(--color-surface-2)] text-[var(--color-text-primary)] px-2 py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
           value={displayMode}
           onChange={(event) => setDisplayMode(event.target.value as DisplayMode)}
           onKeyDown={(event) => event.stopPropagation()}
@@ -450,60 +415,66 @@ export function SessionCanvas({
           <option value="native">Native pixels (1:1)</option>
         </select>
       </label>
-    <div
-      ref={containerRef}
-      className="relative flex-1 min-h-0 w-full"
-      style={{ overflow: displayMode === 'native' ? 'auto' : 'hidden' }}
-      onScroll={updateLayout}
-      onContextMenu={(e) => e.preventDefault()}
-    >
-      <canvas
-        ref={canvasRef}
-        tabIndex={0}
-        className="absolute cursor-default outline-none"
-        style={{
-          left: displaySize.left,
-          top: displaySize.top,
-          imageRendering: displayMode === 'native' ? 'pixelated' : 'auto',
-          width: `${displaySize.width}px`,
-          height: `${displaySize.height}px`,
-        }}
-        onMouseMove={handleMouseMove}
-        onMouseDown={handleMouseDown}
-        onMouseUp={handleMouseUp}
-      />
-      {displayStalled && (
-        <div role="alert" className="absolute top-3 left-3 right-3 flex items-center justify-between gap-3 rounded bg-amber-950 px-4 py-3 text-white">
-          <span>Display updates paused. Refresh to resume.</span>
-          <button type="button" className="rounded border px-3 py-1" onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} onClick={onRefreshDisplay}>Refresh display</button>
-        </div>
-      )}
-      {status === 'reconnecting' && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      <div className="relative flex flex-1 min-h-0 flex-col overflow-hidden">
+        <div
+          ref={containerRef}
+          className="relative flex-1 min-h-0 w-full"
+          style={{ overflow: displayMode === 'native' ? 'auto' : 'hidden' }}
+          onScroll={updateLayout}
+          onContextMenu={(e) => e.preventDefault()}
         >
-          <div className="text-center">
+          <canvas
+            ref={canvasRef}
+            tabIndex={0}
+            className="absolute cursor-default outline-none"
+            style={{
+              left: displaySize.left,
+              top: displaySize.top,
+              imageRendering: displayMode === 'native' ? 'pixelated' : 'auto',
+              width: `${displaySize.width}px`,
+              height: `${displaySize.height}px`,
+            }}
+            onMouseMove={handleMouseMove}
+            onMouseDown={handleMouseDown}
+            onMouseUp={handleMouseUp}
+          />
+          {displayStalled && (
+            <div role="alert" className="absolute top-3 left-3 right-3 flex items-center justify-between gap-3 rounded bg-amber-950 px-4 py-3 text-white">
+              <span>Display updates paused. Refresh to resume.</span>
+              <button type="button" className="rounded border px-3 py-1" onKeyDown={(event) => event.stopPropagation()} onKeyUp={(event) => event.stopPropagation()} onClick={onRefreshDisplay}>Refresh display</button>
+            </div>
+          )}
+          {status === 'reconnecting' && (
             <motion.div
-              animate={{ rotate: 360 }}
-              transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-              className="inline-block"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm"
             >
-              <Loader2 size={28} className="text-[var(--color-warning)]" />
+              <div className="text-center">
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                  className="inline-block"
+                >
+                  <Loader2 size={28} className="text-[var(--color-warning)]" />
+                </motion.div>
+                <p className="text-sm text-white mt-3">
+                  Reconnecting...{reconnectAttempts > 0 && ` (attempt ${reconnectAttempts}/${maxReconnectAttempts})`}
+                </p>
+                {reconnectAttempts > 0 && (
+                  <p className="text-xs text-white/60 mt-1">
+                    Retrying in {Math.min(1 << reconnectAttempts, 30)}s...
+                  </p>
+                )}
+              </div>
             </motion.div>
-            <p className="text-sm text-white mt-3">
-              Reconnecting...{reconnectAttempts > 0 && ` (attempt ${reconnectAttempts}/${maxReconnectAttempts})`}
-            </p>
-            {reconnectAttempts > 0 && (
-              <p className="text-xs text-white/60 mt-1">
-                Retrying in {Math.min(1 << reconnectAttempts, 30)}s...
-              </p>
-            )}
-          </div>
-        </motion.div>
-      )}
-    </div>
+          )}
+        </div>
+        {/* Clip floating chrome below the fixed controls, outside viewport scrolling. */}
+        <div className="pointer-events-none absolute inset-0 overflow-hidden [&>*]:pointer-events-auto">
+          {overlays}
+        </div>
+      </div>
     </div>
   );
 }
