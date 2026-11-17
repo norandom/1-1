@@ -25,7 +25,8 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
-import { Switch } from '@/components/ui/switch';
+import { HostProfileFields } from './HostProfileFields';
+import { normalizeHostProfile } from '../../lib/host-profile';
 
 interface Props {
   connection: ConnectionConfig | null;
@@ -71,6 +72,7 @@ export function ConnectionForm({ connection, onClose }: Props) {
   const [colorAccent, setColorAccent] = useState(connection?.colorAccent || PRESET_COLORS[0]);
   const [tagsInput, setTagsInput] = useState(connection?.tags.join(', ') ?? '');
   const [fontSmoothing, setFontSmoothing] = useState(connection?.fontSmoothing ?? true);
+  const [hostProfile, setHostProfile] = useState(() => normalizeHostProfile(connection?.hostProfile));
   const [resolution, setResolution] = useState(
     connection ? `${connection.displayWidth ?? 1920}x${connection.displayHeight ?? 1080}` : '1920x1080'
   );
@@ -106,9 +108,9 @@ export function ConnectionForm({ connection, onClose }: Props) {
       if (isEdit && connection) {
         // Edit keeps the connection in its own library/folder — moving is
         // the dedicated move action (task 8.4), never a save side effect.
-        await updateConnection(connection.id, { name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, fontSmoothing, libraryId: connection.libraryId, folderId: connection.folderId ?? null });
+        await updateConnection(connection.id, { name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, fontSmoothing, hostProfile, libraryId: connection.libraryId, folderId: connection.folderId ?? null });
       } else {
-        await createConnection({ name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, fontSmoothing, lastConnectedAt: undefined, libraryId: destination?.libraryId, folderId: destination?.folderId });
+        await createConnection({ name, host, port, username, password: password || undefined, domain, colorAccent, tags, displayWidth: w, displayHeight: h, fontSmoothing, hostProfile, lastConnectedAt: undefined, libraryId: destination?.libraryId, folderId: destination?.folderId });
       }
       // The tree also supplies dashboard membership, names and tag filters.
       await fetchTree();
@@ -217,19 +219,11 @@ export function ConnectionForm({ connection, onClose }: Props) {
             <Input id="tags" value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} placeholder="production, web-server" />
           </div>
 
-          <div className="grid gap-2">
-            <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="font-smoothing">Font smoothing</Label>
-              <Switch id="font-smoothing" aria-describedby="font-smoothing-help" checked={fontSmoothing} onCheckedChange={setFontSmoothing} />
-            </div>
-            <p id="font-smoothing-help" className="text-xs text-muted-foreground">
-              Requests smoother remote text on your next connection. Server policy can override this preference.
-            </p>
-          </div>
+          <HostProfileFields profile={hostProfile} fontSmoothing={fontSmoothing} onChange={(profile, smoothing) => { setHostProfile(profile); setFontSmoothing(smoothing); }} />
 
           {/* Resolution */}
           <div className="grid gap-2">
-            <Label>Resolution</Label>
+            <Label>Saved fixed resolution</Label>
             <Select value={resolution} onValueChange={setResolution}>
               <SelectTrigger>
                 <SelectValue />

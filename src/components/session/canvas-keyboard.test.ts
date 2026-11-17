@@ -89,3 +89,51 @@ it('leaves select arrows and Return to native mode selection without remote forw
   expect(up).not.toHaveBeenCalled();
   cleanup();
 });
+
+it.each(['BUTTON', 'A', 'SUMMARY'])('keeps local %s keys out of the remote session', (tagName) => {
+  vi.stubGlobal('KeyboardEvent', Key);
+  const target = Object.assign(new EventTarget(), { tagName });
+  const down = vi.fn();
+  const up = vi.fn();
+  const cleanup = subscribeCanvasKeyboard(target, null, down, up);
+  target.dispatchEvent(new Key('keydown', { code: 'Enter' }));
+  target.dispatchEvent(new Key('keyup', { code: 'Enter' }));
+  expect(down).not.toHaveBeenCalled();
+  expect(up).not.toHaveBeenCalled();
+  cleanup();
+});
+
+it('releases remote modifiers on blur and local pointer entry before focus changes', () => {
+  vi.stubGlobal('KeyboardEvent', Key);
+  const target = new EventTarget();
+  const down = vi.fn();
+  const up = vi.fn();
+  const cleanup = subscribeCanvasKeyboard(target, null, down, up);
+  target.dispatchEvent(new Key('keydown', { code: 'ControlLeft' }));
+  target.dispatchEvent(new Event('blur'));
+  expect(up.mock.calls.map(([e]) => e.code)).toEqual(['ControlLeft']);
+  target.dispatchEvent(new Key('keydown', { code: 'AltLeft' }));
+  Object.assign(target, { tagName: 'BUTTON' });
+  target.dispatchEvent(new Event('pointerdown'));
+  expect(up.mock.calls.map(([e]) => e.code)).toEqual(['ControlLeft', 'AltLeft']);
+  cleanup();
+});
+
+it.each(['menu', 'dialog', 'tablist'])('isolates portalled/local %s descendants and releases previously forwarded keys', (role) => {
+  vi.stubGlobal('KeyboardEvent', Key);
+  const target = Object.assign(new EventTarget(), { closest: vi.fn().mockReturnValue(null) });
+  const down = vi.fn();
+  const up = vi.fn();
+  const cleanup = subscribeCanvasKeyboard(target, null, down, up);
+  target.dispatchEvent(new Key('keydown', { code: 'ShiftLeft' }));
+  target.closest.mockReturnValue({ role });
+  target.dispatchEvent(new Event('focusin'));
+  for (const type of ['keydown', 'keyup']) {
+    const event = new Key(type, { code: 'ArrowDown' });
+    target.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  }
+  expect(down).toHaveBeenCalledTimes(1);
+  expect(up.mock.calls.map(([e]) => e.code)).toEqual(['ShiftLeft']);
+  cleanup();
+});

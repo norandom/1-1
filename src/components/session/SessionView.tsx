@@ -11,6 +11,8 @@ import { SessionToolbar } from './SessionToolbar';
 import { PerformanceHUD } from './PerformanceHUD';
 import * as tauri from '../../lib/tauri';
 import { ctrlAltDelSequence } from '../../lib/input-mapper';
+import { normalizeHostProfile } from '../../lib/host-profile';
+import { isLocalInputTarget } from './canvas-keyboard';
 import { resolveSessionView, sessionForConnection } from '../../lib/session-route';
 import {
   createConnectController,
@@ -64,16 +66,6 @@ function SessionContent() {
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const resizeSchedulerRef = useRef<ResizeScheduler | null>(null);
   useClipboard({ sessionId });
-  // The debounced resize emit captures the current sessionId; the scheduler
-  // is rebuilt whenever the session changes (matching the original closure
-  // semantics of the inline timer, including a pending stale-id emission
-  // when the session id changes while a resize is still debouncing).
-  useEffect(() => {
-    if (sessionId === null) return;
-    resizeSchedulerRef.current = createTrailingResizeScheduler((width, height) => {
-      tauri.resizeSession(sessionId, width, height).catch(() => {});
-    });
-  }, [sessionId]);
   const sessionResolution = useSessionStore((s) =>
     sessionId ? s.sessions.get(sessionId) : null
   );
@@ -91,6 +83,25 @@ function SessionContent() {
     [id, sessions, connections]
   );
   const resolvedConnectionId = resolution.kind === 'stale' ? null : resolution.connectionId;
+  const connectionInfo = resolvedConnectionId
+    ? connections.find((c) => c.id === resolvedConnectionId)
+    : undefined;
+  const profile = normalizeHostProfile(connectionInfo?.hostProfile);
+  useEffect(() => {
+    if (sessionId === null || profile.resizeMode === 'fixed') return;
+    const scheduler = createTrailingResizeScheduler((width, height) => {
+      tauri.resizeSession(sessionId, width, height).catch(() => {});
+    }, undefined, () => {
+      // Recheck the committed preference at emit time as well as effect cleanup.
+      const current = useConnectionStore.getState().connections.find((c) => c.id === resolvedConnectionId);
+      return !!current && normalizeHostProfile(current.hostProfile).resizeMode === 'dynamic';
+    });
+    resizeSchedulerRef.current = scheduler;
+    return () => {
+      scheduler.cancel();
+      if (resizeSchedulerRef.current === scheduler) resizeSchedulerRef.current = null;
+    };
+  }, [sessionId, resolvedConnectionId, profile.resizeMode]);
 
   // The existing session for a transitional route's connection, if any
   // — the input the pure swap/guard decisions below consume.
@@ -247,16 +258,16 @@ function SessionContent() {
 
   const handleResize = useCallback(
     (width: number, height: number) => {
-      if (!sessionId) return;
+      if (!sessionId || profile.resizeMode === 'fixed') return;
       resizeSchedulerRef.current?.schedule(width, height);
     },
-    [sessionId]
+    [sessionId, profile.resizeMode]
   );
 
   // Escape key to show disconnect confirm
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && status === 'connected') {
+      if (e.key === 'Escape' && status === 'connected' && !isLocalInputTarget(e.target)) {
         setShowDisconnectConfirm(true);
       }
     };
@@ -266,9 +277,6 @@ function SessionContent() {
 
   // Resolved through the session (D1): the route id never names the
   // connection directly once a session exists.
-  const connectionInfo = resolvedConnectionId
-    ? connections.find((c) => c.id === resolvedConnectionId)
-    : undefined;
   const hostname = connectionInfo?.host ?? 'Unknown';
   const surfaceWidth = sessionResolution?.width
     ?? connectionInfo?.displayWidth
@@ -286,6 +294,8 @@ function SessionContent() {
       <div className="relative flex-1 overflow-hidden">
         {/* Canvas */}
         <SessionCanvas
+          displayMode={profile.displayMode}
+          inputBlocked={showDisconnectConfirm}
           lastError={sessionResolution?.lastError}
           overlays={
             <>
@@ -347,6 +357,7 @@ function SessionContent() {
       <AnimatePresence>
         {showDisconnectConfirm && (
           <motion.div
+            data-local-input
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}

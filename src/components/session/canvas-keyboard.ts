@@ -1,5 +1,12 @@
 import { isDisplayModeShortcut, releaseForwardedKeys } from '../../lib/input-mapper';
 
+/** Local UI includes portalled Radix menus and dialogs, not only form inputs. */
+export function isLocalInputTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  return !!element && (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A', 'SUMMARY'].includes(element.tagName)
+    || !!element.closest?.('[data-local-input], [role="menu"], [role="dialog"], [role="tablist"], [contenteditable="true"]'));
+}
+
 /** Own the remote key lifecycle and the local display-control escape. */
 export function subscribeCanvasKeyboard(
   target: EventTarget,
@@ -12,15 +19,13 @@ export function subscribeCanvasKeyboard(
     onKeyUp(new KeyboardEvent('keyup', { code })));
   const handleDown = (event: Event) => {
     const e = event as KeyboardEvent;
+    if (isLocalInputTarget(e.target)) { releaseKeys(); return; }
     if (isDisplayModeShortcut(e)) {
       e.preventDefault();
       releaseKeys();
       select?.focus();
       return;
     }
-    // Only capture when the session view is active (not typing in a dialog/input)
-    const tag = (e.target as HTMLElement)?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     e.preventDefault();
     forwardedKeys.add(e.code);
     onKeyDown(e);
@@ -28,9 +33,8 @@ export function subscribeCanvasKeyboard(
 
   const handleUp = (event: Event) => {
     const e = event as KeyboardEvent;
-    const tag = (e.target as HTMLElement)?.tagName;
+    if (isLocalInputTarget(e.target)) { releaseKeys(); return; }
     if (isDisplayModeShortcut(e)) return;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     e.preventDefault();
     forwardedKeys.delete(e.code);
     onKeyUp(e);
@@ -39,11 +43,18 @@ export function subscribeCanvasKeyboard(
   target.addEventListener('keydown', handleDown);
   target.addEventListener('keyup', handleUp);
   select?.addEventListener('focus', releaseKeys);
+  const enterLocal = (event: Event) => { if (isLocalInputTarget(event.target)) releaseKeys(); };
+  target.addEventListener('pointerdown', enterLocal, true);
+  target.addEventListener('focusin', enterLocal, true);
+  target.addEventListener('blur', releaseKeys);
 
   return () => {
     target.removeEventListener('keydown', handleDown);
     target.removeEventListener('keyup', handleUp);
     select?.removeEventListener('focus', releaseKeys);
+    target.removeEventListener('pointerdown', enterLocal, true);
+    target.removeEventListener('focusin', enterLocal, true);
+    target.removeEventListener('blur', releaseKeys);
     releaseKeys();
   };
 }

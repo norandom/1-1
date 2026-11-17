@@ -13,7 +13,8 @@ export interface ResizeScheduler {
 
 export function createTrailingResizeScheduler(
   emit: (width: number, height: number) => void,
-  delayMs: number = RESIZE_DEBOUNCE_MS
+  delayMs: number = RESIZE_DEBOUNCE_MS,
+  enabled: () => boolean = () => true,
 ): ResizeScheduler {
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -22,9 +23,11 @@ export function createTrailingResizeScheduler(
       if (timer !== null) {
         clearTimeout(timer);
       }
+      timer = null;
+      if (!enabled()) return;
       timer = setTimeout(() => {
         timer = null;
-        emit(width, height);
+        if (enabled()) emit(width, height);
       }, delayMs);
     },
     cancel() {

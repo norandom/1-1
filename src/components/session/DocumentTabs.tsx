@@ -19,6 +19,7 @@ import {
 import { sessionRoute } from '../../lib/session-route';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { SessionOptionsMenu } from './SessionOptionsMenu';
 
 const FOCUS_KEYS: readonly TabFocusKey[] = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
 
@@ -67,6 +68,7 @@ export function DocumentTabs() {
   // The active tab is the session the route points at (11.2); tabs
   // stay open — just not active — over dashboards (11.6).
   const activeTabId = activeTabIdFromPath(pathname, tabIds);
+  const activeConnection = connections.find((c) => c.id === sessions.get(activeTabId ?? '')?.connectionId);
   const focusedTabId =
     keyboardFocusTabId && tabIds.includes(keyboardFocusTabId) ? keyboardFocusTabId : null;
   const rovingTabId = focusedTabId ?? activeTabId ?? tabIds[0] ?? null;
@@ -136,10 +138,11 @@ export function DocumentTabs() {
   if (!hasTabs) return null;
 
   return (
+    <div className="flex h-9 shrink-0 items-center border-b border-[var(--color-border)] bg-[var(--color-surface-1)]" data-local-input>
     <div
       role="tablist"
       aria-label="Open sessions"
-      className="flex h-9 shrink-0 items-center overflow-x-auto border-b border-[var(--color-border)] bg-[var(--color-surface-1)]"
+      className="flex h-full min-w-0 flex-1 items-center overflow-x-auto"
     >
       <AnimatePresence mode="popLayout" initial={false}>
         {tabs.map((tab) => {
@@ -216,6 +219,8 @@ export function DocumentTabs() {
       >
         <Plus size={14} />
       </Button>
+    </div>
+      {activeConnection && <SessionOptionsMenu key={activeConnection.id} connection={activeConnection} />}
     </div>
   );
 }

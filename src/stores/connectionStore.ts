@@ -1,6 +1,10 @@
 import { create } from 'zustand';
-import type { ConnectionConfig, ConnectionInput } from '../types';
+import type { ConnectionConfig, ConnectionInput, HostProfile } from '../types';
 import * as tauri from '../lib/tauri';
+import { normalizeHostProfile } from '../lib/host-profile';
+
+
+type ConnectionPatch = Omit<Partial<ConnectionConfig>, 'hostProfile'> & { hostProfile?: Partial<HostProfile> };
 
 interface ConnectionState {
   connections: ConnectionConfig[];
@@ -17,60 +21,73 @@ interface ConnectionState {
   createConnection: (
     config: ConnectionInput
   ) => Promise<ConnectionConfig>;
-  updateConnection: (id: string, config: Partial<ConnectionConfig>) => Promise<void>;
+  updateConnection: (id: string, config: ConnectionPatch) => Promise<void>;
   deleteConnection: (id: string) => Promise<void>;
   duplicateConnection: (id: string) => Promise<ConnectionConfig>;
 }
 
-export const useConnectionStore = create<ConnectionState>((set, get) => ({
-  connections: [],
-  selectedId: null,
-  searchQuery: '',
-  viewMode: 'grid',
-  isLoading: false,
-  error: null,
+export const useConnectionStore = create<ConnectionState>((set, get) => {
+  const updates = new Map<string, Promise<void>>();
+  return {
+    connections: [],
+    selectedId: null,
+    searchQuery: '',
+    viewMode: 'grid',
+    isLoading: false,
+    error: null,
 
-  setSelectedId: (id) => set({ selectedId: id }),
-  setSearchQuery: (query) => set({ searchQuery: query }),
-  setViewMode: (mode) => set({ viewMode: mode }),
+    setSelectedId: (id) => set({ selectedId: id }),
+    setSearchQuery: (query) => set({ searchQuery: query }),
+    setViewMode: (mode) => set({ viewMode: mode }),
 
-  fetchConnections: async () => {
-    set({ isLoading: true, error: null });
-    try {
-      const connections = await tauri.listConnections();
-      set({ connections, isLoading: false });
-    } catch (e) {
-      set({ error: String(e), isLoading: false });
-    }
-  },
+    fetchConnections: async () => {
+      set({ isLoading: true, error: null });
+      try {
+        const connections = await tauri.listConnections();
+        set({ connections, isLoading: false });
+      } catch (e) {
+        set({ error: String(e), isLoading: false });
+      }
+    },
 
-  createConnection: async (config) => {
-    const connection = await tauri.createConnection(config);
-    set({ connections: [...get().connections, connection] });
-    return connection;
-  },
+    createConnection: async (config) => {
+      const connection = await tauri.createConnection(config);
+      set({ connections: [...get().connections, connection] });
+      return connection;
+    },
 
-  updateConnection: async (id, config) => {
-    const updated = await tauri.updateConnection(id, config);
-    set({
-      connections: get().connections.map((c) => (c.id === id ? updated : c)),
-    });
-  },
+    updateConnection: async (id, config) => {
+      const previous = updates.get(id) ?? Promise.resolve();
+      const next = previous.catch(() => {}).then(async () => {
+        const current = get().connections.find((c) => c.id === id);
+        if (!current) throw new Error('Connection no longer exists');
+        const payload = {
+          ...current, ...config,
+          hostProfile: { ...normalizeHostProfile(current.hostProfile), ...config.hostProfile },
+        };
+        const updated = await tauri.updateConnection(id, payload);
+        set({ connections: get().connections.map((c) => (c.id === id ? updated : c)) });
+      });
+      updates.set(id, next);
+      try { await next; }
+      finally { if (updates.get(id) === next) updates.delete(id); }
+    },
 
-  deleteConnection: async (id) => {
-    await tauri.deleteConnection(id);
-    set({
-      connections: get().connections.filter((c) => c.id !== id),
-      selectedId: get().selectedId === id ? null : get().selectedId,
-    });
-  },
+    deleteConnection: async (id) => {
+      await tauri.deleteConnection(id);
+      set({
+        connections: get().connections.filter((c) => c.id !== id),
+        selectedId: get().selectedId === id ? null : get().selectedId,
+      });
+    },
 
-  // Task 6.6 (Req 10.19): append the backend-made copy (fresh id, copy
-  // name, same folder, no copied credential — password re-entry needed).
-  duplicateConnection: async (id) => {
-    const copy = await tauri.duplicateConnection(id);
-    set({ connections: [...get().connections, copy] });
-    return copy;
-  },
+    // Task 6.6 (Req 10.19): append the backend-made copy (fresh id, copy
+    // name, same folder, no copied credential — password re-entry needed).
+    duplicateConnection: async (id) => {
+      const copy = await tauri.duplicateConnection(id);
+      set({ connections: [...get().connections, copy] });
+      return copy;
+    },
 
-}));
+  };
+});

@@ -1,0 +1,42 @@
+import type { HostProfile } from '../types';
+
+export const VISUAL_OPTIONS = [
+  ['fontSmoothing', 'Font smoothing'],
+  ['fullWindowDrag', 'Window contents while dragging'],
+  ['wallpaper', 'Desktop wallpaper'],
+  ['menuAnimations', 'Menu animations'],
+  ['themes', 'Visual themes'],
+  ['cursorShadow', 'Cursor shadow'],
+  ['cursorBlinking', 'Cursor blinking'],
+  ['desktopComposition', 'Desktop composition (legacy)'],
+] as const;
+export const NETWORK_OPTIONS: readonly [HostProfile['networkHint'], string][] = [
+  ['lan', 'LAN'], ['wan', 'WAN'], ['broadbandHigh', 'High-speed broadband'],
+  ['broadbandLow', 'Low-speed broadband'], ['satellite', 'Satellite'], ['modem', 'Modem'],
+];
+export const EXPERIENCE_HELP = 'Visual effects and connection hints apply on the next connection. Server policy can override these requests.';
+export const COMPOSITION_HELP = 'Desktop composition is a legacy, server-dependent effect requiring 32-bit color.';
+export const NETWORK_HELP = 'Connection type is a performance hint, not a bandwidth limit or automatic detection.';
+export type ExperiencePreset = 'low' | 'balanced' | 'quality';
+export const PRESETS: readonly [ExperiencePreset, string][] = [['low', 'Low bandwidth'], ['balanced', 'Balanced'], ['quality', 'Full visual quality']];
+
+/** Presets change visual requests only; display behavior and network hint stay explicit. */
+export function experiencePreset(preset: ExperiencePreset) {
+  const quality = preset === 'quality';
+  const low = preset === 'low';
+  return {
+    fontSmoothing: !low,
+    hostProfile: {
+      wallpaper: quality, fullWindowDrag: !low, menuAnimations: quality,
+      themes: quality, cursorShadow: quality, cursorBlinking: !low,
+      desktopComposition: quality,
+    },
+  };
+}
+export function presetName(profile: HostProfile, fontSmoothing: boolean): ExperiencePreset | '' {
+  return PRESETS.find(([key]) => {
+    const preset = experiencePreset(key);
+    return preset.fontSmoothing === fontSmoothing && Object.entries(preset.hostProfile)
+      .every(([field, value]) => profile[field as keyof HostProfile] === value);
+  })?.[0] ?? '';
+}

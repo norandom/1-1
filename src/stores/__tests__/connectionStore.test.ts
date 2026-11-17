@@ -166,3 +166,27 @@ describe('connectionStore', () => {
     expect(useConnectionStore.getState().viewMode).toBe('grid');
   });
 });
+
+it('merges saved host changes against latest data and serializes overlapping updates', async () => {
+  const original = { ...sampleConnection, id: 'profile', createdAt: '', updatedAt: '', hostProfile: { displayMode: 'fit' as const, resizeMode: 'dynamic' as const, wallpaper: false, fullWindowDrag: true, menuAnimations: false, themes: false, cursorShadow: false, cursorBlinking: true, desktopComposition: false, networkHint: 'lan' as const } };
+  useConnectionStore.setState({ connections: [original] });
+  let finish!: (value: typeof original) => void;
+  vi.mocked(tauri.updateConnection).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const first = useConnectionStore.getState().updateConnection('profile', { name: 'New name' });
+  const second = useConnectionStore.getState().updateConnection('profile', { fontSmoothing: false });
+  await vi.waitFor(() => expect(vi.mocked(tauri.updateConnection).mock.calls.at(-1)?.[1]).toMatchObject({ host: original.host, name: 'New name', hostProfile: original.hostProfile }));
+  finish({ ...original, name: 'New name' });
+  await Promise.all([first, second]);
+  expect(useConnectionStore.getState().connections[0]).toMatchObject({ name: 'New name', fontSmoothing: false, hostProfile: original.hostProfile });
+});
+
+it('failed host setting saves retain the previous state and do not block later changes', async () => {
+  const original = { ...sampleConnection, id: 'failed-profile', createdAt: '', updatedAt: '' };
+  useConnectionStore.setState({ connections: [original] });
+  vi.mocked(tauri.updateConnection).mockRejectedValueOnce(new Error('disk full'));
+  const failed = useConnectionStore.getState().updateConnection(original.id, { fontSmoothing: false });
+  await expect(failed).rejects.toThrow('disk full');
+  expect(useConnectionStore.getState().connections[0].fontSmoothing).toBe(true);
+  await useConnectionStore.getState().updateConnection(original.id, { hostProfile: { fullWindowDrag: false } });
+  expect(useConnectionStore.getState().connections[0]).toMatchObject({ name: original.name, fontSmoothing: true, hostProfile: { fullWindowDrag: false, resizeMode: 'dynamic', displayMode: 'fit' } });
+});

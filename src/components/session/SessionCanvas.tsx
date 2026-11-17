@@ -30,6 +30,8 @@ interface SurfaceBuffer {
 }
 
 interface Props {
+  displayMode?: DisplayMode;
+  inputBlocked?: boolean;
   overlays?: React.ReactNode;
   subscribeToFrames: (listener: FrameListener) => () => void;
   displayStalled?: boolean;
@@ -51,6 +53,8 @@ interface Props {
 }
 
 export function SessionCanvas({
+  displayMode = 'fit',
+  inputBlocked = false,
   overlays,
   subscribeToFrames,
   displayStalled = false,
@@ -72,12 +76,10 @@ export function SessionCanvas({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const displayModeSelectRef = useRef<HTMLSelectElement>(null);
   const surfaceRef = useRef<SurfaceBuffer | null>(null);
   const renderScheduledRef = useRef(false);
   const pendingConsumptionRef = useRef<(() => void) | undefined>(undefined);
   const animationFrameRef = useRef<number | null>(null);
-  const [displayMode, setDisplayMode] = useState<DisplayMode>('fit');
   const displayModeRef = useRef<DisplayMode>('fit');
   const [displaySize, setDisplaySize] = useState(() => ({
     left: 0,
@@ -303,8 +305,9 @@ export function SessionCanvas({
 
   // Keyboard events — listen on window so keys work even if canvas loses focus
   useEffect(() => {
-    return subscribeCanvasKeyboard(window, displayModeSelectRef.current, onKeyDown, onKeyUp);
-  }, [onKeyDown, onKeyUp, status]);
+    if (inputBlocked) return;
+    return subscribeCanvasKeyboard(window, document.getElementById('session-options-trigger'), onKeyDown, onKeyUp);
+  }, [onKeyDown, onKeyUp, status, inputBlocked]);
 
   const getMouseBounds = useCallback((): MouseSurfaceBounds | null => {
     const canvas = canvasRef.current;
@@ -400,23 +403,6 @@ export function SessionCanvas({
 
   return (
     <div className="flex flex-col w-full h-full bg-black">
-      <label className="flex shrink-0 items-center justify-end gap-2 px-3 py-1 text-xs text-[var(--color-text-primary)] bg-[var(--color-surface-1)]">
-        Display size
-        <select
-          ref={displayModeSelectRef}
-          aria-label="Display size"
-          aria-keyshortcuts="Control+Alt+Shift+P"
-          title="Display size (Ctrl+Alt+Shift+P)"
-          className="rounded bg-[var(--color-surface-2)] text-[var(--color-text-primary)] px-2 py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
-          value={displayMode}
-          onChange={(event) => setDisplayMode(event.target.value as DisplayMode)}
-          onKeyDown={(event) => event.stopPropagation()}
-          onKeyUp={(event) => event.stopPropagation()}
-        >
-          <option value="fit">Fit to window</option>
-          <option value="native">Native pixels (1:1)</option>
-        </select>
-      </label>
       <div className="relative flex flex-1 min-h-0 flex-col overflow-hidden">
         <div
           ref={containerRef}
@@ -472,7 +458,7 @@ export function SessionCanvas({
             </motion.div>
           )}
         </div>
-        {/* Clip floating chrome below the fixed controls, outside viewport scrolling. */}
+        {/* Keep floating chrome clipped to the viewport, outside native-pixel scrolling. */}
         <div className="pointer-events-none absolute inset-0 overflow-hidden [&>*]:pointer-events-auto">
           {overlays}
         </div>

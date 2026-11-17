@@ -72,3 +72,22 @@ describe('createTrailingResizeScheduler (Req 3.3)', () => {
     expect(emit).not.toHaveBeenCalled();
   });
 });
+
+it('does not send a queued resize after switching to fixed, and resumes with a fresh measured size', () => {
+  vi.useFakeTimers();
+  let dynamic = true;
+  const emit = vi.fn();
+  const scheduler = createTrailingResizeScheduler(emit, 200, () => dynamic);
+  scheduler.schedule(800, 600);
+  dynamic = false;
+  vi.advanceTimersByTime(200);
+  scheduler.schedule(900, 700);
+  vi.advanceTimersByTime(200);
+  expect(emit).not.toHaveBeenCalled();
+  dynamic = true;
+  scheduler.schedule(1200, 800);
+  vi.advanceTimersByTime(200);
+  expect(emit).toHaveBeenCalledExactlyOnceWith(1200, 800);
+  scheduler.cancel();
+  vi.useRealTimers();
+});
