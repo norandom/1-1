@@ -22,6 +22,7 @@ import type {
 import { normalizeConnection } from './host-profile';
 import { normalizeSessionInfo } from './session-info';
 import type { FrameMessage, FrameReceipt } from './frame-protocol';
+import { useSessionStore } from '../stores/sessionStore';
 
 // ── Connection Management ───────────────────────────────────────────
 
@@ -121,6 +122,10 @@ export async function resumeDisplay(sessionId: string): Promise<void> {
   await invoke('resume_display', { sessionId });
 }
 
+export async function pauseDisplay(sessionId: string): Promise<void> {
+  await invoke('pause_display', { sessionId });
+}
+
 export async function cancelReconnect(sessionId: string): Promise<void> {
   await invoke('cancel_reconnect', { sessionId });
 }
@@ -142,16 +147,39 @@ export async function getSessionInfo(sessionId: string): Promise<SessionInfo | n
   }
 }
 
-export async function sendKeyEvent(sessionId: string, event: KeyEvent): Promise<void> {
-  await invoke('send_key_event', {
-    sessionId,
-    keyCode: event.keyCode,
-    isDown: event.isDown,
+// Starting a paused gesture may flush several physical modifiers at once.
+// Wait for admission of each event to this actor before submitting the next.
+const pendingInput = new Map<string, { connectedAt?: string; done: Promise<void> }>();
+function orderedInput(sessionId: string, submit: () => Promise<void>): Promise<void> {
+  const session = useSessionStore.getState().sessions.get(sessionId);
+  const prior = pendingInput.get(sessionId);
+  if (!session) return prior ? Promise.resolve() : submit();
+  if (session.status !== 'connected') return Promise.resolve();
+  const { connectedAt } = session;
+  const preceding = prior && prior.connectedAt === connectedAt ? prior.done : undefined;
+  if (!preceding && !session.displayPaused) return submit();
+  const submitIfCurrent = () => {
+    const current = useSessionStore.getState().sessions.get(sessionId);
+    if (current?.status === 'connected' && current.connectedAt === connectedAt) return submit();
+  };
+  // A failed command must not swallow a later physical key release.
+  const submitted = preceding ? preceding.then(submitIfCurrent, submitIfCurrent) : submit();
+  pendingInput.set(sessionId, { connectedAt, done: submitted });
+  return submitted.finally(() => {
+    if (pendingInput.get(sessionId)?.done === submitted) pendingInput.delete(sessionId);
   });
 }
 
+export async function sendKeyEvent(sessionId: string, event: KeyEvent): Promise<void> {
+  await orderedInput(sessionId, () => invoke('send_key_event', {
+    sessionId,
+    keyCode: event.keyCode,
+    isDown: event.isDown,
+  }));
+}
+
 export async function sendMouseEvent(sessionId: string, event: RdpMouseEvent): Promise<void> {
-  await invoke('send_mouse_event', {
+  const submit = () => invoke<void>('send_mouse_event', {
     sessionId,
     x: event.x,
     y: event.y,
@@ -159,6 +187,8 @@ export async function sendMouseEvent(sessionId: string, event: RdpMouseEvent): P
     eventType: event.eventType,
     scrollDelta: event.scrollDelta ?? 0,
   });
+  if (event.eventType === 'move') await submit();
+  else await orderedInput(sessionId, submit);
 }
 
 export async function resizeSession(

@@ -9,6 +9,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { ClipboardStatus } from './ClipboardStatus';
+import { DisplayPauseControl } from './DisplayPauseControl';
+import { sessionRouteIdFromPath } from '../../lib/session-route';
 import { buildStatusBarText, createStatusBarHoverReveal, sessionCountLabel, statusBarIndicator, liveSessionCount, shouldAutoHideStatusBar, statusBarRevealReducer, statusBarRowHeight } from '../../lib/status-bar';
 
 export function StatusBar() {
@@ -19,7 +21,9 @@ export function StatusBar() {
   const { pathname } = useLocation();
   const { theme, toggle } = useTheme();
 
-  const activeSession = activeSessionId ? sessions.get(activeSessionId) : null;
+  const routeId = sessionRouteIdFromPath(pathname);
+  const selectedSession = routeId ? sessions.get(routeId) : undefined;
+  const activeSession = selectedSession ?? (activeSessionId ? sessions.get(activeSessionId) : null);
   const sessionCount = liveSessionCount(sessions.values());
   const indicator = statusBarIndicator(activeSession ?? null);
 
@@ -33,9 +37,10 @@ export function StatusBar() {
   // leave() remains reusable after React StrictMode's setup/cleanup rehearsal.
   useEffect(() => () => { hover.leave(); setClipboardOpen(false); }, [hover, autoHideInSession, pathname, activeSession?.status]);
   const rowHeight = statusBarRowHeight(autoHideInSession, { ...reveal, focus: reveal.focus || clipboardOpen });
+  const hasSessionShortcut = autoHideInSession || !!selectedSession;
 
   return (
-    <div id={autoHideInSession ? 'status-bar-focus-target' : undefined} role="region" aria-label="Connection status bar" aria-keyshortcuts={autoHideInSession ? 'Control+Alt+Shift+S' : undefined} tabIndex={autoHideInSession ? -1 : undefined}
+    <div id={hasSessionShortcut ? 'status-bar-focus-target' : undefined} role="region" aria-label="Connection status bar" aria-keyshortcuts={hasSessionShortcut ? 'Control+Alt+Shift+S' : undefined} tabIndex={hasSessionShortcut ? -1 : undefined}
       data-local-input data-status-bar-mode={autoHideInSession ? 'auto-hide' : 'visible'} className="shrink-0 focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-[-2px]" style={{ height: rowHeight }}
       onPointerEnter={() => { if (autoHideInSession) hover.enter(reveal.focus); }} onPointerLeave={() => hover.leave()}
       onFocusCapture={() => dispatchReveal('focus-enter')}
@@ -73,7 +78,7 @@ export function StatusBar() {
 
       <Separator orientation="vertical" className="h-3.5" />
 
-      {/* Right: theme toggle */}
+      <DisplayPauseControl session={selectedSession} />
       <ClipboardStatus onOpenChange={setClipboardOpen} />
       <Button
         variant="ghost"

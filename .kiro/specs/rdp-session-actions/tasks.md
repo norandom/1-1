@@ -6,7 +6,7 @@ Each numbered subtask is one implementation or validation unit, sized for roughl
 
 The independent Kiro task-plan review passed on 18 November 2026. The review covered all 19 acceptance criteria, task dependencies and Windows test milestones.
 
-- [ ] 1. Pause and resume one connected display
+- [x] 1. Pause and resume one connected display
 - [x] 1.1 Add manual minute previews to the existing idle policy
   - On an explicit pause suppress immediately, even with automatic preview off. Adopt an already suppressed interval, close an open automatic preview and keep manual intent on a quiet or costly screen.
   - Use virtual time to show two-second update windows about 60 seconds apart. Coalesce late ticks and return to the saved automatic policy on deliberate resume or a fresh connection.
@@ -25,7 +25,7 @@ The independent Kiro task-plan review passed on 18 November 2026. The review cov
   - Verify resize during suppression and during a preview. The old image and its age survive until a real desktop paint. A cursor, clipboard event or elapsed timer cannot advance the timestamp.
   - _Boundary: Session actor graphics and status projection_
   - _Requirements: 2.2, 2.4, 2.6, 2.7, 2.8_
-- [ ] 1.4 Integrate the control with the existing status bar and keyboard handling
+- [x] 1.4 Integrate the control with the existing status bar and keyboard handling
   - Bind Pause and **Resume live** to the selected tab. Show update age or “Last update unknown” and an accessible reason when unavailable. Enable it from the actor's negotiated capability independently of automatic preview.
   - Route view return, locally consumed menu keys and release of earlier forwarded modifiers separately from deliberate remote input. Preserve remote key state, the existing auto-hide delay and the viewport used for smart resize.
   - Frontend interaction tests switch tabs, use the control by keyboard, show and hide the bar and return focus. The selected session receives the expected command once, the other stays unchanged, and the bar occupies its measured height.

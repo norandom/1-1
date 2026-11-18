@@ -73,6 +73,9 @@ function SessionContent() {
   const sessionResolution = useSessionStore((s) =>
     sessionId ? s.sessions.get(sessionId) : null
   );
+  const isDisplayPaused = useCallback(() =>
+    !!sessionId && useSessionStore.getState().sessions.get(sessionId)?.displayPaused === true,
+  [sessionId]);
 
   // Task 8.6 (Req 11.4, design.md L396): the route is `/session/:sessionId`
   // and the connection is resolved THROUGH the session (D1 fix). A
@@ -315,6 +318,7 @@ function SessionContent() {
         {/* Canvas */}
         <SessionCanvas
           displayMode={profile.displayMode}
+          isDisplayPaused={isDisplayPaused}
           inputBlocked={showDisconnectConfirm}
           lastError={sessionResolution?.lastError}
           overlays={

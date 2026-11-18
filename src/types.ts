@@ -64,6 +64,9 @@ export type SessionStatus =
 export interface SessionInfo {
   idlePreviewState?: 'off' | 'unsupported' | 'live' | 'suppressed' | 'preview';
   idlePreviewUpdatedAt?: string | null;
+  displayPaused?: boolean;
+  displayPauseAvailable?: boolean;
+  displayPauseUnavailableReason?: string | null;
   /** TCP payload I/O below TLS; excludes IP/TCP headers and retransmissions. */
   network?: NetworkMetrics | null;
   graphics?: GraphicsObservation;

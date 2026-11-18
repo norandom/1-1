@@ -23,9 +23,12 @@ interface MouseSurfaceBounds {
   surfaceHeight: number;
 }
 
+const liveDisplay = () => false;
+
 interface Props {
   displayMode?: DisplayMode;
   inputBlocked?: boolean;
+  isDisplayPaused?: () => boolean;
   overlays?: React.ReactNode;
   subscribeToFrames: (listener: FrameListener) => () => void;
   displayStalled?: boolean;
@@ -49,6 +52,7 @@ interface Props {
 export function SessionCanvas({
   displayMode = 'fit',
   inputBlocked = false,
+  isDisplayPaused = liveDisplay,
   overlays,
   subscribeToFrames,
   displayStalled = false,
@@ -269,8 +273,9 @@ export function SessionCanvas({
   // Keyboard events — listen on window so keys work even if canvas loses focus
   useEffect(() => {
     if (inputBlocked) return;
-    return subscribeCanvasKeyboard(window, document.getElementById('session-options-trigger'), onKeyDown, onKeyUp, document.getElementById('status-bar-focus-target'));
-  }, [onKeyDown, onKeyUp, status, inputBlocked]);
+    return subscribeCanvasKeyboard(window, document.getElementById('session-options-trigger'), onKeyDown, onKeyUp,
+      document.getElementById('status-bar-focus-target'), { isPaused: isDisplayPaused, canvas: canvasRef.current });
+  }, [onKeyDown, onKeyUp, status, inputBlocked, isDisplayPaused]);
 
   const getMouseBounds = useCallback((): MouseSurfaceBounds | null => {
     const canvas = canvasRef.current;

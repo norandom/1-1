@@ -20,7 +20,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 import { connectSession } from '../session-runtime';
-import { getSessionInfo, listSessions } from '../tauri';
+import { getSessionInfo, listSessions, sendKeyEvent, sendMouseEvent } from '../tauri';
 import { useSessionStore } from '../../stores/sessionStore';
 import { statusesFromSessions, connectionStatusText } from '../tree-a11y';
 import { buildSessionTabs } from '../document-tabs';
@@ -44,6 +44,53 @@ beforeEach(() => {
 afterEach(() => {
   for (const id of useSessionStore.getState().sessions.keys()) useSessionStore.getState().removeSession(id);
   vi.useRealTimers();
+});
+
+it('submits a remote click after its deferred modifier reaches the actor, independently per session', async () => {
+  for (const id of ['A', 'B']) {
+    useSessionStore.getState().addSession({ ...wire, id, status: 'connected', connectedAt: 'first', displayPaused: true });
+  }
+  let acknowledge!: () => void;
+  ipc.invoke.mockImplementationOnce(() => new Promise<void>((resolve) => { acknowledge = resolve; }));
+  const modifier = sendKeyEvent('A', { keyCode: 29, isDown: true });
+  const click = sendMouseEvent('A', { x: 1, y: 1, button: 1, eventType: 'down' });
+  const release = sendKeyEvent('A', { keyCode: 29, isDown: false });
+  await sendKeyEvent('B', { keyCode: 30, isDown: true });
+  expect(ipc.invoke.mock.calls.map(([name, args]) => [name, args.sessionId])).toEqual([
+    ['send_key_event', 'A'], ['send_key_event', 'B'],
+  ]);
+  acknowledge();
+  await Promise.all([modifier, click, release]);
+  expect(ipc.invoke.mock.calls.slice(2).map(([name]) => name)).toEqual(['send_mouse_event', 'send_key_event']);
+});
+
+it('drops pending input when a new connection reuses the same session tab', async () => {
+  const store = useSessionStore.getState();
+  store.addSession({ ...wire, id: 'A', status: 'connected', connectedAt: 'first', displayPaused: true });
+  let acknowledge!: () => void;
+  ipc.invoke.mockImplementationOnce(() => new Promise<void>((resolve) => { acknowledge = resolve; }));
+  const first = sendKeyEvent('A', { keyCode: 29, isDown: true });
+  const oldClick = sendMouseEvent('A', { x: 0, y: 0, button: 1, eventType: 'down' });
+  store.updateSession('A', { connectedAt: 'replacement' });
+  await sendKeyEvent('A', { keyCode: 30, isDown: true });
+  acknowledge();
+  await Promise.all([first, oldClick]);
+  expect(ipc.invoke.mock.calls.map(([cmd, data]) => [cmd, data.keyCode])).toEqual([
+    ['send_key_event', 29], ['send_key_event', 30],
+  ]);
+});
+
+it('admits a queued modifier release after a failed button event on the same connection', async () => {
+  useSessionStore.getState().addSession({ ...wire, id: 'A', status: 'connected', connectedAt: 'first', displayPaused: true });
+  let reject!: (error: Error) => void;
+  ipc.invoke.mockImplementationOnce(() => new Promise<void>((_, fail) => { reject = fail; }));
+  const click = sendMouseEvent('A', { x: 0, y: 0, button: 1, eventType: 'down' });
+  const rejected = expect(click).rejects.toThrow('send failed');
+  const release = sendKeyEvent('A', { keyCode: 29, isDown: false });
+  reject(new Error('send failed'));
+  await rejected;
+  await release;
+  expect(ipc.invoke).toHaveBeenLastCalledWith('send_key_event', { sessionId: 'A', keyCode: 29, isDown: false });
 });
 
 describe('Rust session error wire integration', () => {

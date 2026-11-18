@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { matchKeyboardShortcut } from '../../lib/shortcuts';
+import { subscribeClipboardInput } from '../../lib/clipboard-input';
 import { subscribeCanvasKeyboard, subscribeSessionEscape } from './canvas-keyboard';
 
 class Key extends Event {
@@ -15,6 +16,86 @@ class Key extends Event {
   }
 }
 afterEach(() => vi.unstubAllGlobals());
+
+function pausedCanvas() {
+  vi.stubGlobal('KeyboardEvent', Key);
+  const canvas = Object.assign(new EventTarget(), { tagName: 'CANVAS' });
+  const menu = Object.assign(new EventTarget(), { focus: vi.fn() });
+  const bar = Object.assign(new EventTarget(), { focus: vi.fn() });
+  const sent: string[] = [];
+  const stop = subscribeCanvasKeyboard(canvas, menu,
+    (e) => sent.push('down ' + e.code), (e) => sent.push('up ' + e.code), bar,
+    { isPaused: () => true, canvas });
+  const key = (type: 'keydown' | 'keyup', code: string, held: Partial<KeyboardEvent> = {}) =>
+    canvas.dispatchEvent(new Key(type, { code, ...held }));
+  return { canvas, menu, bar, sent, stop, key };
+}
+
+it.each(['KeyS', 'KeyP'])('keeps a paused session asleep for the entire physical %s local chord', (code) => {
+  const { bar, menu, sent, key, stop } = pausedCanvas();
+  key('keydown', 'ControlRight', { ctrlKey: true });
+  key('keydown', 'ShiftLeft', { ctrlKey: true, shiftKey: true });
+  key('keydown', 'AltLeft', { ctrlKey: true, shiftKey: true, altKey: true });
+  key('keydown', code, { ctrlKey: true, shiftKey: true, altKey: true });
+  for (const physical of ['ControlRight', 'ShiftLeft', 'AltLeft', code]) key('keyup', physical);
+  expect(code === 'KeyS' ? bar.focus : menu.focus).toHaveBeenCalledOnce();
+  expect(sent).toEqual([]);
+  stop();
+});
+
+it.each(['mousedown', 'wheel', 'keydown'])('flushes physical modifiers in order before a remote %s', (type) => {
+  const { canvas, sent, key, stop } = pausedCanvas();
+  key('keydown', 'ShiftRight', { shiftKey: true });
+  key('keydown', 'ControlLeft', { shiftKey: true, ctrlKey: true });
+  canvas.dispatchEvent(new Event('pointermove'));
+  expect(sent).toEqual([]);
+  const held = { shiftKey: true, ctrlKey: true };
+  if (type === 'keydown') key('keydown', 'KeyC', held);
+  else {
+    canvas.addEventListener(type, () => sent.push(type));
+    canvas.dispatchEvent(Object.assign(new Event(type), held));
+  }
+  expect(sent).toEqual(['down ShiftRight', 'down ControlLeft', type === 'keydown' ? 'down KeyC' : type]);
+  key('keyup', 'ShiftRight');
+  key('keyup', 'ControlLeft');
+  stop();
+});
+
+it('handles a standalone modifier and re-arms a physically held modifier after intercepted paste', () => {
+  const { canvas, sent, key, stop } = pausedCanvas();
+  key('keydown', 'AltRight', { altKey: true });
+  key('keyup', 'AltRight');
+  expect(sent).toEqual(['down AltRight', 'up AltRight']);
+  sent.length = 0;
+  key('keydown', 'ControlRight', { ctrlKey: true });
+  canvas.dispatchEvent(new Event('rdp-release-keys'));
+  expect(sent).toEqual([]);
+  key('keydown', 'KeyC', { ctrlKey: true });
+  expect(sent).toEqual(['down ControlRight', 'down KeyC']);
+  key('keyup', 'KeyC', { ctrlKey: true });
+  key('keyup', 'ControlRight');
+  stop();
+});
+
+it('leaves the first wake to clipboard acknowledgement when the paused user presses Ctrl+V', () => {
+  vi.stubGlobal('KeyboardEvent', Key);
+  const target = Object.assign(new EventTarget(), { tagName: 'CANVAS' });
+  const toRemote = vi.fn(async () => {});
+  const stopPaste = subscribeClipboardInput(target as unknown as Window, new EventTarget() as Document,
+    'bidirectional', () => true, { toRemote });
+  const down = vi.fn();
+  const up = vi.fn();
+  const stopKeys = subscribeCanvasKeyboard(target, null, down, up, null, { canvas: target, isPaused: () => true });
+  target.dispatchEvent(new Key('keydown', { code: 'ControlLeft', ctrlKey: true }));
+  target.dispatchEvent(new Key('keydown', { code: 'KeyV', ctrlKey: true }));
+  target.dispatchEvent(new Key('keyup', { code: 'KeyV', ctrlKey: true }));
+  target.dispatchEvent(new Key('keyup', { code: 'ControlLeft' }));
+  expect(toRemote).toHaveBeenCalledExactlyOnceWith(true);
+  expect(down).not.toHaveBeenCalled();
+  expect(up).not.toHaveBeenCalled();
+  stopKeys();
+  stopPaste();
+});
 
 it('leaves the status shortcut to the remote session when auto-hide has no reveal target', () => {
   const target = new EventTarget();
@@ -154,7 +235,7 @@ it.each(['pointerdown', 'pointerover'])('releases remote modifiers on blur and l
   cleanup();
 });
 
-it.each(['menu', 'dialog', 'tablist'])('isolates portalled/local %s descendants and releases previously forwarded keys', (role) => {
+it.each(['menu', 'dialog', 'tablist', 'tree'])('isolates portalled/local %s descendants and releases previously forwarded keys', (role) => {
   vi.stubGlobal('KeyboardEvent', Key);
   const target = Object.assign(new EventTarget(), { closest: vi.fn().mockReturnValue(null) });
   const down = vi.fn();

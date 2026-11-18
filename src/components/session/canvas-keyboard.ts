@@ -1,5 +1,11 @@
 import { isDisplayModeShortcut, isStatusBarShortcut, releaseForwardedKeys } from '../../lib/input-mapper';
+import { matchKeyboardShortcut } from '../../lib/shortcuts';
 
+const modifiers = [
+  ['ctrlKey', 'ControlLeft', 'ControlRight'], ['shiftKey', 'ShiftLeft', 'ShiftRight'],
+  ['altKey', 'AltLeft', 'AltRight'], ['metaKey', 'MetaLeft', 'MetaRight'],
+] as const;
+const modifierCodes = new Set<string>(modifiers.flatMap(([, left, right]) => [left, right]));
 
 export function subscribeSessionEscape(target: EventTarget, openDisconnect: () => void): () => void {
   const handleKey = (event: Event) => {
@@ -17,7 +23,7 @@ export function subscribeSessionEscape(target: EventTarget, openDisconnect: () =
 export function isLocalInputTarget(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;
   return !!element && (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A', 'SUMMARY'].includes(element.tagName)
-    || !!element.closest?.('[data-local-input], [role="menu"], [role="dialog"], [role="tablist"], [contenteditable="true"]'));
+    || !!element.closest?.('[data-local-input], [role="menu"], [role="dialog"], [role="tablist"], [role="tree"], [contenteditable="true"]'));
 }
 
 /** Own the remote key lifecycle and the local display-control escape. */
@@ -27,15 +33,39 @@ export function subscribeCanvasKeyboard(
   onKeyDown: (event: KeyboardEvent) => void,
   onKeyUp: (event: KeyboardEvent) => void,
   statusBar: (EventTarget & { focus(): void }) | null = null,
+  paused?: { isPaused: () => boolean; canvas: EventTarget | null },
 ): () => void {
   const forwardedKeys = new Set<string>();
+  const deferred = new Map<string, KeyboardEvent>();
+  const physicalModifiers = new Set<string>();
   let reconcileModifiers = false;
   const releaseKeys = () => {
+    deferred.clear();
     reconcileModifiers = true;
     releaseForwardedKeys(forwardedKeys, (code) => onKeyUp(new KeyboardEvent('keyup', { code })));
   };
+  const forward = (e: KeyboardEvent) => {
+    forwardedKeys.add(e.code);
+    onKeyDown(e);
+  };
+  const prepareRemoteInput = (e: KeyboardEvent | MouseEvent, currentCode?: string) => {
+    for (const key of deferred.values()) forward(key);
+    deferred.clear();
+    if (!reconcileModifiers) return;
+    // Local menus and clipboard paste can release remote keys while the physical
+    // modifier remains held. Restore its original side on the next remote input.
+    for (const [flag, left, right] of modifiers) {
+      if (!e[flag] || currentCode === left || currentCode === right) continue;
+      const sides = [left, right].filter((code) => physicalModifiers.has(code));
+      for (const code of sides.length ? sides : [left]) {
+        if (!forwardedKeys.has(code)) forward(new KeyboardEvent('keydown', { code }));
+      }
+    }
+    reconcileModifiers = false;
+  };
   const handleDown = (event: Event) => {
     const e = event as KeyboardEvent;
+    if (modifierCodes.has(e.code)) physicalModifiers.add(e.code);
     if (statusBar && isStatusBarShortcut(e)) {
       e.preventDefault();
       releaseKeys();
@@ -45,40 +75,38 @@ export function subscribeCanvasKeyboard(
     if (isLocalInputTarget(e.target)) { releaseKeys(); return; }
     // Escape belongs to the session prompt or the currently open local menu.
     // Do not consume it here: the session listener must work in either order.
-    if (e.key === 'Escape') return;
+    if (e.key === 'Escape' || e.defaultPrevented || matchKeyboardShortcut(e)) {
+      releaseKeys();
+      return;
+    }
     if (isDisplayModeShortcut(e)) {
       e.preventDefault();
       releaseKeys();
       select?.focus();
       return;
     }
-    // A local paste releases remote modifiers while awaiting clipboard ACK.
-    // Reconcile still-held physical modifiers before the next remote key.
-    for (const [held, left, right] of [
-      [e.ctrlKey, 'ControlLeft', 'ControlRight'], [e.shiftKey, 'ShiftLeft', 'ShiftRight'],
-      [e.altKey, 'AltLeft', 'AltRight'], [e.metaKey, 'MetaLeft', 'MetaRight'],
-    ] as const) {
-      if (reconcileModifiers && held && e.code !== left && e.code !== right && !forwardedKeys.has(left) && !forwardedKeys.has(right)) {
-        forwardedKeys.add(left);
-        onKeyDown(new KeyboardEvent('keydown', { code: left }));
-      }
-    }
-    reconcileModifiers = false;
     e.preventDefault();
-    forwardedKeys.add(e.code);
-    onKeyDown(e);
+    if (modifierCodes.has(e.code) && paused?.isPaused()) {
+      if (!e.repeat && !forwardedKeys.has(e.code)) deferred.set(e.code, e);
+      return;
+    }
+    prepareRemoteInput(e, e.code);
+    forward(e);
   };
 
   const handleUp = (event: Event) => {
     const e = event as KeyboardEvent;
-    if (statusBar && isStatusBarShortcut(e)) { e.preventDefault(); return; }
+    physicalModifiers.delete(e.code);
     if (isLocalInputTarget(e.target)) { releaseKeys(); return; }
-    if (e.key === 'Escape') return;
-    if (isDisplayModeShortcut(e)) return;
+    // A modifier tap is a deliberate remote input. A consumed local chord or
+    // paste has already discarded its deferred prefix and owns its keyups.
+    if (deferred.has(e.code)) prepareRemoteInput(e, e.code);
+    if (!forwardedKeys.delete(e.code)) return;
     e.preventDefault();
-    forwardedKeys.delete(e.code);
     onKeyUp(e);
   };
+  const pointer = (e: Event) => prepareRemoteInput(e as MouseEvent);
+  const blur = () => { physicalModifiers.clear(); releaseKeys(); };
 
   target.addEventListener('keydown', handleDown);
   target.addEventListener('keyup', handleUp);
@@ -87,8 +115,10 @@ export function subscribeCanvasKeyboard(
   target.addEventListener('pointerdown', enterLocal, true);
   target.addEventListener('pointerover', enterLocal, true);
   target.addEventListener('focusin', enterLocal, true);
-  target.addEventListener('blur', releaseKeys);
+  target.addEventListener('blur', blur);
   target.addEventListener('rdp-release-keys', releaseKeys);
+  paused?.canvas?.addEventListener('mousedown', pointer, true);
+  paused?.canvas?.addEventListener('wheel', pointer, true);
 
   return () => {
     target.removeEventListener('keydown', handleDown);
@@ -97,8 +127,10 @@ export function subscribeCanvasKeyboard(
     target.removeEventListener('pointerdown', enterLocal, true);
     target.removeEventListener('pointerover', enterLocal, true);
     target.removeEventListener('focusin', enterLocal, true);
-    target.removeEventListener('blur', releaseKeys);
+    target.removeEventListener('blur', blur);
     target.removeEventListener('rdp-release-keys', releaseKeys);
+    paused?.canvas?.removeEventListener('mousedown', pointer, true);
+    paused?.canvas?.removeEventListener('wheel', pointer, true);
     releaseKeys();
   };
 }

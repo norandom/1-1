@@ -1,8 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import { onSessionViewReturn, idleDisplayLabel } from '../idle-preview';
+import { onSessionViewReturn, idleDisplayLabel, displayUpdateAge } from '../idle-preview';
 import type { SessionInfo } from '../../types';
 
 describe('idle preview', () => {
+  it('dates the paused image using the last paint and tolerates an unknown or future timestamp', () => {
+    const paint = '2026-11-18T12:00:00.000Z';
+    const time = Date.parse(paint);
+    expect(displayUpdateAge(paint, time + 59_999)).toBe('59s ago');
+    expect(displayUpdateAge(paint, time + 60_000)).toBe('1m ago');
+    expect(displayUpdateAge(paint, time - 500)).toBe('0s ago');
+    expect(displayUpdateAge(null, time)).toBeNull();
+    expect(displayUpdateAge('invalid', time)).toBeNull();
+  });
+
   it('wakes the visible session once per focus return, including a tab switch', () => {
     const target = new EventTarget() as Window;
     let focused = true;

@@ -6,6 +6,7 @@ import { StatusBar } from './StatusBar';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { defaultSettings, useSettingsStore } from '../../stores/settingsStore';
 import { useSessionStore } from '../../stores/sessionStore';
+import type { SessionInfo } from '../../types';
 
 const original = useSettingsStore.getInitialState().settings;
 afterEach(() => {
@@ -13,6 +14,28 @@ afterEach(() => {
   useConnectionStore.getInitialState().connections = [];
   useSessionStore.getInitialState().sessions = new Map();
   useSessionStore.getInitialState().activeSessionId = null;
+});
+
+it('shows the selected desktop’s confirmed control, image age and unavailable reason inside the status row', () => {
+  const first: SessionInfo = {
+    id: 'one', connectionId: 'host-one', connectionName: 'Host one', host: 'one.invalid', status: 'connected',
+    fps: 0, latency: 0, bandwidth: 0, width: 640, height: 480, reconnectAttempts: 0, maxReconnectAttempts: 5,
+    displayPauseAvailable: true, displayPaused: true, idlePreviewState: 'off', idlePreviewUpdatedAt: null,
+  };
+  const second = { ...first, id: 'two', displayPaused: false, displayPauseAvailable: false,
+    displayPauseUnavailableReason: 'Server declined display suppression.' };
+  useSessionStore.getInitialState().sessions = new Map([['one', first], ['two', second]]);
+  useSessionStore.getInitialState().activeSessionId = 'two';
+  const render = (path: string) => renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: [path] }, createElement(StatusBar)));
+  expect(render('/session/one')).toContain('Resume live');
+  expect(render('/session/one')).toContain('Last update unknown');
+  expect(render('/session/two')).toContain('aria-disabled="true"');
+  expect(render('/session/two')).toContain('Server declined display suppression.');
+  expect(render('/session/two')).not.toContain('Resume live');
+  expect(render('/')).not.toContain('Pause display');
+  first.displayPaused = false;
+  expect(render('/session/one')).toContain('Pause display');
+  expect(render('/session/one')).not.toContain('Last update unknown');
 });
 
 it('reclaims the row for valid pending and existing sessions but keeps normal chrome outside them', () => {
