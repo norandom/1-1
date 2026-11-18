@@ -16,6 +16,7 @@ import {
 } from '../../lib/canvas-compositor';
 import type { SessionStatus } from '../../types';
 import { subscribeCanvasWheel } from './canvas-wheel';
+import { createHeldButtons } from '../../lib/mouse-capture';
 
 interface MouseSurfaceBounds {
   rect: DOMRect;
@@ -293,8 +294,23 @@ export function SessionCanvas({
     };
   }, []);
 
+  // Buttons the remote has seen pressed. Pointer capture keeps a drag's
+  // movement and release on the canvas when the pointer crosses its edge, so
+  // edge coordinates reach the host (window snapping) and the drag ends there.
+  const heldButtonsRef = useRef(createHeldButtons());
+
+  const releaseHeldButtons = useCallback(() => {
+    const bounds = getMouseBounds();
+    for (const release of heldButtonsRef.current.drain()) {
+      if (bounds) {
+        onMouseUp(new MouseEvent('mouseup', release), bounds);
+      }
+    }
+  }, [getMouseBounds, onMouseUp]);
+
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
+      heldButtonsRef.current.move(e);
       const bounds = getMouseBounds();
       if (bounds) {
         onMouseMove(e.nativeEvent, bounds);
@@ -305,6 +321,7 @@ export function SessionCanvas({
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      heldButtonsRef.current.press(e.button, e);
       const bounds = getMouseBounds();
       if (bounds) {
         onMouseDown(e.nativeEvent, bounds);
@@ -316,6 +333,7 @@ export function SessionCanvas({
 
   const handleMouseUp = useCallback(
     (e: React.MouseEvent) => {
+      heldButtonsRef.current.release(e.button, e);
       const bounds = getMouseBounds();
       if (bounds) {
         onMouseUp(e.nativeEvent, bounds);
@@ -323,6 +341,29 @@ export function SessionCanvas({
     },
     [getMouseBounds, onMouseUp]
   );
+
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType !== 'mouse') return;
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // The pointer may already be gone; the release fallback still applies.
+    }
+  }, []);
+
+  // A capture can end without a release reaching the canvas. The ordinary
+  // mouseup is dispatched in the same task, so check after it.
+  const handleLostPointerCapture = useCallback(() => {
+    window.setTimeout(() => {
+      if (heldButtonsRef.current.pressed) releaseHeldButtons();
+    }, 0);
+  }, [releaseHeldButtons]);
+
+  useEffect(() => {
+    // Switching away mid-drag (Alt+Tab, a local dialog) never delivers the release.
+    window.addEventListener('blur', releaseHeldButtons);
+    return () => window.removeEventListener('blur', releaseHeldButtons);
+  }, [releaseHeldButtons]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -396,6 +437,8 @@ export function SessionCanvas({
             onMouseMove={handleMouseMove}
             onMouseDown={handleMouseDown}
             onMouseUp={handleMouseUp}
+            onPointerDown={handlePointerDown}
+            onLostPointerCapture={handleLostPointerCapture}
           />
           {displayStalled && (
             <div role="alert" className="absolute top-3 left-3 right-3 flex items-center justify-between gap-3 rounded bg-amber-950 px-4 py-3 text-white">
