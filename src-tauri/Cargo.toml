@@ -1,6 +1,6 @@
 [package]
 name = "rdp-client"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 description = "1-1 is a remote desktop client for Windows, macOS, and Linux."
 authors = ["you"]
 license = "MIT"
