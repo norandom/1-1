@@ -43,6 +43,12 @@ After installation, 1-1 checks the preview update feed once per launch and from 
 
 No release yet, or you want to build your own installer? See [Build from source](#build-from-source).
 
+## Unsigned builds, warnings, donations
+
+I do not hold a Windows or macOS developer certificate, so the installers are not Authenticode-signed and the macOS build is not notarized. Expect Windows SmartScreen ("Windows protected your PC", click "More info" then "Run anyway") and the macOS Gatekeeper warning (right-click the app and choose "Open"). That is normal for an unsigned build, not a sign of malware. Every installer's SHA-256 hash is listed in the release manifest, so you can verify what you downloaded before running it. The update-feed signatures described under [Build from source](#build-from-source) are separate and do not change any of this.
+
+No donations, please. This is just a fork, shared as is with no warranty and no support. If you want to support RDP client development financially, support upstream [Drift](https://github.com/CREVIOS/drift-rdp) instead.
+
 ## Why this fork
 
 I used RoyalTS for a long time and eventually had enough of it: the splash screen is slow, it crashes on Windows, bandwidth use never got optimized, and development moved too slowly for my taste. So I forked Drift and added what I was missing.
