@@ -1,7 +1,7 @@
-import { useMemo } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Library as LibraryIcon } from 'lucide-react';
+import { ChevronsLeft, Library as LibraryIcon } from 'lucide-react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useLibraryStore } from '../../stores/libraryStore';
@@ -11,6 +11,16 @@ import {
   nextSidebarCollapsed,
   railToggleButtonName,
 } from '../../lib/tree-rail';
+import {
+  SIDEBAR_DEFAULT_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  SIDEBAR_STRIP_WIDTH,
+  clampSidebarWidth,
+  draggedSidebarWidth,
+  sidebarOuterWidth,
+  sidebarWidthForKey,
+} from '../../lib/sidebar-layout';
 import { ConnectionTree } from './ConnectionTree';
 import { NewLibraryDialog } from './NewLibraryDialog';
 import { Button } from '@/components/ui/button';
@@ -30,9 +40,6 @@ import { cn } from '@/lib/utils';
  * live in libraryStore and the preference persists through
  * AppSettings.sidebarCollapsed (RAIL_STATE_PINS).
  */
-
-const EXPANDED_WIDTH = 260;
-const COLLAPSED_WIDTH = 72;
 
 function SettingsIcon({ size = 20, className }: { size?: number; className?: string }) {
   return (
@@ -67,7 +74,28 @@ export function Sidebar() {
   const location = useLocation();
   const navigate = useNavigate();
   const collapsed = useSettingsStore((s) => s.settings.sidebarCollapsed);
+  const hidden = useSettingsStore((s) => s.settings.sidebarHidden);
+  const savedWidth = useSettingsStore((s) => s.settings.sidebarWidth);
   const updateSettings = useSettingsStore((s) => s.updateSettings);
+
+  // The dragged width shows immediately and stays until its save returns.
+  const [pendingWidth, setPendingWidth] = useState<number | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const dragStart = useRef<{ x: number; width: number } | null>(null);
+  const expandedWidth = pendingWidth ?? clampSidebarWidth(savedWidth);
+  const persistWidth = async (width: number): Promise<void> => {
+    setPendingWidth(width);
+    await updateSettings({ sidebarWidth: width });
+    setPendingWidth((current) => (current === width ? null : current));
+  };
+  const endDrag = (clientX?: number): void => {
+    const start = dragStart.current;
+    if (!start) return;
+    dragStart.current = null;
+    setDragging(false);
+    const width = clientX === undefined ? expandedWidth : draggedSidebarWidth(start.width, start.x, clientX);
+    void persistWidth(width);
+  };
 
   const sessions = useSessionStore((s) => s.sessions);
   const tree = useLibraryStore((s) => s.tree);
@@ -86,14 +114,67 @@ export function Sidebar() {
     updateSettings({ sidebarCollapsed: nextSidebarCollapsed(collapsed) });
   };
 
+  if (hidden) {
+    // A thin strip at the window edge keeps the sidebar one click away.
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="Show sidebar"
+            className="h-full shrink-0 border-r border-[var(--color-border)] bg-[var(--color-surface-1)] outline-none transition-colors hover:bg-[var(--color-accent)] focus-visible:bg-[var(--color-accent)]"
+            style={{ width: SIDEBAR_STRIP_WIDTH }}
+            onClick={() => updateSettings({ sidebarHidden: false })}
+          />
+        </TooltipTrigger>
+        <TooltipContent side="right" sideOffset={8}>
+          Show sidebar
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
   return (
     <motion.aside
       initial={false}
-      animate={{ width: collapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH }}
-      transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
-      className="flex flex-col shrink-0 border-r border-[var(--color-border)] bg-[var(--color-surface-1)] overflow-hidden"
+      animate={{ width: sidebarOuterWidth({ hidden, collapsed, width: expandedWidth }) }}
+      transition={dragging ? { duration: 0 } : { duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
+      className="relative flex flex-col shrink-0 border-r border-[var(--color-border)] bg-[var(--color-surface-1)] overflow-hidden"
       style={{ height: '100%' }}
     >
+      {!collapsed && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          aria-valuemin={SIDEBAR_MIN_WIDTH}
+          aria-valuemax={SIDEBAR_MAX_WIDTH}
+          aria-valuenow={expandedWidth}
+          tabIndex={0}
+          title="Drag to resize. Double-click to reset."
+          className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize outline-none transition-colors hover:bg-[var(--color-accent)] focus-visible:bg-[var(--color-accent)]"
+          onPointerDown={(e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            dragStart.current = { x: e.clientX, width: expandedWidth };
+            setDragging(true);
+          }}
+          onPointerMove={(e) => {
+            const start = dragStart.current;
+            if (start) setPendingWidth(draggedSidebarWidth(start.width, start.x, e.clientX));
+          }}
+          onPointerUp={(e) => endDrag(e.clientX)}
+          onLostPointerCapture={() => endDrag()}
+          onDoubleClick={() => void persistWidth(SIDEBAR_DEFAULT_WIDTH)}
+          onKeyDown={(e) => {
+            const next = sidebarWidthForKey(expandedWidth, e.key);
+            if (next === null) return;
+            e.preventDefault();
+            void persistWidth(next);
+          }}
+        />
+      )}
       {/* Brand */}
       <div className="flex items-center gap-3.5 px-5 py-6 shrink-0">
         <div className="flex items-center justify-center w-10 h-10 rounded-xl shrink-0 shadow-md overflow-hidden">
@@ -197,21 +278,38 @@ export function Sidebar() {
             <span className="text-[13px] font-semibold">Settings</span>
           </Button>
         )}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              aria-label={toggleName}
-              className="w-full justify-center rounded-xl py-2.5"
-              onClick={toggleCollapse}
-            >
-              {collapsed ? <CollapseRightIcon /> : <CollapseLeftIcon />}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="right" sideOffset={8}>
-            {toggleName}
-          </TooltipContent>
-        </Tooltip>
+        <div className={cn('flex gap-1', collapsed ? 'flex-col' : 'flex-row')}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                aria-label={toggleName}
+                className="flex-1 justify-center rounded-xl py-2.5"
+                onClick={toggleCollapse}
+              >
+                {collapsed ? <CollapseRightIcon /> : <CollapseLeftIcon />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>
+              {toggleName}
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                aria-label="Hide sidebar"
+                className="flex-1 justify-center rounded-xl py-2.5"
+                onClick={() => updateSettings({ sidebarHidden: true })}
+              >
+                <ChevronsLeft size={18} />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>
+              Hide sidebar
+            </TooltipContent>
+          </Tooltip>
+        </div>
       </div>
     </motion.aside>
   );

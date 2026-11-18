@@ -124,6 +124,10 @@ export interface AppSettings {
   autoHideStatusBar: boolean;
   showPerformanceHud: boolean;
   sidebarCollapsed: boolean;
+  /** Hidden behind a thin strip at the left edge; overrides the rail. */
+  sidebarHidden: boolean;
+  /** Expanded sidebar width in CSS pixels (200-480). */
+  sidebarWidth: number;
   defaultResolution: string;
   colorDepth: number;
   quality: number;

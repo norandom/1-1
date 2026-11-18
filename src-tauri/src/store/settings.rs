@@ -18,6 +18,12 @@ pub struct AppSettings {
     pub show_performance_hud: bool,
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    /// The sidebar is hidden behind a thin strip at the window edge.
+    #[serde(default)]
+    pub sidebar_hidden: bool,
+    /// Expanded sidebar width in CSS pixels, clamped to the supported range.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u16,
     #[serde(default = "default_resolution")]
     pub default_resolution: String,
     #[serde(default = "default_color_depth")]
@@ -40,6 +46,12 @@ fn default_port() -> u16 {
 
 fn default_true() -> bool {
     true
+}
+
+pub const SIDEBAR_WIDTH_RANGE: std::ops::RangeInclusive<u16> = 200..=480;
+
+fn default_sidebar_width() -> u16 {
+    260
 }
 
 fn default_resolution() -> String {
@@ -71,6 +83,8 @@ impl Default for AppSettings {
             auto_hide_status_bar: false,
             show_performance_hud: false,
             sidebar_collapsed: false,
+            sidebar_hidden: false,
+            sidebar_width: default_sidebar_width(),
             default_resolution: default_resolution(),
             color_depth: default_color_depth(),
             quality: default_quality(),
@@ -92,6 +106,8 @@ pub struct AppSettingsPatch {
     pub auto_hide_status_bar: Option<bool>,
     pub show_performance_hud: Option<bool>,
     pub sidebar_collapsed: Option<bool>,
+    pub sidebar_hidden: Option<bool>,
+    pub sidebar_width: Option<u16>,
     pub default_resolution: Option<String>,
     pub color_depth: Option<u32>,
     pub quality: Option<u32>,
@@ -163,6 +179,13 @@ impl SettingsStore {
         }
         if let Some(sidebar_collapsed) = patch.sidebar_collapsed {
             settings.sidebar_collapsed = sidebar_collapsed;
+        }
+        if let Some(sidebar_hidden) = patch.sidebar_hidden {
+            settings.sidebar_hidden = sidebar_hidden;
+        }
+        if let Some(sidebar_width) = patch.sidebar_width {
+            settings.sidebar_width =
+                sidebar_width.clamp(*SIDEBAR_WIDTH_RANGE.start(), *SIDEBAR_WIDTH_RANGE.end());
         }
         if let Some(default_resolution) = patch.default_resolution {
             settings.default_resolution = default_resolution;
@@ -266,6 +289,8 @@ mod tests {
         assert!(d.auto_reconnect);
         assert!(!d.show_performance_hud);
         assert!(!d.sidebar_collapsed);
+        assert!(!d.sidebar_hidden);
+        assert_eq!(d.sidebar_width, 260);
         assert_eq!(d.default_resolution, "1920x1080");
         assert_eq!(d.color_depth, 32);
         assert_eq!(d.quality, 80);
@@ -275,6 +300,26 @@ mod tests {
         // equals this value; parity is pinned on both sides of the mirror
         // (settingsStore.test.ts BACKEND_DEFAULTS).
         assert_eq!(d.connection_timeout, 30000);
+    }
+
+    #[tokio::test]
+    async fn sidebar_layout_persists_and_clamps_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf());
+        let patch: AppSettingsPatch =
+            serde_json::from_str(r#"{"sidebarHidden":true,"sidebarWidth":9000}"#).unwrap();
+        let saved = store.apply(patch).await.unwrap();
+        assert!(saved.sidebar_hidden);
+        assert_eq!(saved.sidebar_width, 480);
+        let narrow: AppSettingsPatch = serde_json::from_str(r#"{"sidebarWidth":20}"#).unwrap();
+        assert_eq!(store.apply(narrow).await.unwrap().sidebar_width, 200);
+        let reopened = SettingsStore::new(dir.path().to_path_buf()).get().await;
+        assert!(reopened.sidebar_hidden);
+        assert_eq!(reopened.sidebar_width, 200);
+        // Files written before these fields existed load the defaults.
+        let legacy: AppSettings = serde_json::from_str(r#"{"sidebarCollapsed":true}"#).unwrap();
+        assert!(!legacy.sidebar_hidden);
+        assert_eq!(legacy.sidebar_width, 260);
     }
 
     #[tokio::test]

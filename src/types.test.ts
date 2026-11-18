@@ -74,6 +74,8 @@ describe('Type definitions', () => {
       autoHideStatusBar: false,
       showPerformanceHud: false,
       sidebarCollapsed: false,
+      sidebarHidden: false,
+      sidebarWidth: 260,
       defaultResolution: '1920x1080',
       colorDepth: 32,
       quality: 80,
