@@ -9,6 +9,7 @@ use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 
 use crate::rdp::clipboard::SessionClipboardBackend;
 use crate::rdp::network_metrics::{MeasuredStream, NetworkCounters};
+use crate::rdp::peer_identity::{self, ConnectionTarget};
 use crate::store::connections::ConnectionConfig;
 
 /// Commands that can be sent to a running session actor.
@@ -109,11 +110,12 @@ pub enum ConnectionOutcome {
 }
 
 /// Attempt a TCP connection to the RDP server.
-pub async fn tcp_connect(host: &str, port: u16) -> Result<TcpStream, RdpError> {
+async fn tcp_connect(target: &ConnectionTarget<'_>) -> Result<TcpStream, RdpError> {
+    let (host, port) = target.socket_target();
     let addr = format!("{}:{}", host, port);
     let stream = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        TcpStream::connect(&addr),
+        TcpStream::connect((host, port)),
     )
     .await
     .map_err(|_| RdpError(format!("TCP connection to {} timed out", addr)))?
@@ -300,7 +302,7 @@ pub(crate) fn active_stage_from_connection_result(
 /// Follows the exact same pattern as the official IronRDP client:
 /// 1. TCP connect
 /// 2. connect_begin (X.224 negotiation)
-/// 3. TLS upgrade via ironrdp_tls::upgrade (preserving leftover bytes)
+/// 3. TLS upgrade and peer identity check on this socket
 /// 4. connect_finalize (CredSSP/NLA + MCS/licensing/capabilities)
 pub async fn attempt_rdp_connection(
     config: &ConnectionConfig,
@@ -310,8 +312,12 @@ pub async fn attempt_rdp_connection(
 ) -> ConnectionOutcome {
     let password = password.unwrap_or_default();
 
-    // Step 1: TCP connect
-    let tcp_stream = match tcp_connect(&config.host, config.port).await {
+    // Use the same DNS/IP destination for dialing and TLS name validation.
+    let target = match ConnectionTarget::new(&config.host, config.port) {
+        Ok(target) => target,
+        Err(e) => return ConnectionOutcome::Failed(format!("Invalid RDP endpoint: {e}")),
+    };
+    let tcp_stream = match tcp_connect(&target).await {
         Ok(s) => s,
         Err(e) => {
             log::warn!("TCP connection failed: {}", e);
@@ -354,78 +360,25 @@ pub async fn attempt_rdp_connection(
 
     log::info!("RDP X.224 negotiation complete, upgrading to TLS...");
 
-    // Step 3: TLS upgrade — following the official IronRDP client pattern exactly:
-    // 1) Extract stream AND leftover bytes from framed
-    // 2) Pass stream to ironrdp_tls::upgrade
-    // 3) Reconstruct framed with leftover bytes preserved
-    let (initial_stream, leftover_bytes) = framed.into_inner();
-    log::info!(
-        "Starting TLS handshake (leftover={} bytes, server_name='{}')...",
-        leftover_bytes.len(),
-        config.host
-    );
-
-    // Use a dummy DNS name for TLS SNI when connecting via IP address,
-    // since rustls ServerName::try_from may fail or cause issues with raw IPs.
-    // Certificate verification is disabled anyway (NoCertificateVerification).
-    let tls_server_name = if config.host.parse::<std::net::IpAddr>().is_ok() {
-        "rdp-server"
-    } else {
-        &config.host
+    let stream = match peer_identity::take_upgrade_stream(framed) {
+        Ok(stream) => stream,
+        Err(e) => return ConnectionOutcome::Failed(format!("RDP negotiation failed: {e}")),
     };
-    log::info!(
-        "Using TLS server name: '{}' (original host: '{}')",
-        tls_server_name,
-        config.host
-    );
-
-    // Run TLS in a separate spawned task so timeout can actually cancel it.
-    // The TLS handshake can block the executor, preventing tokio::time::timeout from working.
-    let tls_name = tls_server_name.to_string();
-    let tls_handle = tokio::spawn(async move { do_tls_upgrade(initial_stream, &tls_name).await });
-
-    let tls_result = tokio::time::timeout(std::time::Duration::from_secs(15), tls_handle).await;
-
-    let (tls_stream, tls_cert) = match tls_result {
-        Ok(Ok(Ok(result))) => {
-            log::info!("TLS handshake completed successfully");
-            result
-        }
-        Ok(Ok(Err(e))) => {
-            log::warn!("TLS upgrade failed: {}", e);
-            return ConnectionOutcome::Failed(format!("TLS upgrade failed: {}", e));
-        }
-        Ok(Err(e)) => {
-            log::warn!("TLS task panicked: {}", e);
-            return ConnectionOutcome::Failed(format!("TLS task panicked: {}", e));
-        }
-        Err(_) => {
-            log::warn!("TLS upgrade timed out after 15 seconds");
-            return ConnectionOutcome::Failed("TLS upgrade timed out".to_string());
-        }
+    let tls = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        peer_identity::handshake(stream, &target.endpoint),
+    )
+    .await
+    {
+        Ok(Ok(tls)) => tls,
+        Ok(Err(e)) => return ConnectionOutcome::Failed(format!("TLS upgrade failed: {e}")),
+        Err(_) => return ConnectionOutcome::Failed("TLS upgrade timed out".to_string()),
     };
-
-    // Extract server public key from certificate (needed for CredSSP)
-    let server_public_key = match ironrdp_tls::extract_tls_server_public_key(&tls_cert) {
-        Some(key) => key.to_vec(),
-        None => {
-            log::warn!("Failed to extract server public key from TLS certificate");
-            return ConnectionOutcome::Failed(
-                "Failed to extract server public key from TLS certificate".to_string(),
-            );
-        }
-    };
-
-    log::info!(
-        "Server public key extracted ({} bytes)",
-        server_public_key.len()
-    );
-
-    // Step 4: Mark as upgraded, create type-erased framed with leftover bytes
+    // An ordinary desktop permits self-signed hosts. Consumers of authenticated
+    // identity call SignedTls::verify before releasing credentials or a share.
+    let (tls_stream, server_public_key) = tls.into_parts();
     let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
-
-    // Create framed over TLS stream, preserving any leftover bytes
-    let mut tls_framed = TokioFramed::new_with_leftover(tls_stream, leftover_bytes);
+    let mut tls_framed = TokioFramed::new(tls_stream);
 
     let server_name = ServerName::new(config.host.clone());
     let mut network_client = ReqwestNetworkClient::new();
@@ -472,122 +425,6 @@ pub async fn attempt_rdp_connection(
         framed: Box::new(tls_framed),
         network_counters,
         codec_policy,
-    }
-}
-
-/// Manual TLS upgrade with step-by-step logging to diagnose where it hangs.
-async fn do_tls_upgrade<S>(
-    stream: S,
-    server_name: &str,
-) -> std::io::Result<(ironrdp_tls::TlsStream<S>, x509_cert::Certificate)>
-where
-    S: Unpin + tokio::io::AsyncRead + tokio::io::AsyncWrite,
-{
-    use tokio::io::AsyncWriteExt;
-    use tokio_rustls::rustls;
-    use tokio_rustls::rustls::pki_types::ServerName as RustlsServerName;
-
-    log::info!("[TLS] Step 1: Building rustls config...");
-    // The ring CryptoProvider is pinned on this ClientConfig instead of
-    // relying on a process-wide install (B3-15): the connector path is
-    // standalone-usable headless — the Tauri entrypoint's install_default is
-    // neither required nor disturbed by this (same provider either way).
-    let mut config = rustls::client::ClientConfig::builder_with_provider(std::sync::Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("ring CryptoProvider with safe default protocol versions")
-    .dangerous()
-    .with_custom_certificate_verifier(std::sync::Arc::new(NoCertVerifier))
-    .with_no_client_auth();
-    config.key_log = std::sync::Arc::new(rustls::KeyLogFile::new());
-    config.resumption = rustls::client::Resumption::disabled();
-    let config = std::sync::Arc::new(config);
-
-    log::info!("[TLS] Step 2: Parsing server name '{}'...", server_name);
-    let domain =
-        RustlsServerName::try_from(server_name.to_owned()).map_err(std::io::Error::other)?;
-    log::info!("[TLS] Step 3: ServerName parsed OK: {:?}", domain);
-
-    log::info!("[TLS] Step 4: Starting TLS handshake (TlsConnector::connect)...");
-    let mut tls_stream = tokio_rustls::TlsConnector::from(config)
-        .connect(domain, stream)
-        .await?;
-    log::info!("[TLS] Step 5: TLS handshake COMPLETED! Flushing...");
-
-    tls_stream.flush().await?;
-    log::info!("[TLS] Step 6: Flush done. Extracting certificate...");
-
-    let tls_cert = {
-        use x509_cert::der::Decode as _;
-        let cert = tls_stream
-            .get_ref()
-            .1
-            .peer_certificates()
-            .and_then(|certs| certs.first())
-            .ok_or_else(|| std::io::Error::other("peer certificate is missing"))?;
-        x509_cert::Certificate::from_der(cert).map_err(std::io::Error::other)?
-    };
-    log::info!("[TLS] Step 7: Certificate extracted OK");
-
-    Ok((tls_stream, tls_cert))
-}
-
-/// NoCertificateVerification for RDP self-signed certs.
-#[derive(Debug)]
-struct NoCertVerifier;
-
-impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoCertVerifier {
-    fn verify_server_cert(
-        &self,
-        _: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
-        _: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
-        _: &tokio_rustls::rustls::pki_types::ServerName<'_>,
-        _: &[u8],
-        _: tokio_rustls::rustls::pki_types::UnixTime,
-    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
-    {
-        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
-        _: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<
-        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
-        tokio_rustls::rustls::Error,
-    > {
-        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
-        _: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<
-        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
-        tokio_rustls::rustls::Error,
-    > {
-        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
-        use tokio_rustls::rustls::SignatureScheme::*;
-        vec![
-            RSA_PKCS1_SHA1,
-            ECDSA_SHA1_Legacy,
-            RSA_PKCS1_SHA256,
-            ECDSA_NISTP256_SHA256,
-            RSA_PKCS1_SHA384,
-            ECDSA_NISTP384_SHA384,
-            RSA_PKCS1_SHA512,
-            ECDSA_NISTP521_SHA512,
-            RSA_PSS_SHA256,
-            RSA_PSS_SHA384,
-            RSA_PSS_SHA512,
-            ED25519,
-            ED448,
-        ]
     }
 }
 

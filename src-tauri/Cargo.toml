@@ -76,6 +76,8 @@ sspi = "=0.23.0"
 # x509-cert aligned with ironrdp-tls 0.3 (extract_tls_server_public_key
 # takes the 0.3 Certificate type).
 x509-cert = "0.3"
+sha2 = "0.10"
+rustls-native-certs = "0.8"
 # aws-lc-rs kept OUT of the Windows build chain: both crates pin the ring
 # provider explicitly and disable the aws-lc-rs defaults.
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
