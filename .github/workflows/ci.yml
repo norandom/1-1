@@ -196,7 +196,9 @@ jobs:
         run: pwsh -NoProfile -File scripts/Invoke-CI.ps1 -Tier rust
         shell: pwsh
       - name: Build Windows installer (NSIS)
-        run: npx tauri build
+        # NSIS only: MSI rejects non-numeric pre-release versions such as
+        # 0.1.0-alpha.4. The preview release workflow builds the same bundle.
+        run: npx tauri build --bundles nsis
         shell: pwsh
       - name: Verify WebView2 bootstrapper mode pinned in bundle config (task 5.1, Req 8.4)
         run: |
