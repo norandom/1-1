@@ -1115,6 +1115,10 @@ try {
         $ctWf -match [regex]::Escape('native macOS') -and
         $ctSpikeBlock -match 'timeout-minutes:'
     } 'CT15i the workflow labels the spike native macOS validation and bounds the job with a timeout (3h cap spirit; runner wait excluded)'
+    Assert-That {
+        $ctSpikeBlock -match [regex]::Escape("if: github.event_name == 'workflow_dispatch' && inputs.macos_cold_launch") -and
+        $ctWf -match '(?ms)^  workflow_dispatch:\s*\n\s+inputs:\s*\n\s+macos_cold_launch:.*?type:\s*boolean.*?default:\s*false'
+    } 'CT15o the spike runs only on a manual dispatch that requests it, defaulting off (user decision 2026-11-18)'
 
     # ─── CT15 run-1 hardening (live run 43077191197, cancelled at the 60-min
     # job timeout): the CR-stripped harness ran from /tmp so dirname-based
