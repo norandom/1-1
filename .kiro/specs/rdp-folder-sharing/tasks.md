@@ -1,9 +1,9 @@
 # Folder sharing implementation plan
 
-All checkboxes are open. Task 1 delivers the server identity check shared with session actions. Task 2 prepares the Windows drive backend. Tasks 3–5 deliver one ordinary RDP share, and task 6 tests the Windows build against the three remote hosts. Each leaf is a focused implementation or test session, estimated at one to three hours.
+Task 1 delivers the server identity check shared with session actions. Task 2 prepares the Windows drive backend. Tasks 3–5 deliver one ordinary RDP share, and task 6 tests the Windows build against the three remote hosts. Each leaf is a focused implementation or test session, estimated at one to three hours.
 
 - [ ] 1. Establish the server identity used by both features
-- [ ] 1.1 Verify the peer on the connection that will use it
+- [x] 1.1 Verify the peer on the connection that will use it
   - Return the observed SHA-256 SPKI and normalized endpoint only after the TLS handshake verifies the server signature and validates the chain and DNS/IP name or a confirmed endpoint pin.
   - Use a credential-free discovery connection to present a candidate key. The actual session or credential test must prove the same identity on its own connection.
   - Fixtures cover valid chain, trusted key, wrong name/port, changed key and bad handshake signature. A discovery result alone conveys no permission.
