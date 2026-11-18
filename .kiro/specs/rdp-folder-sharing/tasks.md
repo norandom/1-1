@@ -17,7 +17,7 @@ Task 1 delivers the server identity check shared with session actions. Task 2 pr
   - _Depends: 1.1_
   - _Requirements: 1.4_
 
-- [ ] 2. Establish the native Windows fixture and dependency lock
+- [x] 2. Establish the native Windows fixture and dependency lock
   - Resolve compatible IronRDP protocol/native drive crates and native folder picker on the current MSVC toolchain. Keep platform-specific dependencies Windows-scoped.
   - Create a disposable directory fixture under the configured project artifact directory. Reuse its sentinels, read-only and writable files, and sparse file with data above 4 GiB in subsequent tests.
   - The locked build can create a single redirected drive and round-trip a decoded request through the upstream completion types in the fixture.

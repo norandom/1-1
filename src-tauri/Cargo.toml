@@ -59,6 +59,7 @@ ironrdp-dvc = "=0.10.0"
 ironrdp-svc = "=0.10.0"
 ironrdp-input = "=0.9.0"
 ironrdp-cliprdr = "=0.9.0"
+ironrdp-rdpdr = "=0.9.0"
 ironrdp-displaycontrol = "=0.10.0"
 # no features: openh264/openh264-bundled/openh264-libloading stay OFF
 # (Req 9.1/9.5 — no H.264 decoder in the build).
@@ -90,6 +91,15 @@ raw-window-handle = "0.6"
 # same-directory staging, atomic replace and failure preservation
 # (src/store/atomic_write.rs). Not a second writer crate.
 tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+ironrdp-rdpdr-native = "=0.9.0"
+# The shell's IFileOpenDialog with FOS_PICKFOLDERS supplies the native folder picker.
+windows = { version = "=0.62.2", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Mark the large-offset fixture sparse before extending the file.
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
 
 [dev-dependencies]
 # Tokio "full" does not include test-util; paused-clock tests (task 3.2) need it.

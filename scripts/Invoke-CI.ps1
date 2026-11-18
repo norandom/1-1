@@ -607,8 +607,14 @@ function Invoke-RustTest {
         $nextestArgs = New-DriftNextestRunArguments -ConfigPath $nextestConfigPath -ManifestPath $ManifestPath -Profile $NextestProfile
         [Console]::WriteLine("nextest: cargo-nextest $($nextestArgs -join ' ')")
         $stepStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $nextestOutputLines = @(& $nextestCommand.Source @nextestArgs 2>&1 | ForEach-Object { "$_" })
-        $nextestExit = $LASTEXITCODE
+        $previousTestArtifacts = $env:DRIFT_RUST_TEST_ARTIFACT_DIR
+        try {
+            $env:DRIFT_RUST_TEST_ARTIFACT_DIR = (Get-Item -LiteralPath $reportDir).FullName
+            $nextestOutputLines = @(& $nextestCommand.Source @nextestArgs 2>&1 | ForEach-Object { "$_" })
+            $nextestExit = $LASTEXITCODE
+        } finally {
+            $env:DRIFT_RUST_TEST_ARTIFACT_DIR = $previousTestArtifacts
+        }
         $stepStopwatch.Stop()
         $nextestOutputLines | Set-Content -LiteralPath (Join-Path $reportDir 'nextest-output.txt') -Encoding utf8
         $nextestSummary = [string](@($nextestOutputLines | Where-Object { $_ -match '^\s*Summary' } | Select-Object -Last 1))
