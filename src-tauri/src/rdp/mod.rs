@@ -3,6 +3,7 @@ pub mod client;
 pub mod clipboard;
 pub mod clipboard_payload;
 pub mod codec_policy;
+pub(crate) mod credential_probe;
 pub mod display;
 /// Task 9.2 (Req 4.1/4.2/9.2/9.4): EGFX adapter — registers the upstream
 /// `GraphicsPipelineClient` on the DRDYNVC DVC and connects the upstream
