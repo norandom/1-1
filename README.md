@@ -129,13 +129,13 @@ The helper keeps frontend assets under `D:\BuildArtifacts` and embeds them throu
 
 Updatable releases need `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Local builds can use the persistent private key and DPAPI-protected password under `%LOCALAPPDATA%\1-1-release-signing`. Back that key up, because losing it breaks updates for installed clients, and never commit or publish it. These update signatures are separate from Authenticode and macOS signing and do not guarantee download reputation.
 
-Version tags trigger `.github/workflows/preview-build.yml`: Windows x64 and ARM64 NSIS, macOS Apple Silicon DMG, and Linux x64 AppImage via Dagger. Stage each signed installer with its `.sig` and `build-info.json` in a folder named `windows-x86_64`, `windows-aarch64`, `darwin-aarch64`, or `linux-x86_64`, then create the feed:
+Version tags trigger `.github/workflows/preview-build.yml`: Windows x64 and ARM64 NSIS, macOS Apple Silicon DMG, and Linux x64 AppImage plus `.deb` via Dagger. Stage each signed installer with its `.sig` and `build-info.json` in a folder named `windows-x86_64`, `windows-aarch64`, `darwin-aarch64`, or `linux-x86_64`, then create the feed:
 
 ```bash
 node scripts/update-manifest.mjs VERSION ASSET_DIRECTORY OUTPUT_JSON
 ```
 
-Upload the immutable installer assets to the matching version release first, then publish the verified manifest as `latest.json` on the `preview-channel` prerelease. Never replace a published installer under an existing version; check its uploaded digest before touching the feed.
+Upload the immutable installer assets to the matching version release first, then publish the verified manifest as `latest.json` on the `preview-channel` prerelease. Never replace a published installer under an existing version; check its uploaded digest before touching the feed. Attach the Linux `.deb` to the version release as a download only: the updater replaces the AppImage, and a package install updates through a newer `.deb`.
 
 ## Architecture
 

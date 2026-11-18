@@ -489,7 +489,12 @@ export class Drift {
     return done.directory("/test-results")
   }
 
-  /** Sign the verified Linux AppImage for preview updates; no runtime test. */
+  /**
+   * Release assets for Linux x64, no runtime test: the AppImage signed for
+   * preview updates (with its build-info.json), plus the verified .deb for
+   * package installs. The updater offers only the AppImage; a .deb cannot
+   * replace itself, so it is a download, not a feed entry.
+   */
   @func()
   async linuxPreview(source: Directory, signingKey: Secret, signingPassword: Secret): Promise<Directory> {
     const done = await this.linuxBundleBuildContainer(source)
@@ -497,8 +502,9 @@ export class Drift {
       .withSecretVariable("TAURI_SIGNING_PRIVATE_KEY", signingKey)
       .withSecretVariable("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", signingPassword)
       .withExec(["sh", "-c", 'set -e; for asset in /test-results/bundle/appimage/*.AppImage; do node node_modules/@tauri-apps/cli/tauri.js signer sign "$asset"; test -s "$asset.sig"; node scripts/write-build-info.mjs x86_64-unknown-linux-gnu "$asset"; done'])
+      .withExec(["sh", "-c", 'set -e; mkdir -p /test-results/release; cp /test-results/bundle/appimage/* /test-results/release/; deb=$(ls /test-results/bundle/deb/*.deb); test -s "$deb"; cp "$deb" /test-results/release/'])
     await signed.sync()
-    return signed.directory("/test-results/bundle/appimage")
+    return signed.directory("/test-results/release")
   }
 
   /**
