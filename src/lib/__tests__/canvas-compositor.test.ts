@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   compositeFrameRects,
   fitSurfaceToContainer,
+  prepareCanvasSurface,
   unionDirtyRect,
   type CompositingSurface,
 } from '../canvas-compositor';
@@ -15,6 +16,33 @@ function makeSurface(width: number, height: number): CompositingSurface {
     dirty: null,
   };
 }
+
+it('keeps a painted canvas through size announcements until a replacement frame supplies pixels', () => {
+  vi.stubGlobal('ImageData', class {
+    data: Uint8ClampedArray;
+    constructor(width: number, height: number) {
+      this.data = new Uint8ClampedArray(width * height * 4);
+    }
+  });
+  try {
+    const initial = prepareCanvasSurface(null, 2, 1, 'session-info');
+    const placeholder = prepareCanvasSurface(initial, 3, 1, 'session-info');
+    expect(placeholder.width).toBe(3);
+    const previous = prepareCanvasSurface(placeholder, 3, 1, 'frame');
+    previous.pixels.fill(42);
+    const waiting = prepareCanvasSurface(previous, 1, 2, 'session-info');
+    expect(waiting).toBe(previous);
+    expect([...waiting.pixels]).toEqual(Array(12).fill(42));
+    const next = prepareCanvasSurface(waiting, 1, 2, 'frame');
+    compositeFrameRects(next, [{ x: 0, y: 0, width: 1, height: 2, pixels: new Uint8Array(8).fill(64) }]);
+    expect([next.width, next.height]).toEqual([1, 2]);
+    expect([...next.pixels]).toEqual(Array(8).fill(64));
+    expect(prepareCanvasSurface(next, 3, 1, 'session-info')).toBe(next);
+    expect(prepareCanvasSurface(null, 3, 1, 'session-info').receivedFrame).toBe(false);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 describe('fitSurfaceToContainer', () => {
   it('scales to the limiting axis (letterbox fit)', () => {

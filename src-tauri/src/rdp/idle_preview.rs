@@ -114,16 +114,17 @@ impl IdlePreview {
     pub fn pause_unavailable_reason(&self) -> Option<&'static str> {
         self.pause_unavailable_reason
     }
-}
+    pub fn manual_redraw_deadline(&self) -> Option<Instant> {
+        self.manual
+            .as_ref()?
+            .redraw_pending
+            .then_some(self.next_transition)
+    }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 1.3 wires resize redraws to the actor")
-)]
-impl IdlePreview {
     pub fn begin_manual_redraw(&mut self, now: Instant) -> Option<DisplayAction> {
         self.manual.as_mut()?.redraw_pending = true;
-        (self.state == IdlePreviewState::Suppressed).then(|| self.open_preview(now))
+        (self.state == IdlePreviewState::Suppressed || now >= self.next_transition)
+            .then(|| self.open_preview(now))
     }
 
     pub fn finish_manual_redraw(&mut self, now: Instant) -> Option<DisplayAction> {

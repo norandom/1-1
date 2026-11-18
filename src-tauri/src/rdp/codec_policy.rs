@@ -2,16 +2,16 @@
 //!
 //! Single source of truth for every graphics capability Drift advertises:
 //!
-//! * [`CodecPolicy::egfx_caps`] — the RDPGFX capability sets advertised when
+//! * [`CodecPolicy::egfx_caps`] â€” the RDPGFX capability sets advertised when
 //!   the EGFX dynamic virtual channel comes up: V10_7/V10_6/V10_4, each with
 //!   `AVC_DISABLED | SMALL_CACHE`, plus the AVC-free V8 fallback (the exact
 //!   set proven against the pinned crate by the task 4.1 probe, checks
 //!   C1/C2/C3). ClearCodec, Planar, Uncompressed and RFX Progressive remain
 //!   server-selectable; no AVC (H.264) variant is ever implied (Req 9.1).
-//! * [`CodecPolicy::early_capability_flags`] — the codec-policy bits of the
+//! * [`CodecPolicy::early_capability_flags`] â€” the codec-policy bits of the
 //!   GCC client early capability flags: `SUPPORT_DYN_VC_GFX_PROTOCOL |
 //!   WANT_32_BPP_SESSION` (Req 9.1).
-//! * [`CodecPolicy::fastpath_bitmap`] — the fast-path bitmap configuration
+//! * [`CodecPolicy::fastpath_bitmap`] â€” the fast-path bitmap configuration
 //!   for sessions without EGFX: 32 bpp, lossless, no surface-command bitmap
 //!   codec advertisement, so the session stays on standard/uncompressed
 //!   bitmap updates (Req 9.3).
@@ -19,11 +19,11 @@
 //! Design-contract type resolution (design.md CodecPolicy L282-292 names were
 //! illustrative; resolved against the pinned crate, nothing invented):
 //!
-//! * `CapsAdvertise` -> `Vec<CapabilitySet>` — the return type upstream's
+//! * `CapsAdvertise` -> `Vec<CapabilitySet>` â€” the return type upstream's
 //!   `GraphicsPipelineHandler::capabilities()` advertises (ironrdp-egfx 0.5).
 //! * `EarlyCapabilityFlags` -> `ClientEarlyCapabilityFlags` (ironrdp-pdu 0.11,
 //!   `ironrdp_pdu::gcc`).
-//! * `BitmapCapabilitySet` -> `ironrdp_connector::BitmapConfig` — the type the
+//! * `BitmapCapabilitySet` -> `ironrdp_connector::BitmapConfig` â€” the type the
 //!   connector's `Config.bitmap` field consumes; the wire `Bitmap` capability
 //!   set is derived from it internally by the connector
 //!   (connection_activation.rs, `CapabilitySet::Bitmap` construction).
@@ -34,9 +34,10 @@
 //! negotiation-time observation, [`ObservedCodec`] the per-update one; the
 //! EGFX adapter (task 9.2) and the error policy (task 9.3) consume both.
 //!
-//! This module contains NO decode logic — it only builds and classifies
+//! This module contains NO decode logic â€” it only builds and classifies
 //! capability/codec values using the pinned upstream types.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use ironrdp_connector::BitmapConfig;
@@ -58,7 +59,7 @@ pub struct CodecPolicy;
 impl CodecPolicy {
     /// Capability sets advertised on the EGFX channel (RDPGFX_CAPS_ADVANCE).
     ///
-    /// V10_7, V10_6 and V10_4 — each `AVC_DISABLED | SMALL_CACHE` — plus the
+    /// V10_7, V10_6 and V10_4 â€” each `AVC_DISABLED | SMALL_CACHE` â€” plus the
     /// AVC-free V8 fallback, most capable first: the server picks the most
     /// capable set it knows, and every modern set here disables AVC, so
     /// ClearCodec, Planar, Uncompressed and RFX Progressive stay selectable
@@ -94,13 +95,13 @@ impl CodecPolicy {
     /// The connector ORs its own base flags and derives the same information
     /// from its config switches (`support_dyn_vc_gfx_protocol` sets
     /// `SUPPORT_DYN_VC_GFX_PROTOCOL`; `bitmap.color_depth == 32` sets
-    /// `WANT_32_BPP_SESSION` — ironrdp-connector 0.12 `create_gcc_blocks`).
+    /// `WANT_32_BPP_SESSION` â€” ironrdp-connector 0.12 `create_gcc_blocks`).
     pub fn early_capability_flags() -> ClientEarlyCapabilityFlags {
         ClientEarlyCapabilityFlags::SUPPORT_DYN_VC_GFX_PROTOCOL
             | ClientEarlyCapabilityFlags::WANT_32_BPP_SESSION
     }
 
-    /// Value for the connector's `support_dyn_vc_gfx_protocol` switch — the
+    /// Value for the connector's `support_dyn_vc_gfx_protocol` switch â€” the
     /// advertisement side of [`Self::early_capability_flags`].
     pub fn support_dyn_vc_gfx_protocol() -> bool {
         Self::early_capability_flags()
@@ -112,7 +113,7 @@ impl CodecPolicy {
     ///
     /// With an empty codec list the connector advertises no
     /// `BitmapCodecs`/`SurfaceCommands` capability sets, keeping the session
-    /// on standard bitmap updates — the fallback whose decoded frames already
+    /// on standard bitmap updates â€” the fallback whose decoded frames already
     /// flow through Drift's existing fast-path bitmap packet pipeline.
     pub fn fastpath_bitmap() -> BitmapConfig {
         BitmapConfig {
@@ -123,7 +124,7 @@ impl CodecPolicy {
     }
 }
 
-/// Which graphics channel a session uses — a NEGOTIATION-time observation
+/// Which graphics channel a session uses â€” a NEGOTIATION-time observation
 /// (what was advertised and confirmed), independent of the codec any single
 /// update carries (design.md "Codec routing": log channel and actual codec
 /// observations separately; EGFX activity alone is not ClearCodec evidence).
@@ -141,14 +142,14 @@ pub enum GraphicsChannel {
         confirmed: Option<CapabilitySet>,
     },
     /// No EGFX: the session runs on standard/uncompressed fast-path bitmap
-    /// updates (the Req 9.3 fallback — [`CodecPolicy::fastpath_bitmap`]).
+    /// updates (the Req 9.3 fallback â€” [`CodecPolicy::fastpath_bitmap`]).
     FastpathBitmap,
 }
 
 impl GraphicsChannel {
     /// Channel selection implied by the negotiation outcome: EGFX is in use
     /// only once the server confirmed a capability set on the graphics
-    /// channel; before that — and whenever EGFX never comes up — the session
+    /// channel; before that â€” and whenever EGFX never comes up â€” the session
     /// stays on the fast-path bitmap route.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn from_confirmed_caps(confirmed: Option<&CapabilitySet>) -> Self {
@@ -175,7 +176,7 @@ impl fmt::Display for GraphicsChannel {
 
 /// A codec this policy allows on the EGFX channel (design.md "Codec
 /// routing"): the supported non-AVC set. "Lack of ClearCodec alone does not
-/// imply lack of EGFX" — the server may select any of these per update.
+/// imply lack of EGFX" â€” the server may select any of these per update.
 ///
 /// Production consumer is the EGFX adapter's observation logging (task 9.2);
 /// until then only the policy tests exercise it.
@@ -205,7 +206,7 @@ impl fmt::Display for SupportedCodec {
 
 /// An AVC (H.264) codec variant. Never advertised by [`CodecPolicy`];
 /// observing one means the server violated the negotiated capabilities and
-/// feeds the terminal error policy (task 9.3, Req 9.6/9.7) — never the
+/// feeds the terminal error policy (task 9.3, Req 9.6/9.7) â€” never the
 /// decode pipeline.
 ///
 /// Production consumer is the EGFX adapter's observation logging (task 9.2);
@@ -231,7 +232,7 @@ impl fmt::Display for AvcVariant {
     }
 }
 
-/// The codec a received EGFX update actually used — a PER-UPDATE observation,
+/// The codec a received EGFX update actually used â€” a PER-UPDATE observation,
 /// distinct from the channel selection ([`GraphicsChannel`]).
 ///
 /// Classified against the policy's allowed set; AVC variants are kept
@@ -247,7 +248,7 @@ impl fmt::Display for AvcVariant {
 pub enum ObservedCodec {
     /// A supported non-AVC codec this policy allows on EGFX.
     Supported(SupportedCodec),
-    /// An AVC (H.264) variant — unadvertised by policy; terminal if observed.
+    /// An AVC (H.264) variant â€” unadvertised by policy; terminal if observed.
     Avc(AvcVariant),
     /// Any other wire codec id outside both sets (e.g. RemoteFx 0x3, Alpha
     /// 0xC), carried with its raw wire value for actionable errors.
@@ -280,7 +281,7 @@ impl ObservedCodec {
         }
     }
 
-    /// True for an AVC (H.264) variant — never advertised by this policy.
+    /// True for an AVC (H.264) variant â€” never advertised by this policy.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_avc(&self) -> bool {
         matches!(self, Self::Avc(_))
@@ -308,27 +309,27 @@ impl fmt::Display for ObservedCodec {
 pub const MAX_CONSECUTIVE_DECODE_FAILURES: u32 = 3;
 
 /// Terminal codec/decode error policy for one session (task 9.3, Req
-/// 9.6/9.7) — the "Codec error policy" boundary between the EGFX pipeline
+/// 9.6/9.7) â€” the "Codec error policy" boundary between the EGFX pipeline
 /// and the session actor.
 ///
 /// One instance per connection, shared as an [`std::sync::Arc`] between the
 /// two places the pinned upstream surface makes codec fate observable
-/// (dependency spike, research.md §"Req 9.6/9.7 hook surfaces"):
+/// (dependency spike, research.md Â§"Req 9.6/9.7 hook surfaces"):
 ///
 /// * the EGFX handler ([`crate::rdp::egfx::DriftGfxHandler`]) reports what
 ///   the pipeline surfaces: unsupported/AVC codec arrivals via
 ///   `GraphicsPipelineHandler::on_unhandled_pdu` (AVC444/AVC444v2 are
-///   forwarded there WITHOUT decoding when no H.264 decoder is configured —
-///   ironrdp-egfx 0.5.0 client.rs L1098–1107) and codec-tagged decoded
+///   forwarded there WITHOUT decoding when no H.264 decoder is configured â€”
+///   ironrdp-egfx 0.5.0 client.rs L1098â€“1107) and codec-tagged decoded
 ///   deliveries via `on_bitmap_updated`;
 /// * the session loop samples the upstream decode-failure counter
-///   (`GraphicsPipelineClient::dropped_updates` — upstream deliberately
+///   (`GraphicsPipelineClient::dropped_updates` â€” upstream deliberately
 ///   CONTINUES past decode failures, counting them in `drop_update`,
-///   client.rs L1211–1230) once per processed PDU and applies the
+///   client.rs L1211â€“1230) once per processed PDU and applies the
 ///   three-consecutive-strikes rule.
 ///
 /// A terminal error is FINAL for the session: the actor publishes an error
-/// status and ends without reconnecting (Req 9.6 — retrying the same
+/// status and ends without reconnecting (Req 9.6 â€” retrying the same
 /// incompatible configuration would repeat the failure); only a fresh
 /// Connect gesture restarts it (task 7.1 admission).
 ///
@@ -348,11 +349,107 @@ pub struct GraphicsObservation {
     pub codecs: Vec<String>,
 }
 
+/// The compositor only emits a rectangle for an effective visible copy. A
+/// mapping can also emit its own rectangle of transparent allocation.
+#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd)]
+pub enum CopyDamage {
+    #[default]
+    None,
+    WithBlankMap,
+    Direct,
+}
+
+pub struct GraphicsActivity {
+    pub bitmap_delivered: bool,
+    pub copy_damage: CopyDamage,
+    pub completed_paint: bool,
+    pub output_reset: bool,
+}
+
+#[derive(Default)]
+struct SurfacePaint {
+    size: (u16, u16),
+    populated: bool,
+    possible_copy: bool,
+    on_desktop: bool,
+}
+
+#[derive(Default)]
+struct DesktopPaints {
+    surfaces: HashMap<u16, SurfacePaint>,
+    visible_changes: HashSet<u16>,
+    // A map itself emits damage, even when it exposes only transparent allocation.
+    blank_map: bool,
+    possible_visible_copy: bool,
+    bounds: Option<(u32, u32)>,
+}
+
+impl DesktopPaints {
+    fn draw(&mut self, id: u16) {
+        if let Some(surface) = self.surfaces.get_mut(&id) {
+            surface.populated = true;
+            if surface.on_desktop {
+                self.visible_changes.insert(id);
+            }
+        }
+    }
+
+    fn copy(&mut self, id: u16, points: &[ironrdp_egfx::pdu::Point]) {
+        if let Some(surface) = self.surfaces.get_mut(&id)
+            && points
+                .iter()
+                .any(|p| p.x < surface.size.0 && p.y < surface.size.1)
+        {
+            // The handler receives requests even for an evicted cache slot or refused
+            // compositor allocation. Only completed output can confirm the copy.
+            surface.possible_copy = true;
+            self.possible_visible_copy |= surface.on_desktop;
+        }
+    }
+
+    fn intersects(&self, id: u16, rect: &ironrdp_pdu::geometry::ExclusiveRectangle) -> bool {
+        self.surfaces.get(&id).is_some_and(|surface| {
+            rect.left < rect.right.min(surface.size.0) && rect.top < rect.bottom.min(surface.size.1)
+        })
+    }
+
+    fn end_frame(&mut self) -> (bool, CopyDamage) {
+        let copy = match (self.possible_visible_copy, self.blank_map) {
+            (false, _) => CopyDamage::None,
+            (true, true) => CopyDamage::WithBlankMap,
+            (true, false) => CopyDamage::Direct,
+        };
+        let painted = !self.visible_changes.is_empty();
+        self.visible_changes.clear();
+        self.blank_map = false;
+        self.possible_visible_copy = false;
+        (painted, copy)
+    }
+
+    fn map(&mut self, id: u16, origin: Option<(u32, u32)>) {
+        if let Some(surface) = self.surfaces.get_mut(&id) {
+            surface.on_desktop =
+                origin.is_some_and(|(x, y)| self.bounds.is_none_or(|(w, h)| x < w && y < h));
+            self.blank_map |= surface.on_desktop && !surface.populated;
+            self.possible_visible_copy |= surface.on_desktop && surface.possible_copy;
+            if surface.on_desktop && surface.populated {
+                self.visible_changes.insert(id);
+            } else {
+                self.visible_changes.remove(&id);
+            }
+        }
+    }
+}
+
 struct PolicyState {
     observation: GraphicsObservation,
+    paints: DesktopPaints,
+    copy_damage: CopyDamage,
+    completed_paint: bool,
+    output_reset: bool,
     /// First terminal error wins; later observations cannot soften it.
     terminal: Option<String>,
-    /// Decoded-bitmap deliveries since the loop's last evaluation — the
+    /// Decoded-bitmap deliveries since the loop's last evaluation â€” the
     /// "successfully decoded frame" signal that resets the strike counter.
     delivered_bitmaps_since_sample: u32,
     /// Upstream `dropped_updates()` at the previous evaluation; `None`
@@ -373,6 +470,10 @@ impl CodecErrorPolicy {
         Self {
             state: std::sync::Mutex::new(PolicyState {
                 observation: GraphicsObservation::default(),
+                paints: DesktopPaints::default(),
+                copy_damage: CopyDamage::None,
+                completed_paint: false,
+                output_reset: false,
                 terminal: None,
                 delivered_bitmaps_since_sample: 0,
                 dropped_baseline: None,
@@ -441,8 +542,8 @@ impl CodecErrorPolicy {
     /// with the codec the server used for it.
     ///
     /// A supported codec marks decode success (the Req 9.7 reset signal).
-    /// An unsupported codec — any AVC variant or a codec outside the
-    /// policy's set — is terminal: Drift advertised exactly the supported
+    /// An unsupported codec â€” any AVC variant or a codec outside the
+    /// policy's set â€” is terminal: Drift advertised exactly the supported
     /// set, so the server is violating the negotiated capabilities, and
     /// design.md L207 requires a terminal actionable error rather than
     /// rendering foreign pixels (Req 9.6).
@@ -467,8 +568,8 @@ impl CodecErrorPolicy {
 
     /// Handler-side: a PDU the pipeline could not handle. For
     /// `WireToSurface1` this is the spike-proven AVC444/AVC444v2 arrival
-    /// path — forwarded BEFORE decode when no H.264 decoder is configured
-    /// — so the terminal fires without any decode attempt (Req 9.6
+    /// path â€” forwarded BEFORE decode when no H.264 decoder is configured
+    /// â€” so the terminal fires without any decode attempt (Req 9.6
     /// "without decoding it"). Non-bitmap PDUs are not codec arrivals and
     /// stay non-terminal (no false session kills on benign oddities such
     /// as a server-side QoE acknowledge).
@@ -481,9 +582,95 @@ impl CodecErrorPolicy {
         }
     }
 
-    /// A bitmap callback can precede the EndFrame that exposes the painted region.
-    pub fn has_bitmap_delivery(&self) -> bool {
-        self.state.lock().unwrap().delivered_bitmaps_since_sample > 0
+    pub fn create_surface(&self, id: u16, size: (u16, u16)) {
+        let mut state = self.state.lock().unwrap();
+        state.paints.visible_changes.remove(&id);
+        state.paints.surfaces.insert(
+            id,
+            SurfacePaint {
+                size,
+                ..Default::default()
+            },
+        );
+    }
+
+    pub fn delete_surface(&self, id: u16) {
+        let mut state = self.state.lock().unwrap();
+        state.paints.visible_changes.remove(&id);
+        state.paints.surfaces.remove(&id);
+    }
+
+    pub fn note_surface_draw(&self, id: u16, rects: &[ironrdp_pdu::geometry::ExclusiveRectangle]) {
+        let mut state = self.state.lock().unwrap();
+        if rects.iter().any(|r| state.paints.intersects(id, r)) {
+            state.paints.draw(id);
+        }
+    }
+
+    pub fn note_surface_copy(&self, pdu: &ironrdp_egfx::pdu::SurfaceToSurfacePdu) {
+        let mut state = self.state.lock().unwrap();
+        if state
+            .paints
+            .intersects(pdu.source_surface_id, &pdu.source_rectangle)
+        {
+            state
+                .paints
+                .copy(pdu.destination_surface_id, &pdu.destination_points);
+        }
+    }
+
+    pub fn note_cached_copy(&self, pdu: &ironrdp_egfx::pdu::CacheToSurfacePdu) {
+        self.state
+            .lock()
+            .unwrap()
+            .paints
+            .copy(pdu.surface_id, &pdu.destination_points);
+    }
+
+    pub fn map_surface(&self, id: u16, desktop_origin: Option<(u32, u32)>) {
+        self.state.lock().unwrap().paints.map(id, desktop_origin);
+    }
+
+    pub fn note_frame_complete(&self) {
+        let mut state = self.state.lock().unwrap();
+        // EndFrame materializes dirty surfaces using their mapping at completion.
+        // A surface can be populated several frames before it is mapped.
+        let (painted, copy) = state.paints.end_frame();
+        state.completed_paint |= painted;
+        state.copy_damage = state.copy_damage.max(copy);
+    }
+
+    pub fn discard_incomplete_frame(&self) {
+        self.state.lock().unwrap().paints.end_frame();
+    }
+
+    pub fn close_graphics(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.paints = DesktopPaints::default();
+        state.copy_damage = CopyDamage::None;
+        state.completed_paint = false;
+    }
+
+    pub fn note_output_reset(&self, width: u32, height: u32) {
+        let mut state = self.state.lock().unwrap();
+        state.output_reset = true;
+        state.copy_damage = CopyDamage::None;
+        state.paints = DesktopPaints {
+            bounds: Some((width, height)),
+            ..Default::default()
+        };
+        state.completed_paint = false;
+    }
+
+    /// A bitmap can arrive in one PDU and composite only at a later EndFrame.
+    pub fn take_graphics_activity(&self) -> GraphicsActivity {
+        let mut state = self.state.lock().unwrap();
+        GraphicsActivity {
+            copy_damage: std::mem::take(&mut state.copy_damage),
+            bitmap_delivered: state.delivered_bitmaps_since_sample > 0,
+            completed_paint: std::mem::take(&mut state.completed_paint),
+            output_reset: std::mem::take(&mut state.output_reset),
+        }
     }
 
     /// Loop-side: evaluate the decode outcome of the PDU batch the session
@@ -493,16 +680,16 @@ impl CodecErrorPolicy {
     /// Semantics (Req 9.7, "three consecutive"):
     /// * first sample establishes the baseline (neutral);
     /// * a rising counter means at least one update in the batch failed to
-    ///   decode — one failure observation (a mixed batch with any drop
+    ///   decode â€” one failure observation (a mixed batch with any drop
     ///   counts as failed, not as success);
     /// * an unchanged counter WITH at least one decoded delivery is a
-    ///   successfully decoded frame — the strike counter resets;
+    ///   successfully decoded frame â€” the strike counter resets;
     /// * an unchanged counter with no EGFX delivery (frame boundaries,
     ///   cache/surface commands, non-graphics PDUs) is neutral;
     /// * three consecutive failure observations are terminal.
     ///
     /// `dropped_updates` is `None` while no graphics pipeline DVC is
-    /// attached (fast-path-only sessions) — then only an already-set
+    /// attached (fast-path-only sessions) â€” then only an already-set
     /// handler terminal can surface.
     pub fn evaluate_decode_outcome(&self, dropped_updates: Option<u64>) -> Option<String> {
         let mut state = self.state.lock().unwrap();
@@ -568,6 +755,44 @@ mod tests {
     /// `capabilities()` returns the CodecPolicy set (the probe's C1 shape).
     struct PolicyCapsHandler;
 
+    #[test]
+    fn completed_paints_follow_the_surface_through_mapping_and_id_reuse() {
+        let policy = CodecErrorPolicy::new();
+        let end = || {
+            policy.note_frame_complete();
+            policy.take_graphics_activity().completed_paint
+        };
+        let pixel = ironrdp_pdu::geometry::ExclusiveRectangle {
+            left: 0,
+            top: 0,
+            right: 1,
+            bottom: 1,
+        };
+        policy.note_output_reset(32, 32);
+        policy.create_surface(1, (32, 32));
+        policy.note_surface_draw(1, std::slice::from_ref(&pixel));
+        assert!(!end());
+        policy.map_surface(1, Some((64, 0)));
+        assert!(!end());
+        policy.map_surface(1, Some((0, 0)));
+        assert!(end());
+        policy.map_surface(1, None); // RemoteApp window.
+        policy.note_surface_draw(1, std::slice::from_ref(&pixel));
+        assert!(!end());
+        policy.map_surface(1, Some((0, 0)));
+        policy.create_surface(1, (32, 32)); // ID reused before presentation.
+        policy.map_surface(1, Some((0, 0)));
+        assert!(!end());
+        policy.note_surface_draw(1, std::slice::from_ref(&pixel));
+        policy.delete_surface(1);
+        assert!(!end());
+        policy.create_surface(1, (32, 32));
+        policy.note_surface_draw(1, std::slice::from_ref(&pixel));
+        policy.note_output_reset(16, 16);
+        policy.map_surface(1, Some((0, 0)));
+        assert!(!end());
+    }
+
     impl GraphicsPipelineHandler for PolicyCapsHandler {
         fn capabilities(&self) -> Vec<CapabilitySet> {
             CodecPolicy::egfx_caps()
@@ -576,7 +801,7 @@ mod tests {
 
     /// Would this capability set let the server pick an AVC codec? Mirrors
     /// upstream `CodecCapabilities::from_capability_set` (ironrdp-egfx
-    /// client.rs) and the advertisement-time filter in `start()` — the same
+    /// client.rs) and the advertisement-time filter in `start()` â€” the same
     /// semantics the task 4.1 probe used for check C1b.
     fn implies_avc(cap: &CapabilitySet) -> bool {
         match cap {
@@ -621,15 +846,15 @@ mod tests {
     }
 
     /// Wrap a GfxPdu the way the server transport delivers it (zfg framing,
-    /// no compression — probe `pdu_to_wire`).
+    /// no compression â€” probe `pdu_to_wire`).
     fn wrap_for_channel(pdu: &GfxPdu, compressor: &mut Compressor) -> Vec<u8> {
         let mut buf = WriteBuf::new();
         encode_buf(pdu, &mut buf).expect("GfxPdu encode");
         compress_and_wrap_egfx(buf.filled(), compressor, CompressionMode::Never).expect("zgfx wrap")
     }
 
-    // Req 9.1: the advertised set is exactly the proven policy set — modern
-    // versions with AVC disabled plus the AVC-free V8 fallback — and no set
+    // Req 9.1: the advertised set is exactly the proven policy set â€” modern
+    // versions with AVC disabled plus the AVC-free V8 fallback â€” and no set
     // implies any AVC variant.
     #[test]
     fn egfx_caps_advertise_supported_codecs_without_avc() {
@@ -674,7 +899,7 @@ mod tests {
     // Req 9.1: through the REAL upstream client, with no H.264 decoder
     // configured, the policy advertisement survives the wire round-trip and
     // a server capability confirm yields non-AVC negotiated codec
-    // capabilities (probe checks C1/C3 — ClearCodec, Planar, Uncompressed
+    // capabilities (probe checks C1/C3 â€” ClearCodec, Planar, Uncompressed
     // and RFX Progressive stay selectable with AVC off).
     #[test]
     fn egfx_caps_advertise_and_confirm_without_avc_through_upstream_client() {
@@ -737,7 +962,7 @@ mod tests {
     }
 
     // Req 9.3: the no-EGFX fallback is a 32bpp lossless fast-path bitmap
-    // config with no bitmap-codec advertisement — standard/uncompressed
+    // config with no bitmap-codec advertisement â€” standard/uncompressed
     // bitmap updates only.
     #[test]
     fn fastpath_bitmap_is_the_no_egfx_fallback() {
@@ -975,7 +1200,7 @@ mod tests {
             "a successful decode resets the failure counter"
         );
 
-        // Two more failures after the reset: still alive (Req 9.7 — only
+        // Two more failures after the reset: still alive (Req 9.7 â€” only
         // CONSECUTIVE failures count).
         assert!(strike(&policy, 3).is_none());
         assert!(strike(&policy, 4).is_none());
@@ -1018,7 +1243,7 @@ mod tests {
         );
         assert!(
             policy.evaluate_decode_outcome(Some(3)).is_some(),
-            "strike 3 (the frame after the neutral windows) is terminal — \
+            "strike 3 (the frame after the neutral windows) is terminal â€” \
              neutrals preserved strikes 1 and 2"
         );
     }

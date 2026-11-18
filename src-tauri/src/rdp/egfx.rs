@@ -1,8 +1,8 @@
 //! Task 9.2 (Req 4.1, 4.2, 9.2, 9.4): EGFX adapter.
 //!
 //! Registers the upstream [`GraphicsPipelineClient`] on the DRDYNVC dynamic
-//! virtual channel — with NO H.264 decoder (`GraphicsPipelineClient::new(
-//! handler, None)`, Req 9.1/9.5 invariant) — so a real server's EGFX channel
+//! virtual channel â€” with NO H.264 decoder (`GraphicsPipelineClient::new(
+//! handler, None)`, Req 9.1/9.5 invariant) â€” so a real server's EGFX channel
 //! creation resolves to a registered processor (the task 9.1 review
 //! checkpoint: 9.1 advertises `support_dyn_vc_gfx_protocol` but nothing was
 //! listening on the DVC).
@@ -20,7 +20,7 @@
 //! DRDYNVC SVC routing returns to the server as a response frame.
 //!
 //! Design note (shape resolution, not a fork): design.md's illustrative
-//! `attach(active_stage, handler)` resolves to a CONNECTOR-time attachment —
+//! `attach(active_stage, handler)` resolves to a CONNECTOR-time attachment â€”
 //! the DRDYNVC static channel must be attached to the `ClientConnector`
 //! before finalize so the client joins it at MCS and the server-assigned
 //! channel id is bound; the stage then receives it through
@@ -30,7 +30,9 @@
 use std::sync::Arc;
 
 use ironrdp_dvc::DrdynvcClient;
-use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler};
+use ironrdp_egfx::client::{
+    BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler, Surface,
+};
 use ironrdp_egfx::pdu::{CapabilitySet, GfxPdu};
 
 use crate::rdp::codec_policy::CodecErrorPolicy;
@@ -41,11 +43,11 @@ use crate::rdp::codec_policy::CodecErrorPolicy;
 /// The handler owns the codec POLICY surface only: the advertised capability
 /// sets come from [`crate::rdp::codec_policy::CodecPolicy::egfx_caps`] (9.1's
 /// proven AVC-free set), and the terminal codec/decode error policy (task
-/// 9.3) is reported through the shared [`CodecErrorPolicy`] — the handler is
+/// 9.3) is reported through the shared [`CodecErrorPolicy`] â€” the handler is
 /// the upstream-observable side (unsupported-codec arrivals and codec-tagged
 /// decoded deliveries), the session loop the counter-sampling side. Decoded
-/// pixels bypass the handler for compositing — they surface through the
-/// upstream compositor drain inside `ActiveStage::process` — so this type
+/// pixels bypass the handler for compositing â€” they surface through the
+/// upstream compositor drain inside `ActiveStage::process` â€” so this type
 /// intentionally carries no framebuffer state.
 ///
 /// Must never construct or reference an H.264 decoder (Req 9.1/9.5).
@@ -62,6 +64,64 @@ impl DriftGfxHandler {
 }
 
 impl GraphicsPipelineHandler for DriftGfxHandler {
+    fn on_close(&mut self) {
+        self.policy.close_graphics();
+    }
+
+    fn on_reset_graphics(&mut self, width: u32, height: u32) {
+        self.policy.note_output_reset(width, height);
+    }
+
+    fn on_surface_created(&mut self, surface: &Surface) {
+        self.policy
+            .create_surface(surface.id, (surface.width, surface.height));
+    }
+
+    fn on_surface_deleted(&mut self, id: u16) {
+        self.policy.delete_surface(id);
+    }
+
+    fn on_surface_mapped(&mut self, id: u16, x: u32, y: u32) {
+        self.policy.map_surface(id, Some((x, y)));
+    }
+
+    fn on_map_surface_to_scaled_output(
+        &mut self,
+        pdu: &ironrdp_egfx::pdu::MapSurfaceToScaledOutputPdu,
+    ) {
+        let origin = (pdu.target_width != 0 && pdu.target_height != 0)
+            .then_some((pdu.output_origin_x, pdu.output_origin_y));
+        self.policy.map_surface(pdu.surface_id, origin);
+    }
+
+    fn on_map_surface_to_window(&mut self, pdu: &ironrdp_egfx::pdu::MapSurfaceToWindowPdu) {
+        self.policy.map_surface(pdu.surface_id, None);
+    }
+
+    fn on_map_surface_to_scaled_window(
+        &mut self,
+        pdu: &ironrdp_egfx::pdu::MapSurfaceToScaledWindowPdu,
+    ) {
+        self.policy.map_surface(pdu.surface_id, None);
+    }
+
+    fn on_solid_fill(&mut self, pdu: &ironrdp_egfx::pdu::SolidFillPdu) {
+        self.policy
+            .note_surface_draw(pdu.surface_id, &pdu.rectangles);
+    }
+
+    fn on_surface_to_surface(&mut self, pdu: &ironrdp_egfx::pdu::SurfaceToSurfacePdu) {
+        self.policy.note_surface_copy(pdu);
+    }
+
+    fn on_cache_to_surface(&mut self, pdu: &ironrdp_egfx::pdu::CacheToSurfacePdu) {
+        self.policy.note_cached_copy(pdu);
+    }
+
+    fn on_frame_complete(&mut self, _frame_id: u32) {
+        self.policy.note_frame_complete();
+    }
+
     fn on_capabilities_confirmed(&mut self, _caps: &CapabilitySet) {
         self.policy.note_graphics_channel("egfx");
     }
@@ -71,7 +131,7 @@ impl GraphicsPipelineHandler for DriftGfxHandler {
     }
 
     /// Capability sets advertised in RDPGFX_CAPS_ADVANCE: the CodecPolicy
-    /// set — ClearCodec/Planar/Uncompressed/RFX-Progressive selectable, no
+    /// set â€” ClearCodec/Planar/Uncompressed/RFX-Progressive selectable, no
     /// AVC variant (Req 9.1). Upstream additionally filters AVC-implying
     /// sets at advertisement time when no H.264 decoder is configured;
     /// this policy never offers one, so the advertisement is AVC-free by
@@ -85,12 +145,18 @@ impl GraphicsPipelineHandler for DriftGfxHandler {
     /// (task 9.3, Req 9.6/9.7).
     fn on_bitmap_updated(&mut self, update: &BitmapUpdate) {
         self.policy.note_bitmap_delivered(update.codec_id);
+        if !update.data.is_empty() {
+            self.policy.note_surface_draw(
+                update.surface_id,
+                std::slice::from_ref(&update.destination_rectangle),
+            );
+        }
     }
 
     /// Unsupported-codec arrival hook (dependency spike, research.md "Req
     /// 9.7 hook surfaces"): AVC444/AVC444v2 `WireToSurface1` PDUs arrive
     /// here WITHOUT being decoded whenever no H.264 decoder is configured
-    /// (ironrdp-egfx 0.5.0 client.rs L1098–1107) — the exact pre-decode
+    /// (ironrdp-egfx 0.5.0 client.rs L1098â€“1107) â€” the exact pre-decode
     /// observation Req 9.6 requires. Everything else the pipeline cannot
     /// handle also passes through; the policy classifies which arrivals
     /// are codec-policy violations.
@@ -105,7 +171,7 @@ fn drdynvc_with_display_channels(policy: &Arc<CodecErrorPolicy>) -> DrdynvcClien
     DrdynvcClient::new()
         .with_dynamic_channel(GraphicsPipelineClient::new(
             Box::new(DriftGfxHandler::new(Arc::clone(policy))),
-            // None: no H.264 decoder — AVC-free client (Req 9.5).
+            // None: no H.264 decoder â€” AVC-free client (Req 9.5).
             None,
         ))
         .with_dynamic_channel(ironrdp_displaycontrol::client::DisplayControlClient::new(
@@ -118,7 +184,7 @@ fn drdynvc_with_display_channels(policy: &Arc<CodecErrorPolicy>) -> DrdynvcClien
 /// Called by `attempt_rdp_connection` next to the CliprdrClient attachment:
 /// the connector joins the DRDYNVC static channel at MCS, binds the
 /// server-assigned channel id at finalize, and hands the whole set to the
-/// session stage through `ConnectionResult::static_channels` — from where
+/// session stage through `ConnectionResult::static_channels` â€” from where
 /// `ActiveStage::process` routes EGFX traffic to the graphics pipeline and
 /// drains its compositor into the session image. `policy` is the session's
 /// shared codec-error policy (task 9.3): the handler constructed here
@@ -132,9 +198,9 @@ pub fn attach_to_connector(
 
 /// Actor-test seam twin of [`attach_to_connector`] (task 9.2): bind the same
 /// DRDYNVC + graphics pipeline wiring to a scripted `ConnectionResult`'s
-/// static channels with an explicit server-assigned channel id — mirroring
+/// static channels with an explicit server-assigned channel id â€” mirroring
 /// what the connector does at finalize (`attach_channel_id_by_key`) and
-/// upstream's own session fixtures — so scripted-server tests exercise the
+/// upstream's own session fixtures â€” so scripted-server tests exercise the
 /// production DVC registration shape end-to-end.
 #[cfg(test)]
 pub(crate) fn attach_to_stage_channels(
@@ -191,7 +257,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// Deterministic RGBA pattern: pixel n has
-    /// (n % 256, 100 + n % 100, 200 + n % 55, 255) — every byte differs per
+    /// (n % 256, 100 + n % 100, 200 + n % 55, 255) â€” every byte differs per
     /// pixel so any channel swap, row reversal or wrong-stride copy fails.
     fn expected_rgba(width: u16, height: u16) -> Vec<u8> {
         let pixels = usize::from(width) * usize::from(height);
@@ -280,8 +346,8 @@ mod tests {
         compress_and_wrap_egfx(buf.filled(), compressor, CompressionMode::Never).expect("zgfx wrap")
     }
 
-    /// A server→client MCS SendDataIndication on the DRDYNVC static channel
-    /// carrying a DRDYNVC PDU — byte-identical in shape to what `read_pdu`
+    /// A serverâ†’client MCS SendDataIndication on the DRDYNVC static channel
+    /// carrying a DRDYNVC PDU â€” byte-identical in shape to what `read_pdu`
     /// delivers from a real transport. The PDU is wrapped in a
     /// single-fragment Channel PDU Header exactly like the SVC layer
     /// (`ChunkProcessor::dechunkify`) expects.
@@ -581,7 +647,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // (a) DVC registration — the task 9.1 review checkpoint
+    // (a) DVC registration â€” the task 9.1 review checkpoint
     // ------------------------------------------------------------------
 
     #[test]
@@ -723,7 +789,7 @@ mod tests {
 
     #[test]
     fn advertised_capabilities_are_the_codec_policy_set_without_avc() {
-        // The handler's advertisement IS the 9.1 codec policy — the exact
+        // The handler's advertisement IS the 9.1 codec policy â€” the exact
         // AVC-free set CodecPolicy pins (ClearCodec/Planar/Uncompressed/
         // RFX-Progressive selectable, no AVC variant).
         let handler = super::DriftGfxHandler::new(Arc::new(CodecErrorPolicy::new()));
@@ -862,7 +928,7 @@ mod tests {
         }
         assert_eq!(image.data(), expected2.as_slice());
 
-        // Frame 3: identical sub-rect — a glyph-cache HIT must decode to the
+        // Frame 3: identical sub-rect â€” a glyph-cache HIT must decode to the
         // same pixels (no dropped/corrupted update).
         let sub_wire_repeat = sub_rect_wire_pdu(
             Codec1Type::ClearCodec,
@@ -1011,7 +1077,7 @@ mod tests {
     }
 
     /// Extract one rect's packed RGBA rows from a full RGBA surface
-    /// buffer — the byte-exact expectation for the packet payload.
+    /// buffer â€” the byte-exact expectation for the packet payload.
     fn extract_rect_pixels(full: &[u8], surface_w: u16, rect: &InclusiveRectangle) -> Vec<u8> {
         use ironrdp_pdu::geometry::Rectangle as _;
         let row = usize::from(rect.width()) * 4;
@@ -1025,7 +1091,7 @@ mod tests {
 
     /// DISJOINT dirty regions inside ONE drained update batch: a single
     /// kind-2 packet carries the merged bounding rectangle, and its
-    /// payload holds the complete pixels of that rect — including the
+    /// payload holds the complete pixels of that rect â€” including the
     /// unchanged pixels between the two regions, copied from the
     /// composited framebuffer (they are composited there already, so
     /// nothing accumulated is lost; Req 9.8).
@@ -1127,8 +1193,8 @@ mod tests {
         assert_eq!(parsed.rects, vec![(8, 8, 48, 56)]);
         assert_eq!(parsed.pixels, extract_rect_pixels(&composite, W, &bounding));
 
-        // SharedFrame follows the production delivery sequence — the
-        // initial full frame, then the merged batch rect — and ends
+        // SharedFrame follows the production delivery sequence â€” the
+        // initial full frame, then the merged batch rect â€” and ends
         // holding the complete composited image.
         let sf = SharedFrame::new(u32::from(W), u32::from(H));
         sync_shared_frame(&sf, &image, &regions1);
@@ -1139,7 +1205,7 @@ mod tests {
 
     /// OVERLAPPING dirty regions inside one drained batch: the union is
     /// correct and the payload carries each pixel's FINAL composited
-    /// value exactly once — no double-apply artifacts.
+    /// value exactly once â€” no double-apply artifacts.
     #[test]
     fn batched_overlapping_regions_union_once_with_final_pixels() {
         let (mut stage, mut image) = egfx_stage();
@@ -1221,8 +1287,8 @@ mod tests {
             extract_rect_pixels(&composite, W, &plan.rect)
         );
 
-        // SharedFrame follows the production delivery sequence — the
-        // initial full frame, then the merged batch rect — and ends
+        // SharedFrame follows the production delivery sequence â€” the
+        // initial full frame, then the merged batch rect â€” and ends
         // holding the complete composited image.
         let sf = SharedFrame::new(u32::from(W), u32::from(H));
         sync_shared_frame(&sf, &image, &regions1);
@@ -1232,7 +1298,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // (e) GPU feed — SharedFrame publish() is exactly what GpuRenderer
+    // (e) GPU feed â€” SharedFrame publish() is exactly what GpuRenderer
     //     uploads to the wgpu texture (renderer/gpu.rs render()).
     // ------------------------------------------------------------------
 
@@ -1262,7 +1328,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // (f) Kinds: EGFX-sourced packets are exclusively kind 1/2 (no H.264
-    //     transport — Req 9.4). Existing pins freeze kind values; this test
+    //     transport â€” Req 9.4). Existing pins freeze kind values; this test
     //     pins the EGFX route's emission set.
     // ------------------------------------------------------------------
 
@@ -1291,7 +1357,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // (g) Task 9.3 (Req 9.6/9.7): terminal codec/decode error policy at
-    //     the wired-stage level — the dependency-spike observables
+    //     the wired-stage level â€” the dependency-spike observables
     //     (on_unhandled_pdu pre-decode forward, dropped_updates counter)
     //     drive the shared CodecErrorPolicy.
     // ------------------------------------------------------------------
@@ -1307,7 +1373,7 @@ mod tests {
 
     /// Req 9.6: an AVC444 wire update arriving on the EGFX route is
     /// forwarded by upstream WITHOUT decoding (no H.264 decoder configured
-    /// — the spike's client.rs L1098–1107 path) and Drift's policy turns
+    /// â€” the spike's client.rs L1098â€“1107 path) and Drift's policy turns
     /// it into a terminal actionable error: zero decode drops, terminal
     /// set, naming the variant.
     #[test]
@@ -1337,7 +1403,7 @@ mod tests {
 
     /// Req 9.7 (spike observables): an undecodable supported-codec update
     /// counts exactly one upstream decode drop and does NOT trip the
-    /// terminal by itself — the three-strike rule lives in the policy the
+    /// terminal by itself â€” the three-strike rule lives in the policy the
     /// session loop drives.
     #[test]
     fn malformed_supported_codec_update_counts_one_drop_not_terminal() {
@@ -1379,7 +1445,7 @@ mod tests {
     /// Research.md "Req 9.7 hook surfaces" recorded gap, PINNED (not
     /// worked around): a well-formed AVC420 arrival without an H.264
     /// decoder is silently skipped by pinned ironrdp-egfx 0.5.0
-    /// (`decode_avc420`, client.rs L1236–1239) — no handler callback, no
+    /// (`decode_avc420`, client.rs L1236â€“1239) â€” no handler callback, no
     /// counter change. Drift closes AVC420 at negotiation time (9.1's
     /// AVC-free advertisement; a compliant server never sends it) and the
     /// policy terminates the moment ANY observable surfaces it; making the
@@ -1404,7 +1470,7 @@ mod tests {
         );
         assert!(
             policy.terminal_error().is_none(),
-            "pinned-gap pin: 0.5.0 produces no handler callback for AVC420 — \
+            "pinned-gap pin: 0.5.0 produces no handler callback for AVC420 â€” \
              negotiation-time AVC_DISABLED (task 9.1) is its defense"
         );
     }
