@@ -9,7 +9,9 @@ const RECENT_GRAPHICS: Duration = Duration::from_secs(10);
 const DISTINCT_UPDATES: Duration = Duration::from_secs(1);
 const MIN_TRIAL_BYTES: u64 = 4 * 1024;
 const SUPPRESSION_GRACE: Duration = Duration::from_secs(2);
-const OBSERVATION_INTERVAL: Duration = Duration::from_secs(10);
+// A host that ignores Suppress Output is reported after about eight seconds:
+// the grace period plus three consecutive two-second intervals with paints.
+const OBSERVATION_INTERVAL: Duration = Duration::from_secs(2);
 const REFUSAL_INTERVALS: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -447,11 +449,11 @@ mod tests {
         let at = |seconds| start + Duration::from_secs(seconds);
         let mut p = active_but_unattended(start);
         p.on_graphics(at(302), 4096);
-        p.on_graphics(at(312), 4096);
-        assert_eq!(p.pause(at(318)), None);
-        p.on_graphics(at(322), 4096);
-        assert_eq!(p.on_timer(at(331)), None);
-        assert_eq!(p.on_timer(at(332)), Some(Allow));
+        p.on_graphics(at(304), 4096);
+        assert_eq!(p.pause(at(305)), None);
+        p.on_graphics(at(306), 4096);
+        assert_eq!(p.on_timer(at(307)), None);
+        assert_eq!(p.on_timer(at(308)), Some(Allow));
         assert!(!p.is_manually_paused());
     }
 
@@ -490,28 +492,29 @@ mod tests {
             let mut p = IdlePreview::new(auto, true, start);
             assert_eq!(p.pause(start), Some(Suppress));
             p.on_graphics(at(1), 9000); // In flight during grace.
-            p.on_transfer(at(4), 4096, false); // Cursor or channel traffic.
-            for second in [12, 14, 21, 22, 29] {
+            p.on_transfer(at(2), 4096, false); // Cursor or channel traffic.
+            for second in [2, 4, 5] {
                 p.on_graphics(at(second), 4096);
             }
-            assert_eq!(p.on_timer(at(32)), None);
-            p.on_transfer(at(33), 9999, false); // Break the consecutive streak.
-            p.on_graphics(at(42), 4096);
-            assert_eq!(p.on_timer(at(52)), None);
+            assert_eq!(p.on_timer(at(7)), None);
+            p.on_transfer(at(7), 9999, false); // No paint: break the streak.
+            p.on_graphics(at(8), 4096);
+            assert_eq!(p.on_timer(at(12)), None);
             assert_eq!(p.on_timer(at(60)), Some(Allow));
             p.on_graphics(at(61), 4096); // Requested preview.
             assert_eq!(p.on_timer(at(62)), Some(Suppress));
-            for second in [63, 64, 74, 84, 85] {
+            for second in [63, 64, 66, 68, 69] {
                 p.on_graphics(at(second), 4096);
             }
-            assert_eq!(p.on_timer(at(93)), None);
-            assert_eq!(p.on_timer(at(94)), Some(Allow));
+            // The third interval must end before refusal is confirmed.
+            assert_eq!(p.on_timer(at(69)), None);
+            assert_eq!(p.on_timer(at(70)), Some(Allow));
             assert_eq!(
                 p.pause_unavailable_reason(),
                 Some("Host continues sending display updates.")
             );
             assert!(!p.is_manually_paused());
-            assert_eq!(p.pause(at(95)), None);
+            assert_eq!(p.pause(at(71)), None);
             assert_eq!(p.on_timer(at(122)), None);
             assert_eq!(p.state(), if auto { Unsupported } else { Off });
             let fresh = IdlePreview::new(auto, true, at(124));
