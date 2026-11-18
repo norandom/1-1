@@ -12,7 +12,212 @@
 //! offered.
 
 #[cfg(windows)]
+pub(crate) use windows_links::LinkSafeBackend;
+#[cfg(windows)]
 pub(crate) use windows_root::{BindError, BoundRoot};
+
+/// Files with more than one hard link can have a name outside the granted
+/// folder (pnpm and uv stores create them). The remote may read them, which
+/// only shows the file's own content, but every request that would change
+/// the file or its metadata is refused, so the share can never modify a copy
+/// that lives outside it (user decision 2026-11-18). An already-open handle
+/// that a local program moves out stays usable until closed; every new open
+/// still resolves from the bound root.
+#[cfg(windows)]
+mod windows_links {
+    use ironrdp_pdu::PduResult;
+    use ironrdp_rdpdr::Rdpdr;
+    use ironrdp_rdpdr::backend::RdpdrBackend;
+    use ironrdp_rdpdr::pdu::RdpdrPdu;
+    use ironrdp_rdpdr::pdu::efs::{
+        AnyIoCtlCode, CreateDisposition, CreateOptions, DecodedDeviceControlRequest, DesiredAccess,
+        DeviceControlRequest, DeviceCreateRequest, DeviceCreateResponse, DeviceIoRequest,
+        DeviceIoResponse, Information, NtStatus, PrinterIoRequest, ServerDeviceAnnounceResponse,
+        ServerDriveIoRequest,
+    };
+    use ironrdp_rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
+    use ironrdp_rdpdr::pdu::esp::PortIoRequest;
+    use ironrdp_svc::SvcMessage;
+    use std::{
+        mem,
+        os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+        path::{Path, PathBuf},
+    };
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+    };
+
+    /// The access the native backend's read-only mode also refuses, plus
+    /// ACCESS_SYSTEM_SECURITY.
+    const MUTATING_ACCESS: DesiredAccess = DesiredAccess::from_bits_retain(
+        DesiredAccess::FILE_WRITE_DATA_OR_FILE_ADD_FILE.bits()
+            | DesiredAccess::FILE_APPEND_DATA_OR_FILE_ADD_SUBDIRECTORY.bits()
+            | DesiredAccess::FILE_WRITE_EA.bits()
+            | DesiredAccess::FILE_WRITE_ATTRIBUTES.bits()
+            | DesiredAccess::DELETE.bits()
+            | DesiredAccess::WRITE_DAC.bits()
+            | DesiredAccess::WRITE_OWNER.bits()
+            | DesiredAccess::ACCESS_SYSTEM_SECURITY.bits()
+            | DesiredAccess::MAXIMUM_ALLOWED.bits()
+            | DesiredAccess::GENERIC_ALL.bits()
+            | DesiredAccess::GENERIC_WRITE.bits(),
+    );
+
+    /// Whether the create request could change an existing file.
+    pub(super) fn mutates(request: &DeviceCreateRequest) -> bool {
+        request.desired_access.intersects(MUTATING_ACCESS)
+            || request
+                .create_options
+                .contains(CreateOptions::FILE_DELETE_ON_CLOSE)
+            || [
+                CreateDisposition::FILE_SUPERSEDE,
+                CreateDisposition::FILE_OVERWRITE,
+                CreateDisposition::FILE_OVERWRITE_IF,
+            ]
+            .contains(&request.create_disposition)
+    }
+
+    /// The link count of an existing entry below `root`, or `None` when it
+    /// does not exist or cannot be inspected; the native backend then
+    /// answers the request itself.
+    pub(super) fn link_count(root: &Path, remote_path: &str) -> Option<u32> {
+        let relative = remote_path.trim_start_matches(['\\', '/']);
+        if relative.is_empty() {
+            return None;
+        }
+        let file = std::fs::File::options()
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .share_mode(0x7)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(root.join(relative))
+            .ok()?;
+        let mut info = FILE_STANDARD_INFO::default();
+        // SAFETY: The buffer is an owned struct of the size passed; the
+        // handle stays open for the call.
+        unsafe {
+            GetFileInformationByHandleEx(
+                HANDLE(file.as_raw_handle()),
+                FileStandardInfo,
+                (&raw mut info).cast(),
+                mem::size_of::<FILE_STANDARD_INFO>() as u32,
+            )
+        }
+        .ok()?;
+        Some(info.NumberOfLinks)
+    }
+
+    /// Refuse a mutating open of a multiply linked file before the native
+    /// backend sees it; forward everything else unchanged.
+    #[derive(Debug)]
+    pub(crate) struct LinkSafeBackend {
+        inner: Box<dyn RdpdrBackend>,
+        root: PathBuf,
+    }
+
+    ironrdp_core::impl_as_any!(LinkSafeBackend);
+
+    impl LinkSafeBackend {
+        /// `root` must be the path of a [`super::BoundRoot`] held for the
+        /// backend's lifetime.
+        pub(crate) fn new(inner: Box<dyn RdpdrBackend>, root: PathBuf) -> Self {
+            Self { inner, root }
+        }
+
+        fn refuses(&self, request: &DeviceCreateRequest) -> bool {
+            mutates(request) && link_count(&self.root, &request.path).is_some_and(|links| links > 1)
+        }
+    }
+
+    impl RdpdrBackend for LinkSafeBackend {
+        fn supports_drive_security(&self) -> bool {
+            self.inner.supports_drive_security()
+        }
+
+        fn reset(&mut self) -> PduResult<()> {
+            self.inner.reset()
+        }
+
+        fn restore_drive(&mut self, device_id: u32) -> PduResult<()> {
+            self.inner.restore_drive(device_id)
+        }
+
+        fn add_drive(&mut self, device_id: u32) -> PduResult<()> {
+            self.inner.add_drive(device_id)
+        }
+
+        fn remove_drive(&mut self, device_id: u32) -> PduResult<Vec<SvcMessage>> {
+            self.inner.remove_drive(device_id)
+        }
+
+        fn handle_server_device_announce_response(
+            &mut self,
+            pdu: ServerDeviceAnnounceResponse,
+        ) -> PduResult<()> {
+            self.inner.handle_server_device_announce_response(pdu)
+        }
+
+        fn handle_scard_call(
+            &mut self,
+            req: DeviceControlRequest<ScardIoCtlCode>,
+            call: ScardCall,
+        ) -> PduResult<Vec<SvcMessage>> {
+            self.inner.handle_scard_call(req, call)
+        }
+
+        fn handle_drive_io_request(
+            &mut self,
+            req: ServerDriveIoRequest,
+        ) -> PduResult<Vec<SvcMessage>> {
+            if let ServerDriveIoRequest::ServerCreateDriveRequest(create) = &req
+                && self.refuses(create)
+            {
+                return Ok(vec![SvcMessage::from(RdpdrPdu::DeviceCreateResponse(
+                    DeviceCreateResponse {
+                        device_io_reply: DeviceIoResponse::new(
+                            create.device_io_request.clone(),
+                            NtStatus::ACCESS_DENIED,
+                        ),
+                        file_id: 0,
+                        information: Information::empty(),
+                    },
+                ))]);
+            }
+            self.inner.handle_drive_io_request(req)
+        }
+
+        fn handle_drive_device_control(
+            &mut self,
+            req: DecodedDeviceControlRequest<AnyIoCtlCode>,
+        ) -> PduResult<Vec<SvcMessage>> {
+            self.inner.handle_drive_device_control(req)
+        }
+
+        fn poll_deferred_messages(&mut self) -> PduResult<Vec<SvcMessage>> {
+            self.inner.poll_deferred_messages()
+        }
+
+        fn handle_user_logged_on(&mut self, rdpdr: &mut Rdpdr) -> PduResult<Vec<SvcMessage>> {
+            self.inner.handle_user_logged_on(rdpdr)
+        }
+
+        fn handle_printer_io_request(
+            &mut self,
+            req: PrinterIoRequest,
+        ) -> PduResult<Vec<SvcMessage>> {
+            self.inner.handle_printer_io_request(req)
+        }
+
+        fn handle_port_io_request(&mut self, req: PortIoRequest) -> PduResult<Vec<SvcMessage>> {
+            self.inner.handle_port_io_request(req)
+        }
+
+        fn reject_printer_write(&mut self, req: DeviceIoRequest) -> PduResult<Vec<SvcMessage>> {
+            self.inner.reject_printer_write(req)
+        }
+    }
+}
 
 #[cfg(all(test, windows))]
 mod tests;

@@ -138,3 +138,186 @@ fn a_component_held_open_for_rename_is_reported_busy() {
         BindError::Busy(root.clone())
     );
 }
+
+mod links {
+    use super::super::LinkSafeBackend;
+    use super::super::windows_links::{link_count, mutates};
+    use super::real_dir;
+    use ironrdp_pdu::PduResult;
+    use ironrdp_rdpdr::backend::RdpdrBackend;
+    use ironrdp_rdpdr::pdu::efs::{
+        CreateDisposition, CreateOptions, DesiredAccess, DeviceControlRequest, DeviceCreateRequest,
+        DeviceIoRequest, FileAttributes, MajorFunction, MinorFunction,
+        ServerDeviceAnnounceResponse, ServerDriveIoRequest, SharedAccess,
+    };
+    use ironrdp_rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
+    use ironrdp_svc::SvcMessage;
+    use std::{
+        fs,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    fn create(
+        path: &str,
+        access: DesiredAccess,
+        disposition: CreateDisposition,
+        options: CreateOptions,
+    ) -> DeviceCreateRequest {
+        DeviceCreateRequest {
+            device_io_request: DeviceIoRequest {
+                device_id: 1,
+                file_id: 0,
+                completion_id: 7,
+                major_function: MajorFunction::Create,
+                minor_function: MinorFunction::from(0),
+            },
+            desired_access: access,
+            allocation_size: 0,
+            file_attributes: FileAttributes::empty(),
+            shared_access: SharedAccess::empty(),
+            create_disposition: disposition,
+            create_options: options,
+            path: path.into(),
+        }
+    }
+
+    fn read(path: &str) -> DeviceCreateRequest {
+        create(
+            path,
+            DesiredAccess::GENERIC_READ | DesiredAccess::FILE_READ_ATTRIBUTES,
+            CreateDisposition::FILE_OPEN,
+            CreateOptions::empty(),
+        )
+    }
+
+    fn write(path: &str) -> DeviceCreateRequest {
+        create(
+            path,
+            DesiredAccess::GENERIC_WRITE,
+            CreateDisposition::FILE_OPEN,
+            CreateOptions::empty(),
+        )
+    }
+
+    #[test]
+    fn requests_that_could_change_a_file_are_recognized() {
+        assert!(!mutates(&read(r"\a.txt")));
+        for access in [
+            DesiredAccess::FILE_WRITE_DATA_OR_FILE_ADD_FILE,
+            DesiredAccess::FILE_APPEND_DATA_OR_FILE_ADD_SUBDIRECTORY,
+            DesiredAccess::FILE_WRITE_ATTRIBUTES,
+            DesiredAccess::DELETE,
+            DesiredAccess::WRITE_DAC,
+            DesiredAccess::MAXIMUM_ALLOWED,
+            DesiredAccess::GENERIC_ALL,
+            DesiredAccess::GENERIC_WRITE,
+        ] {
+            let bits = access.bits();
+            assert!(
+                mutates(&create(
+                    r"\a.txt",
+                    access,
+                    CreateDisposition::FILE_OPEN,
+                    CreateOptions::empty()
+                )),
+                "{bits:#x}"
+            );
+        }
+        for disposition in [
+            CreateDisposition::FILE_SUPERSEDE,
+            CreateDisposition::FILE_OVERWRITE,
+            CreateDisposition::FILE_OVERWRITE_IF,
+        ] {
+            assert!(mutates(&create(
+                r"\a.txt",
+                DesiredAccess::GENERIC_READ,
+                disposition,
+                CreateOptions::empty()
+            )));
+        }
+        assert!(mutates(&create(
+            r"\a.txt",
+            DesiredAccess::GENERIC_READ,
+            CreateDisposition::FILE_OPEN,
+            CreateOptions::FILE_DELETE_ON_CLOSE
+        )));
+    }
+
+    #[test]
+    fn link_counts_come_from_the_file_below_the_root() {
+        let (_dir, root) = real_dir();
+        fs::write(root.join("single.txt"), b"x").unwrap();
+        fs::write(root.join("linked.txt"), b"x").unwrap();
+        fs::hard_link(root.join("linked.txt"), root.join("alias.txt")).unwrap();
+        fs::create_dir(root.join("folder")).unwrap();
+        assert_eq!(link_count(&root, r"\single.txt"), Some(1));
+        assert_eq!(link_count(&root, r"\linked.txt"), Some(2));
+        assert_eq!(link_count(&root, r"\folder"), Some(1));
+        assert_eq!(link_count(&root, r"\missing.txt"), None);
+        assert_eq!(link_count(&root, r"\"), None);
+    }
+
+    #[derive(Debug, Default)]
+    struct Recording(Arc<AtomicUsize>);
+    ironrdp_core::impl_as_any!(Recording);
+
+    impl RdpdrBackend for Recording {
+        fn handle_server_device_announce_response(
+            &mut self,
+            _pdu: ServerDeviceAnnounceResponse,
+        ) -> PduResult<()> {
+            Ok(())
+        }
+        fn handle_scard_call(
+            &mut self,
+            _req: DeviceControlRequest<ScardIoCtlCode>,
+            _call: ScardCall,
+        ) -> PduResult<Vec<SvcMessage>> {
+            unreachable!("no smart cards on a drive")
+        }
+        fn handle_drive_io_request(
+            &mut self,
+            _req: ServerDriveIoRequest,
+        ) -> PduResult<Vec<SvcMessage>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn writes_to_multiply_linked_files_are_refused_and_everything_else_passes_through() {
+        let (_dir, root) = real_dir();
+        fs::write(root.join("linked.txt"), b"x").unwrap();
+        fs::hard_link(root.join("linked.txt"), root.join("alias.txt")).unwrap();
+        fs::write(root.join("single.txt"), b"x").unwrap();
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let mut backend =
+            LinkSafeBackend::new(Box::new(Recording(Arc::clone(&forwarded))), root.clone());
+        let mut send = |request| {
+            backend
+                .handle_drive_io_request(ServerDriveIoRequest::ServerCreateDriveRequest(request))
+                .unwrap()
+        };
+
+        let refused = send(write(r"\linked.txt"));
+        assert_eq!(refused.len(), 1, "an ACCESS_DENIED create response");
+        assert_eq!(
+            forwarded.load(Ordering::SeqCst),
+            0,
+            "the native backend never saw it"
+        );
+
+        assert!(send(read(r"\linked.txt")).is_empty());
+        assert!(send(write(r"\single.txt")).is_empty());
+        assert!(send(write(r"\new.txt")).is_empty());
+        assert_eq!(forwarded.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            fs::read(root.join("alias.txt")).unwrap(),
+            b"x",
+            "the outside alias is unchanged"
+        );
+    }
+}
