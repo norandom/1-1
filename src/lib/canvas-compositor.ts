@@ -22,6 +22,36 @@ export interface CompositingSurface {
   dirty: DirtyRect | null;
 }
 
+export interface CanvasSurface extends CompositingSurface {
+  imageData: ImageData;
+  receivedFrame: boolean;
+}
+
+export function prepareCanvasSurface(
+  current: CanvasSurface | null,
+  width: number,
+  height: number,
+  source: 'session-info' | 'frame',
+): CanvasSurface {
+  const nextWidth = Math.max(1, Math.round(width));
+  const nextHeight = Math.max(1, Math.round(height));
+  // Negotiation may precede the first packet for the new dimensions.
+  const retainPaint = source === 'session-info' && current?.receivedFrame;
+  if (current && (retainPaint || (current.width === nextWidth && current.height === nextHeight))) {
+    if (source === 'frame') current.receivedFrame = true;
+    return current;
+  }
+  const imageData = new ImageData(nextWidth, nextHeight);
+  return {
+    width: nextWidth,
+    height: nextHeight,
+    imageData,
+    pixels: imageData.data,
+    dirty: { x: 0, y: 0, width: nextWidth, height: nextHeight },
+    receivedFrame: source === 'frame',
+  };
+}
+
 export type DisplayMode = 'fit' | 'native';
 
 export function layoutSurface(

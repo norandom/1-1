@@ -19,7 +19,7 @@ The independent Kiro task-plan review passed on 18 November 2026. The review cov
   - Capture two sessions' wire events with pending clipboard traffic. Assert ordered wake/input, continued acknowledgements, unchanged manual state on incidental activity and a cleared manual override after reconnect. The new session starts from its saved automatic preference.
   - _Boundary: Session actor and command integration_
   - _Requirements: 2.1, 2.2, 2.3, 2.5, 2.6, 2.8, 2.9_
-- [ ] 1.3 Keep manual pause across resize and expose the actual image age
+- [x] 1.3 Keep manual pause across resize and expose the actual image age
   - Track negotiated support at activation and reactivation. Publish actor-confirmed manual state, capability, reason and the time of the last completed desktop paint even when automatic preview is off.
   - Coalesce resize requests, permit a bounded redraw at the new desktop bounds, and resume suppression after a completed new-size paint or the two-second window. Clear transient state on disconnect and restore live output if support disappears.
   - Verify resize during suppression and during a preview. The old image and its age survive until a real desktop paint. A cursor, clipboard event or elapsed timer cannot advance the timestamp.

@@ -1,3 +1,5 @@
+mod desktop_updates;
+
 use chrono::{DateTime, Utc};
 use ironrdp_pdu::input::fast_path::FastPathInputEvent;
 use serde::{Deserialize, Serialize};
@@ -9,7 +11,7 @@ use uuid::Uuid;
 
 use crate::rdp::client::{ConnectionOutcome, SessionCommand, attempt_rdp_connection};
 use crate::rdp::clipboard::SessionClipboardBackend;
-use crate::rdp::codec_policy::CodecErrorPolicy;
+use crate::rdp::codec_policy::{CodecErrorPolicy, CopyDamage};
 use crate::rdp::display::FrameBuffer;
 use crate::rdp::frame_batch;
 use crate::rdp::frame_delivery::{FrameDelivery, FrameReceipt};
@@ -69,6 +71,11 @@ pub struct SessionInfo {
     #[serde(default)]
     pub idle_preview_state: IdlePreviewState,
     pub idle_preview_updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub display_paused: bool,
+    #[serde(default)]
+    pub display_pause_available: bool,
+    pub display_pause_unavailable_reason: Option<String>,
     pub network: Option<NetworkMetrics>,
     pub graphics: crate::rdp::codec_policy::GraphicsObservation,
     pub display_stalled: bool,
@@ -342,13 +349,18 @@ impl SessionActor {
             sample.rx_bytes_per_second = 0.0;
             sample.tx_bytes_per_second = 0.0;
         }
+        let connected = self.state == SessionState::Connected;
+        let unavailable = self.idle_preview.pause_unavailable_reason();
         SessionInfo {
-            idle_preview_state: if self.state == SessionState::Connected {
+            display_paused: connected && self.idle_preview.is_manually_paused(),
+            display_pause_available: connected && unavailable.is_none(),
+            display_pause_unavailable_reason: unavailable.filter(|_| connected).map(str::to_owned),
+            idle_preview_state: if connected {
                 self.idle_preview.state()
             } else {
                 IdlePreviewState::Off
             },
-            idle_preview_updated_at: self.idle_preview_updated_at,
+            idle_preview_updated_at: self.idle_preview_updated_at.filter(|_| connected),
             network: network.clone(),
             graphics: self.graphics.clone(),
             display_stalled: self.delivery.stalled,
@@ -988,6 +1000,9 @@ impl SessionActor {
         // every (re)connect because this loop (and its decoded image)
         // starts fresh per connection.
         let mut delivered_surface: Option<(u16, u16)> = None;
+        let mut retaining_previous_image = false;
+        let mut awaiting_first_paint = true;
+        let mut cursor_possible = false;
         let mut held_modifiers = std::collections::BTreeSet::new();
         let mut deferred_commands = VecDeque::new();
         let mut network_sampler = self
@@ -1025,7 +1040,13 @@ impl SessionActor {
                 }
             }
             tokio::select! {
-                _ = metrics_tick.tick() => {
+                _ = async {
+                    if let Some(deadline) = self.idle_preview.manual_redraw_deadline() {
+                        tokio::select! { _ = metrics_tick.tick() => {}, _ = tokio::time::sleep_until(deadline) => {} }
+                    } else {
+                        metrics_tick.tick().await;
+                    }
+                } => {
                     if let Some(action) = self.idle_preview.on_timer(tokio::time::Instant::now())
                         && let Err(reason) = self.write_display_action(action, &mut active_stage, (image.width(), image.height()), &mut writer).await
                     {
@@ -1051,7 +1072,7 @@ impl SessionActor {
 
                     // `received_at: None` preserves the pre-0.13 behavior: the
                     // timestamp only feeds upstream's new bandwidth auto-detect.
-                    let outputs = match active_stage.process(&mut image, action, &payload, None) {
+                    let (outputs, desktop) = match desktop_updates::process(&mut active_stage, &mut image, action, &payload, activation_factory.io_channel_id()) {
                         Ok(outputs) => outputs,
                         Err(e) => {
                             log::warn!("Session {} process error: {}", self.id, e);
@@ -1076,7 +1097,7 @@ impl SessionActor {
                     // stays `ConnectionLost` for the Req 2.3 reconnect).
                     let collect_idle_cost = matches!(self.idle_preview.state(),
                         IdlePreviewState::Live | IdlePreviewState::Preview | IdlePreviewState::Suppressed);
-                    let egfx_bitmap = collect_idle_cost && codec_policy.has_bitmap_delivery();
+                    let graphics = codec_policy.take_graphics_activity();
                     if let Some(terminal) = codec_policy.evaluate_decode_outcome(
                         active_stage
                             .get_dvc_mut::<ironrdp_egfx::client::GraphicsPipelineClient>()
@@ -1155,6 +1176,8 @@ impl SessionActor {
                         // slot but cannot flush pixels from the previous share.
                         self.delivery.reset();
                         delivered_surface = None;
+                        retaining_previous_image = self.idle_preview_updated_at.is_some();
+                        let old_size = (image.width(), image.height());
                         match self
                             .drive_reactivation(
                                 &activation_factory,
@@ -1167,10 +1190,18 @@ impl SessionActor {
                             .await
                         {
                             ReactivationOutcome::Reactivated { suppress_supported } => {
+                                awaiting_first_paint |= old_size != (image.width(), image.height());
+                                codec_policy.discard_incomplete_frame();
                                 let was_suppressed = self.idle_preview.state() == IdlePreviewState::Suppressed;
-                                self.reset_idle_preview(suppress_supported);
-                                // Resume on the new share with its negotiated dimensions and share ID.
-                                if was_suppressed && suppress_supported
+                                let manual = self.idle_preview.is_manually_paused();
+                                if manual && suppress_supported {
+                                    self.idle_preview.begin_manual_redraw(tokio::time::Instant::now());
+                                } else {
+                                    self.idle_preview = IdlePreview::new(self.config.host_profile.idle_preview, suppress_supported, tokio::time::Instant::now());
+                                }
+                                // Suppression and allow rectangles belong to the negotiated share.
+                                // A replacement without the capability starts live.
+                                if (was_suppressed || manual) && suppress_supported
                                     && let Err(reason) = self.write_display_action(DisplayAction::Allow, &mut active_stage, (image.width(), image.height()), &mut writer).await
                                 {
                                     return reason;
@@ -1186,26 +1217,60 @@ impl SessionActor {
                         }
                     }
 
+                    let surface = (image.width(), image.height());
+                    let resized = (self.width, self.height) != (u32::from(surface.0), u32::from(surface.1));
+                    if graphics.output_reset || resized {
+                        awaiting_first_paint = true;
+                        self.width = u32::from(surface.0);
+                        self.height = u32::from(surface.1);
+                        // The decoder may have cleared its pixels. Keep the old GPU/canvas image
+                        // and discard damage that a late UI receipt could flush from this buffer.
+                        self.delivery.reset();
+                        delivered_surface = None;
+                        retaining_previous_image = self.idle_preview_updated_at.is_some();
+                        if self.idle_preview.is_manually_paused() && (resized || self.idle_preview_updated_at.is_some()) {
+                            let action = self.idle_preview.begin_manual_redraw(tokio::time::Instant::now());
+                            if (resized || action.is_some())
+                                && let Err(reason) = self.write_display_action(DisplayAction::Allow, &mut active_stage, surface, &mut writer).await
+                            {
+                                return reason;
+                            }
+                        }
+                        self.publish_info();
+                    }
+                    let plan = frame_batch::plan_batch(&updated_regions, surface, delivered_surface);
+                    cursor_possible |= desktop.pointer_seen;
+                    let desktop_painted = plan.as_ref().is_some_and(|plan| {
+                        desktop.painted || graphics.completed_paint || match graphics.copy_damage {
+                            CopyDamage::None => false,
+                            _ if awaiting_first_paint => desktop_updates::has_drawn_pixels(&image, &plan.rect, cursor_possible),
+                            CopyDamage::Direct => true,
+                            CopyDamage::WithBlankMap => false,
+                        }
+                    });
+                    let now = tokio::time::Instant::now();
                     if collect_idle_cost {
-                        let (live_bytes, completed_update) = match action {
-                            ironrdp_pdu::Action::FastPath => fast_path_desktop_update(&payload),
-                            _ if egfx_bitmap || !updated_regions.is_empty() => (payload.len(), true),
-                            _ => (0, false),
-                        };
-                        let desktop_painted = completed_update && !updated_regions.is_empty();
-                        // Account for every inbound frame throughout the trial. A fragmented
-                        // graphics message may only identify its channel or paint on its last PDU.
-                        let bytes = if self.idle_preview.state() == IdlePreviewState::Live {
-                            live_bytes
+                        let bytes = if self.idle_preview.state() == IdlePreviewState::Live && !graphics.bitmap_delivered && !graphics.completed_paint {
+                            desktop.bytes
                         } else {
                             payload.len()
                         };
-                        self.idle_preview.on_transfer(tokio::time::Instant::now(), bytes, desktop_painted);
-                        if desktop_painted {
-                            self.idle_preview_updated_at = Some(Utc::now());
+                        self.idle_preview.on_transfer(now, bytes, desktop_painted);
+                    }
+                    if desktop_painted {
+                        awaiting_first_paint = false;
+                        retaining_previous_image = false;
+                        self.idle_preview_updated_at = Some(Utc::now());
+                        if let Some(action) = self.idle_preview.finish_manual_redraw(now) {
+                            if let Err(reason) = self.write_display_action(action, &mut active_stage, surface, &mut writer).await {
+                                return reason;
+                            }
+                            self.publish_info();
                         }
                     }
-                    if !updated_regions.is_empty() {
+                    if let Some(plan) = plan
+                        && !retaining_previous_image
+                    {
                         // Task 9.4 (design L316; Reqs 4.1/4.4/9.8): merge
                         // every dirty region drained from this processed
                         // PDU batch into ONE bounding rectangle and choose
@@ -1218,97 +1283,88 @@ impl SessionActor {
                         // composited decoded image, so unchanged pixels
                         // inside the bounds come from the framebuffer and
                         // accumulated dirty regions are never lost.
-                        let surface = (image.width(), image.height());
-                        if (self.width, self.height) != (u32::from(surface.0), u32::from(surface.1)) {
-                            self.width = u32::from(surface.0);
-                            self.height = u32::from(surface.1);
-                            self.publish_info();
-                        }
-                        if let Some(plan) =
-                            frame_batch::plan_batch(&updated_regions, surface, delivered_surface)
-                        {
-                            let rect_start = std::time::Instant::now();
-                            let region_count = updated_regions.len();
 
-                            // Write the merged damage to the SharedFrame for
-                            // the GPU renderer (one lock, one rect)
-                            if let Some(ref sf) = self.shared_frame {
-                                use ironrdp_pdu::geometry::Rectangle as _;
-                                let stride = image.stride();
-                                let img_data = image.data();
-                                let mut guard = sf.begin_write();
-                                // Task 9.2 (Req 4.1/4.2): an EGFX
-                                // graphics-output reset resizes the decoded
-                                // image upstream (`ResetGraphics` →
-                                // `reset_preserving_pointer` inside
-                                // `ActiveStage::process`). Resize the
-                                // SharedFrame with it and repaint in full
-                                // so the GPU surface and the webview canvas
-                                // never see a mixed-size buffer. Task 9.4
-                                // extends the full repaint to every
-                                // full-refresh plan (initial delivery,
-                                // full-surface invalidation); partial
-                                // batches write their single merged
-                                // bounding rect — unchanged pixels inside
-                                // the bounds copy from the composited
-                                // image (identical values).
-                                if plan.full_refresh
-                                    || guard.width() != u32::from(surface.0)
-                                    || guard.height() != u32::from(surface.1)
-                                {
-                                    guard.update_full(
-                                        u32::from(surface.0),
-                                        u32::from(surface.1),
-                                        img_data,
-                                    );
-                                } else {
-                                    let row_start = usize::from(plan.rect.top) * stride
-                                        + usize::from(plan.rect.left) * 4;
-                                    if row_start < img_data.len() {
-                                        guard.update_rect(
-                                            plan.rect.left,
-                                            plan.rect.top,
-                                            plan.rect.width(),
-                                            plan.rect.height(),
-                                            &img_data[row_start..],
-                                            stride,
-                                        );
-                                    }
-                                }
-                                drop(guard);
-                                sf.mark_dirty(); // Wakes render thread via condvar
+                        let rect_start = std::time::Instant::now();
+                        let region_count = updated_regions.len();
 
-                                let write_time = rect_start.elapsed();
-                                if write_time.as_millis() > 2 {
-                                    log::debug!(
-                                        "[Session {}] SharedFrame write: {} regions in {:.2}ms",
-                                        self.id, region_count, write_time.as_secs_f64() * 1000.0
-                                    );
-                                }
-
-                                // Track FPS at the session level
-                                self.metrics.frames_sent += 1;
-                                if self.metrics.frames_sent.is_multiple_of(100) {
-                                    let elapsed = self
-                                        .metrics
-                                        .started_at
-                                        .unwrap_or_else(std::time::Instant::now)
-                                        .elapsed();
-                                    let fps =
-                                        self.metrics.frames_sent as f64 / elapsed.as_secs_f64();
-                                    log::info!(
-                                        "[Session {}] RDP frames received: {} (avg {:.1} fps) | {} regions this PDU",
-                                        self.id, self.metrics.frames_sent, fps, region_count
+                        // Write the merged damage to the SharedFrame for
+                        // the GPU renderer (one lock, one rect)
+                        if let Some(ref sf) = self.shared_frame {
+                            use ironrdp_pdu::geometry::Rectangle as _;
+                            let stride = image.stride();
+                            let img_data = image.data();
+                            let mut guard = sf.begin_write();
+                            // Task 9.2 (Req 4.1/4.2): an EGFX
+                            // graphics-output reset resizes the decoded
+                            // image upstream (`ResetGraphics` →
+                            // `reset_preserving_pointer` inside
+                            // `ActiveStage::process`). Resize the
+                            // SharedFrame with it and repaint in full
+                            // so the GPU surface and the webview canvas
+                            // never see a mixed-size buffer. Task 9.4
+                            // extends the full repaint to every
+                            // full-refresh plan (initial delivery,
+                            // full-surface invalidation); partial
+                            // batches write their single merged
+                            // bounding rect — unchanged pixels inside
+                            // the bounds copy from the composited
+                            // image (identical values).
+                            if plan.full_refresh
+                                || guard.width() != u32::from(surface.0)
+                                || guard.height() != u32::from(surface.1)
+                            {
+                                guard.update_full(
+                                    u32::from(surface.0),
+                                    u32::from(surface.1),
+                                    img_data,
+                                );
+                            } else {
+                                let row_start = usize::from(plan.rect.top) * stride
+                                    + usize::from(plan.rect.left) * 4;
+                                if row_start < img_data.len() {
+                                    guard.update_rect(
+                                        plan.rect.left,
+                                        plan.rect.top,
+                                        plan.rect.width(),
+                                        plan.rect.height(),
+                                        &img_data[row_start..],
+                                        stride,
                                     );
                                 }
                             }
+                            drop(guard);
+                            sf.mark_dirty(); // Wakes render thread via condvar
 
-                            self.delivery.damage(surface, plan);
-                            if self.flush_image_frame(&image).is_err() {
-                                return DisconnectReason::ConnectionLost;
+                            let write_time = rect_start.elapsed();
+                            if write_time.as_millis() > 2 {
+                                log::debug!(
+                                    "[Session {}] SharedFrame write: {} regions in {:.2}ms",
+                                    self.id, region_count, write_time.as_secs_f64() * 1000.0
+                                );
                             }
-                            delivered_surface = Some(surface);
+
+                            // Track FPS at the session level
+                            self.metrics.frames_sent += 1;
+                            if self.metrics.frames_sent.is_multiple_of(100) {
+                                let elapsed = self
+                                    .metrics
+                                    .started_at
+                                    .unwrap_or_else(std::time::Instant::now)
+                                    .elapsed();
+                                let fps =
+                                    self.metrics.frames_sent as f64 / elapsed.as_secs_f64();
+                                log::info!(
+                                    "[Session {}] RDP frames received: {} (avg {:.1} fps) | {} regions this PDU",
+                                    self.id, self.metrics.frames_sent, fps, region_count
+                                );
+                            }
                         }
+
+                        self.delivery.damage(surface, plan);
+                        if self.flush_image_frame(&image).is_err() {
+                            return DisconnectReason::ConnectionLost;
+                        }
+                        delivered_surface = Some(surface);
                     }
 
                     if self
@@ -1444,8 +1500,21 @@ impl SessionActor {
                         }
                         Some(SessionCommand::Resize { width, height }) => {
                             let (width, height) = normalize_remote_resolution(width, height);
-                            log::info!("Session {} resize request to {}x{}", self.id, width, height);
                             self.pending_resize = Some((width, height));
+                            // A viewport burst needs one layout. Preserve the next non-resize
+                            // command at the head of the FIFO before writing that layout.
+                            for _ in 0..deferred_commands.len() + self.cmd_rx.len() {
+                                let Some(next) = deferred_commands.pop_front().or_else(|| self.cmd_rx.try_recv().ok()) else { break };
+                                match next {
+                                    SessionCommand::Resize { width, height } => {
+                                        self.pending_resize = Some(normalize_remote_resolution(width, height));
+                                    }
+                                    other => {
+                                        deferred_commands.push_front(other);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         Some(SessionCommand::ClipboardPaste { reply, .. }) => {
                             let keys: Vec<_> = clipboard_paste_sequence(&held_modifiers).into_iter().filter_map(|(code, down)| encode_keyboard_fastpath_event(code, down)).collect();
@@ -1699,7 +1768,7 @@ impl SessionActor {
         let mut attempt = 0u32;
 
         while attempt < MAX_RECONNECT_ATTEMPTS {
-            self.idle_preview_updated_at = None;
+            self.reset_idle_preview(false);
             self.network_counters = None;
             self.network = None;
             self.graphics = Default::default();
@@ -2009,38 +2078,6 @@ enum ReactivationOutcome {
     /// protocol failure, server redirection, user disconnect). The actor
     /// must unwind with the carried reason.
     Stop(DisconnectReason),
-}
-
-/// Return encoded desktop bytes (including fragments) and whether a desktop
-/// update ended in this PDU. A software cursor can dirty the image on its own.
-fn fast_path_desktop_update(payload: &[u8]) -> (usize, bool) {
-    use ironrdp_core::{ReadCursor, decode_cursor};
-    use ironrdp_pdu::fast_path::{FastPathHeader, FastPathUpdatePdu, Fragmentation, UpdateCode};
-    let mut cursor = ReadCursor::new(payload);
-    if decode_cursor::<FastPathHeader>(&mut cursor).is_err() {
-        return (0, false);
-    }
-    let mut size = 0;
-    let mut completed = false;
-    while !cursor.is_empty() {
-        let Ok(pdu) = decode_cursor::<FastPathUpdatePdu>(&mut cursor) else {
-            break;
-        };
-        if matches!(
-            pdu.update_code,
-            UpdateCode::Bitmap
-                | UpdateCode::SurfaceCommands
-                | UpdateCode::Orders
-                | UpdateCode::Palette
-        ) {
-            size += pdu.data.len();
-            completed |= matches!(
-                pdu.fragmentation,
-                Fragmentation::Single | Fragmentation::Last
-            );
-        }
-    }
-    (size, completed)
 }
 
 /// Keep one request while the server opens the channel and sends capabilities.
@@ -2362,6 +2399,9 @@ impl SessionManager {
 
         // Build initial info for the watch channel
         let initial_info = SessionInfo {
+            display_paused: false,
+            display_pause_available: false,
+            display_pause_unavailable_reason: None,
             idle_preview_state: IdlePreviewState::Off,
             idle_preview_updated_at: None,
             network: None,
@@ -5842,6 +5882,11 @@ mod tests {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             for supported in [true, false] {
                 let (manager, id, mut peer) = suppressed_session().await;
+                let previous = manager
+                    .get_session_info(&id)
+                    .await
+                    .unwrap()
+                    .idle_preview_updated_at;
                 let mut script = reactivation_script_frames();
                 script[1] = demand_active_with_suppression(96, 80, supported);
                 for frame in script {
@@ -5855,7 +5900,7 @@ mod tests {
                     IdlePreviewState::Unsupported
                 };
                 assert_eq!(info.idle_preview_state, expected_state);
-                assert!(info.idle_preview_updated_at.is_none());
+                assert_eq!(info.idle_preview_updated_at, previous);
                 assert_eq!((info.width, info.height), (96, 80));
                 let mut share = synthetic_connection_result(96, 80);
                 share.share_id = REACTIVATION_SHARE_ID;
@@ -5870,6 +5915,10 @@ mod tests {
                 assert_eq!(wire[..len].ends_with(&allow), supported);
                 manager.remove_session(&id).await.unwrap();
             }
+        }
+
+        mod manual_redraw {
+            include!("session/manual_redraw.rs");
         }
 
         async fn verify_delivery_reactivation(size: u16, ack_during_activation: bool) {

@@ -11,7 +11,8 @@ import {
   layoutSurface,
   type DisplayMode,
   unionDirtyRect,
-  type DirtyRect,
+  prepareCanvasSurface,
+  type CanvasSurface,
 } from '../../lib/canvas-compositor';
 import type { SessionStatus } from '../../types';
 import { subscribeCanvasWheel } from './canvas-wheel';
@@ -20,14 +21,6 @@ interface MouseSurfaceBounds {
   rect: DOMRect;
   surfaceWidth: number;
   surfaceHeight: number;
-}
-
-interface SurfaceBuffer {
-  width: number;
-  height: number;
-  pixels: Uint8ClampedArray;
-  imageData: ImageData | null;
-  dirty: DirtyRect | null;
 }
 
 interface Props {
@@ -77,7 +70,7 @@ export function SessionCanvas({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const surfaceRef = useRef<SurfaceBuffer | null>(null);
+  const surfaceRef = useRef<CanvasSurface | null>(null);
   const renderScheduledRef = useRef(false);
   const pendingConsumptionRef = useRef<(() => void) | undefined>(undefined);
   const animationFrameRef = useRef<number | null>(null);
@@ -89,39 +82,10 @@ export function SessionCanvas({
     height: surfaceHeight,
   }));
 
-  const ensureSurface = useCallback((width: number, height: number) => {
-    const nextWidth = Math.max(1, Math.round(width));
-    const nextHeight = Math.max(1, Math.round(height));
-    const current = surfaceRef.current;
-
-    if (current && current.width === nextWidth && current.height === nextHeight) {
-      return current;
-    }
-
-    const pixels = new Uint8ClampedArray(nextWidth * nextHeight * 4);
-    const imageData = new ImageData(pixels, nextWidth, nextHeight);
-    const nextSurface: SurfaceBuffer = {
-      width: nextWidth,
-      height: nextHeight,
-      pixels,
-      imageData,
-      dirty: {
-        x: 0,
-        y: 0,
-        width: nextWidth,
-        height: nextHeight,
-      },
-    };
-
-    surfaceRef.current = nextSurface;
-
-    const canvas = canvasRef.current;
-    if (canvas) {
-      canvas.width = nextWidth;
-      canvas.height = nextHeight;
-    }
-
-    return nextSurface;
+  const ensureSurface = useCallback((width: number, height: number, source: 'session-info' | 'frame') => {
+    const surface = prepareCanvasSurface(surfaceRef.current, width, height, source);
+    surfaceRef.current = surface;
+    return surface;
   }, []);
 
   // Latest-ref indirection for the recursive draw scheduler: the rAF callback
@@ -193,7 +157,7 @@ export function SessionCanvas({
   }, [onFramePresented]);
 
   useLayoutEffect(() => {
-    const surface = ensureSurface(surfaceWidth, surfaceHeight);
+    const surface = ensureSurface(surfaceWidth, surfaceHeight, 'session-info');
     surface.dirty = unionDirtyRect(surface.dirty, {
       x: 0,
       y: 0,
@@ -237,7 +201,7 @@ export function SessionCanvas({
         return;
       }
 
-      const surface = ensureSurface(packet.surfaceWidth, packet.surfaceHeight);
+      const surface = ensureSurface(packet.surfaceWidth, packet.surfaceHeight, 'frame');
       updateLayout();
 
       compositeFrameRects(surface, packet.rects);
