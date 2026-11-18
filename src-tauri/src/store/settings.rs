@@ -287,11 +287,13 @@ mod tests {
             "empty dir -> defaults"
         );
 
-        let mut custom = AppSettings::default();
-        custom.theme = "dark".into();
-        custom.default_port = 4000;
-        custom.show_performance_hud = true;
-        custom.connection_timeout = 12345;
+        let custom = AppSettings {
+            theme: "dark".into(),
+            default_port: 4000,
+            show_performance_hud: true,
+            connection_timeout: 12345,
+            ..AppSettings::default()
+        };
         // Task 5.2: the update flow is partial (`apply`); a patch carrying
         // every customized field is the full-replacement equivalent.
         let saved = store

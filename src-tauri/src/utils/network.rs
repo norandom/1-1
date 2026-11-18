@@ -85,7 +85,7 @@ mod tests {
         // Port 19876 is unlikely to have anything listening
         let result = test_tcp_connection("127.0.0.1", 19876, 1000).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[tokio::test]
