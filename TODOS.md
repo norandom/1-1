@@ -1,55 +1,25 @@
 # TODOS
 
-## Completed
+This is a personal fork (no warranty, no support), so this list is a scratchpad, not a promise.
 
-### ~~IronRDP Integration~~ ✓
-Actor-per-session pattern implemented. IronRDP crates added (v0.14). TCP connection + TLS infrastructure built. Falls back to mock frames until connected to a live Windows server. Full protocol negotiation code is structured and ready to enable.
+## Done
 
-### ~~Auto-Reconnect with Exponential Backoff~~ ✓
-Implemented with delays of 2s, 4s, 8s, 16s, 30s (capped). Max 5 attempts. Reconnecting overlay shows attempt count and estimated delay. Cancel button available. Triggered on connection loss (not user disconnect).
-
-### ~~Clipboard Sync Scaffold~~ ✓
-Backend commands (clipboard_write, clipboard_read) and frontend hook (useClipboard) scaffolded. Ready to wire to IronRDP's cliprdr virtual channel.
-
-### ~~Connection State Animations~~ ✓
-Pulsing indigo glow on testing, green pulse on success, shake on error. Connecting spinner overlay on Connect button click.
-
-### ~~SSH Config Import~~ ✓
-Parses ~/.ssh/config Host entries. Creates connections with RDP port 3389. Available in Import dropdown on ConnectionGrid.
-
----
+- **IronRDP core.** Full TLS + CredSSP/NLA negotiation against real servers: Windows RDP Server (Win11, NLA mandatory), FreeRDP/xfreerdp on Linux, and IronRDP-based Rust servers on Linux. Actor-per-session pattern.
+- **Auto-reconnect.** Exponential backoff of 2s, 4s, 8s, 16s, then 30s capped, max 5 attempts, with an overlay showing attempt count and a cancel button. Fires on connection loss, not on user disconnect.
+- **Clipboard sync.** Bidirectional via IronRDP's cliprdr channel, with a status indicator in the layout.
+- **Status bar.** Bottom bar with connection state and metrics; hide or pin it per host, right from the bar itself.
+- **Bandwidth-saver pause.** Client-issued pause of display updates from the session. Hosts that ignore the pause are reported within seconds, and mouse or keyboard input keeps a fresh pause alive for five seconds.
+- **Idle preview.** Per-host option (Windows preview): after five idle minutes a busy unattended desktop refreshes about once a minute; input or tab focus restores live updates.
+- **Compression and codec stack.** Per-host bulk compression (off, RDP4, RDP5, RDP6, RDP6.1) and per-host color depth (15/16/24/32 bpp), negotiated at connect time and applied on reconnect. Codec policy advertises only ClearCodec, Planar, Uncompressed, and RFX Progressive; H.264/AVC is never advertised or decoded. ClearCodec is preferred over H.264 because H.264 blurs small text, which matters for agentic coding in VMs. Performance HUD carries receive/send rates and totals.
+- **SSH config import.** Parses `~/.ssh/config` Host entries into connections on port 3389.
+- **Auto-update plumbing.** Updater plugin, signed preview feed (`latest.json` on the `preview-channel` prerelease), CI-built NSIS/DMG/AppImage on version tags. Updates are explicit and blocked during active sessions.
 
 ## Remaining
 
-### P1 — Enable Full IronRDP Protocol Negotiation
-**What:** Enable the commented-out IronRDP connector code to complete TLS + CredSSP/NLA handshake with real Windows servers.
-**Why:** The TCP connection and TLS infrastructure are in place, but the full RDP protocol negotiation (X.224, MCS, licensing, capabilities exchange) needs a live Windows server to test against.
-**Effort:** M
-**Context:** See `rdp/client.rs::attempt_rdp_connection()`. The IronRDP connector config, TLS upgrade, and session loop are structured. Need to: (1) test against a Windows VM with RDP enabled, (2) handle the various NLA scenarios, (3) wire IronRDP's graphics updates into the frame emitter.
-**Depends on:** Access to a Windows machine with RDP enabled for testing.
-
-### P2 — Wire Clipboard to IronRDP cliprdr Channel
-**What:** Connect the clipboard scaffold to IronRDP's `ironrdp-cliprdr` virtual channel.
-**Why:** The frontend hook and backend commands exist but return stubs. Need real clipboard sync.
-**Effort:** M
-**Context:** `useClipboard.ts` listens for paste events and Tauri clipboard events. `commands/clipboard.rs` has stub commands. IronRDP's cliprdr SVC needs to be registered with the session and bridged to these commands.
-**Depends on:** Full IronRDP protocol negotiation (P1).
-
-### P2 — Audio Redirection
-**What:** Forward remote audio to local speakers via IronRDP's rdpsnd channel.
-**Why:** Many remote desktop workflows involve audio (video calls, media).
-**Effort:** L
-**Context:** `ironrdp-rdpsnd` and `ironrdp-rdpsnd-native` crates are available. Need to register the SVC, decode audio samples, and play locally (via `cpal` or `rodio` crate).
-**Depends on:** Full IronRDP protocol negotiation (P1).
-
-### P3 — File Transfer via Drag-and-Drop
-**What:** Drag files from local OS onto the session canvas to transfer to remote machine.
-**Why:** File transfer is a core RDP workflow.
-**Effort:** L
-**Context:** Use `ironrdp-rdpdr` (device redirection) to expose a virtual drive. Frontend handles drag events.
-**Depends on:** Full IronRDP protocol negotiation (P1).
-
-### P3 — SSH Tunneling
-**What:** Built-in SSH tunnel for RDP-over-SSH connections.
-**Effort:** M
-**Context:** The `ssh2` crate was in the original plan. Create a local TCP proxy that tunnels through an SSH connection to the target host's RDP port.
+- **Segmented redirect copies (P1).** RDP drive redirection with one granted local folder per host, then segmented copying: bounded parallel range requests on the same file and connection, verified byte for byte against the ordinary mount. Ship only if measurements show a real win over one range in flight.
+- **Rsync-style delta sync (P2).** On top of redirects, move only changed blocks (rsync/Unison-style comparison over the redirected drive). Deferred until the copy measurements exist.
+- **Auto-update hardening (P2).** Runtime validation currently covers Windows x64 only; extend the real-host matrix to ARM64, macOS, and Linux and keep the feed and signing workflow honest.
+- **Audio redirection (P3).** rdpsnd channel, decoded and played locally.
+- **Multi-monitor (P3).** Beyond the current single-surface model.
+- **Session recording (P3).** Frames to MP4.
+- **LAN auto-discovery (P3).** Find Windows machines on the local network.
