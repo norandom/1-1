@@ -1,9 +1,18 @@
 # Readable remote desktop roadmap
 
-Updated 2026-11-17. The user requested a focused roadmap and authorized proceeding.
-Continue the approved `windows-clearcodec-royalts-e2e` spec; no new spec or
-protocol rewrite is needed. Existing completed work remains evidence, not a
-substitute for integrated user journeys.
+Updated 2026-11-18. The maintainer approved the folder-sharing and session-actions task plans for implementation. Pause and Resume are the first Windows test milestone. The workspace delta-sync design is deferred until the ordinary share measurements are available. The [Windows preview handover](../handover.md) lists the existing release work and outstanding real-host checks.
+
+## Specs (dependency order)
+
+- [ ] **RDP folder sharing.** Start with the shared server identity check. Then expose one selected folder, read-only by default, with explicit read/write access available. Verify ordinary copies in both directions on the Windows and two Linux hosts. Measure bytes, concurrent requests and typing latency before deciding on a segmented copy command. [Requirements](../specs/rdp-folder-sharing/requirements.md) · [Design](../specs/rdp-folder-sharing/design.md) · [Tasks](../specs/rdp-folder-sharing/tasks.md)
+- [ ] **Session actions.** The first Windows milestone is Pause and Resume in the existing status bar. This can proceed alongside the server identity work. The saved-host credential test reuses that identity check and can ship before the file share. [Requirements](../specs/rdp-session-actions/requirements.md) · [Design](../specs/rdp-session-actions/design.md) · [Tasks](../specs/rdp-session-actions/tasks.md)
+- [ ] **Workspace delta sync.** If the measured mount baseline justifies it, compare native rsync and Unison over opt-in SSH for explicit uploads and downloads. Verify shifted-block savings and preservation of concurrent edits before choosing a tool or funding a custom peer. [Requirements](../specs/workspace-delta-sync/requirements.md) · [Design](../specs/workspace-delta-sync/design.md)
+
+The new proposals carry their own approval state. The prior spec's 62 completed numbered tasks out of 77 and its separate bandwidth experiment retain their original scope. Immediate acceptance work on the Windows client still includes Windows and FreeRDP shrink/restore, real-host clipboard Resync after reconnect, and the active and unattended bandwidth comparisons.
+
+The shared server identity check and saved-host fingerprint review are implemented. On 18 November the Windows client connected, rendered and reconnected on all three staged hosts. The IronRDP host confirmed both resize steps. Windows and FreeRDP still need native shrink and restore confirmation. [Three-host results](../specs/rdp-folder-sharing/validation.md)
+
+## November 17 implementation and release scope
 
 User clarification on 2026-11-17: no font defect is currently reported; the
 updated software awaits testing. The next priority is real connection and smart
@@ -12,6 +21,13 @@ local fit scaling, and inspect text rendering after resize before diagnosing
 font smoothing. The full fixed-text matrix remains later acceptance work.
 
 ## Outcome
+
+The product is now **1-1**, pronounced **zero** (user-confirmed 2026-11-17).
+Current user priority after the native resize observation: maximize vertical
+workspace, move display/resize controls to a compact menu, persist professional
+per-host experience/network options, and size the initial dynamic connection to
+the real viewport. Requirements 14.7-14.10 and additional tasks 11.0d-f capture
+these directed changes; they do not erase pending real-server/release acceptance.
 
 Readable remote text, predictable window and session navigation, and reliable
 operation against the existing Windows 11, FreeRDP-based Linux, and IronRDP-based
@@ -33,6 +49,29 @@ The existing plan includes additional Windows Server and grd coverage. Keep thos
 release obligations; do not silently treat the three staged targets as equivalents.
 No new glyph rendering subsystem, codec implementation, dependency upgrade, or
 test framework is planned for text readability. Use upstream capabilities.
+
+Latest smart-resize evidence: independently reviewed implementation committed
+`c7ef77f`; native Windows 1920x1080 to 3180x1271 confirmed with desktop redraw.
+User Escape interrupted restore. Follow-up headless three-host run at
+`group11/resize-smoke/smoke-20261117-135059` passed connection gates and redaction,
+confirmed IronRDP 3064x1264 to 1280x720 and back, but Windows/FreeRDP resize
+confirmation timed out after requests were sent. Do not call the overall smoke
+PASS a three-host resize PASS. Read-only investigation did not isolate the
+harness/native discrepancy; recording ignored smoke write errors/termination is
+the next diagnostic step. Test app is closed, isolated credentials removed,
+Computer Use reset.
+
+Professional-control delivery: branding is committed in `0e128a1`, and task 11.0d
+profile persistence/protocol flags in `35a30cd`, independently reviewed with
+304 default / 322 test-support Rust tests and 490 frontend tests passing.
+11.0e compact menu/form is committed in `335f9a8`; 11.0f initial viewport sizing
+is committed in `4fef31e`. The native follow-up confirmed unclipped menus,
+per-host WAN persistence, and Windows initial request/actual size of 940x736.
+Fixed mode retained that resolution while maximizing. Escape also opened the
+disconnect dialog when dismissing a menu; this integration finding is being
+repaired before continuing the remaining native resize checks. The test app is
+closed, temporary credentials removed, and Computer Use reset.
+These checks do not establish full three-host resize or text-quality acceptance.
 
 ## Review findings and scope control
 
@@ -134,3 +173,15 @@ UI cleanup checks passed on 2026-11-17: 428 frontend tests, lint, app typecheck,
 frontend build, Rust formatting and Clippy (two existing warnings). Native debug
 preview confirmed spacing and a single window-control row; live RDP and populated
 dashboard interaction were not tested in that review.
+
+## Delivery queue recorded on 2026-11-17
+
+Completed and independently reviewed: professional graphics depth/compression (11.0h), one-second status-bar hover delay (11.0i), directional clipboard Resync/recovery (11.0j), and native text plus images/screenshots (11.0k). These are implementation results; real-host clipboard acceptance is still open.
+
+The diagnostic repair subsequently landed. All three targets connected and the IronRDP host confirmed shrink and restore. Native Windows and FreeRDP round trips and real-host clipboard checks are still pending. See the [handover](../handover.md) for the test sequence.
+
+Remaining release work: 11.0a-c shared/native test harness adapters, 11.1-11.3 storage/keyboard/session journeys, 11.4-11.6 server interoperability, 11.7-11.10 DPI/text fidelity, 11.11 performance and 11.12 final platform/evidence gates. The three staged hosts do not replace the Windows Server/grd requirements. Keep tasks unchecked until their full evidence exists.
+
+Later feature candidates: remote DPI and keyboard layout controls, and clearer negotiated-session diagnostics. File transfer, multi-monitor, audio and drive redirection require separate integration scope. Prioritize validating the delivered features before adding these.
+
+User removed the build guard: no mandatory storage checks or budget stops. Occasional explicit package-only cleanup while idle is sufficient; preserve evidence and active output.

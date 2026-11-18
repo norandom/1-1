@@ -2,6 +2,12 @@
 
 **17 November 2026.** 1-1 (pronounced “zero”) is an RDP client for coding and monitoring remote agents. The maintainer reported a successful manual test of the Windows x64 preview built from `98b6081`. The priorities are legible text while typing and resizing, responsive input, and clipboard recovery during long sessions.
 
+## November 18 implementation
+
+The maintainer approved two new specs. The first Windows test milestone is **Pause display** in the existing status bar. The saved-host credential test shares the server identity check with folder sharing. The test uses one verified connection and ends before a desktop opens. A host that selects plain TLS without NLA can still open a desktop, but its response cannot verify a saved password in this check. [Session actions and task status](specs/rdp-session-actions/tasks.md)
+
+The Windows folder fixture reads a selected directory through IronRDP, including offsets above 4 GiB. The next user-visible step is granting one folder to a saved host. Ordinary copies on Windows and both Linux hosts will establish whether parallel ranges save time and how copying affects typing. The rsync-style overlay remains deferred until those measurements exist. [Folder-sharing tasks](specs/rdp-folder-sharing/tasks.md) · [Windows test results](specs/rdp-folder-sharing/validation.md)
+
 ## Where to resume
 
 1. **Finish the Windows-client smart resize check (11.4).** Open the native app, connect to the Windows workstation and FreeRDP targets in turn, shrink the window, then restore it. Record the remote desktop dimensions and a fresh desktop update after each change. All three lab targets passed connection, first frame and shutdown. The automated probe confirmed both resize steps on IronRDP. It timed out waiting for confirmation on Windows and FreeRDP. One earlier native Windows run confirmed a single resize.

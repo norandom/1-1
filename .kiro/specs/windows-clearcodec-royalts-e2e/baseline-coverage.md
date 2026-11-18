@@ -96,6 +96,23 @@ Real-server smart resize and text fidelity still require separate evidence.
 
 ### Staged three-host smoke (2026-11-17)
 
+Follow-up after Display Control repair (`c7ef77f`):
+`D:/BuildArtifacts/drift-rdp/group11/resize-smoke/smoke-20261117-135059`.
+Connection, first-desktop-frame and shutdown gates passed on all three targets;
+redaction self-check passed. All targets negotiated Display Control and the
+requested layouts were sent. IronRDP confirmed 1280x720 then restored 3064x1264
+through reactivation and decoded desktop frames. Windows and FreeRDP timed out
+awaiting resize confirmation for 1280x720 and restoration to 1920x1080. FreeRDP's
+null decoded dimensions mean unobserved, not zero-sized. Native Windows separately
+confirmed 1920x1080 to 3180x1271 and desktop redraw; user Escape interrupted restore.
+
+Acceptance: connect 3/3; headless shrink/restore 1/3; native Windows resize observed,
+native restore unverified. Read-only investigation did not isolate the discrepancy:
+encoder/channel readiness and shared compositor agree, but request sequence/timing
+differ and smoke does not yet report all response-write/Terminate outcomes. Do not
+claim server refusal or all-host resize success. Further diagnosis is deferred
+while the requested host-profile/menu/initial-sizing work proceeds.
+
 `scripts/Invoke-Baseline.ps1 -Mode Smoke` passed on the reviewed B3-7 Rust
 working tree based on `85de5eb`. Report and redaction self-check:
 `D:/BuildArtifacts/drift-rdp/group11/real-smoke/smoke-20261117-130820`.
