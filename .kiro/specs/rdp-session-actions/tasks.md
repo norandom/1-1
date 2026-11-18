@@ -32,7 +32,7 @@ The independent Kiro task-plan review passed on 18 November 2026. The review cov
   - _Boundary: Session UI and IPC integration_
   - _Requirements: 2.1, 2.4, 2.5, 2.6, 2.7, 2.9_
 
-- [ ] 2. Test the credential saved for one host
+- [x] 2. Test the credential saved for one host
 - [x] 2.1 (P) Stop one authenticated probe before desktop establishment
   - Open a single connection to the saved endpoint and consume the verified identity on that same TLS socket. Drive the pinned NLA sequence with the saved identity only. Return typed evidence from received server messages and close the socket before reporting.
   - Use a counting protocol fixture. A changed or unknown identity shows no credential transmission. Completion and cancellation show no desktop negotiation, reconnect, alternate credential, channel registration or change to an existing desktop.
@@ -51,7 +51,7 @@ The independent Kiro task-plan review passed on 18 November 2026. The review cov
   - Race duplicate requests and profile edits with delayed keyring and protocol fixtures. Observe one attempt for the unchanged revision, bounded completion on timeout, closure of an open socket and zero late writes or stale results.
   - _Boundary: Saved-host commands, credential store and probe integration_
   - _Requirements: 1.1, 1.2, 1.5, 1.6, 1.7, 1.9, 1.10_
-- [ ] 2.4 Show the result in the selected saved host's menu
+- [x] 2.4 Show the result in the selected saved host's menu
   - Add **Test credentials** with Checking, green Accepted, red Rejected and gray Unable to verify with its reason. Include the host name and announce the result as text. Offer the shared identity review action on the applicable gray result and let the operator explicitly retest.
   - Test keyboard activation, repetition while pending, switching hosts, changing a saved profile and deletion/reload while the request is outstanding. Results appear only on the matching revision. Opening the menu keeps the existing desktop's remote keys balanced.
   - _Boundary: Saved-host menu and IPC integration_

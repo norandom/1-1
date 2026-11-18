@@ -20,6 +20,7 @@ describe('contextMenuItems (Req 10.7, pinned sets)', () => {
   it('offers server identity review on a saved connection', () => {
     expect(contextMenuItems('connection')).toEqual([
       'Connect',
+      'Test credentials',
       'Review server identity',
       'Edit',
       'Duplicate',
@@ -68,6 +69,7 @@ describe('contextMenuItems (Req 10.7, pinned sets)', () => {
 describe('menuActionFor', () => {
   it('maps every pinned item label to its action', () => {
     expect(menuActionFor('Connect')).toBe('connect');
+    expect(menuActionFor('Test credentials')).toBe('test-credentials');
     expect(menuActionFor('Review server identity')).toBe('review-server-identity');
     expect(menuActionFor('Edit')).toBe('edit');
     expect(menuActionFor('Duplicate')).toBe('duplicate');

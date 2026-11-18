@@ -57,6 +57,7 @@ import {
 } from '../../lib/tree-confirm';
 import { ConnectionForm } from '../connections/ConnectionForm';
 import { ServerIdentityDialog } from '../connections/ServerIdentityDialog';
+import { CredentialTestMenuItem } from '../connections/CredentialTestMenuItem';
 // Task 8.5 (Req 10.6): the ONE shared connect action (design.md L379).
 import { useConnectAction } from '../../hooks/useConnectAction';
 import {
@@ -266,7 +267,9 @@ function TreeRow({
             focusRow(key);
           }}
         >
-          {contextMenuItems(a11y.kind).map((item) => (
+          {contextMenuItems(a11y.kind).map((item) => menuActionFor(item) === 'test-credentials' ? (
+            <CredentialTestMenuItem key={item} id={a11y.node.id} name={a11y.name} />
+          ) : (
             <DropdownMenuItem
               key={item}
               // 8.7 (Req 10.12): every mutating item disabled while
@@ -472,6 +475,8 @@ export function ConnectionTree() {
 
   // ── Keyboard controller wiring (all semantics in tree-keyboard) ────
   const handleTreeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    // Key events from the portalled menu bubble through its React parent.
+    if (!event.currentTarget.contains(event.target as Node)) return;
     if (!effectiveFocusedKey) return;
     const focused = a11yNodes.find((a) => nodeKey(a.node) === effectiveFocusedKey)?.node;
     if (!focused) return;
@@ -665,6 +670,7 @@ export function ConnectionTree() {
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <div
           role="tree"
+          data-local-input
           aria-label="Connections"
           onKeyDown={handleTreeKeyDown}
           className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
