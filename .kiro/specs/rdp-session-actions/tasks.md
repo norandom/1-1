@@ -7,7 +7,7 @@ Each numbered subtask is one implementation or validation unit, sized for roughl
 The independent Kiro task-plan review passed on 18 November 2026. The review covered all 19 acceptance criteria, task dependencies and Windows test milestones.
 
 - [ ] 1. Pause and resume one connected display
-- [ ] 1.1 Add manual minute previews to the existing idle policy
+- [x] 1.1 Add manual minute previews to the existing idle policy
   - On an explicit pause suppress immediately, even with automatic preview off. Adopt an already suppressed interval, close an open automatic preview and keep manual intent on a quiet or costly screen.
   - Use virtual time to show two-second update windows about 60 seconds apart. Coalesce late ticks and return to the saved automatic policy on deliberate resume or a fresh connection.
   - Exercise the capability flag and ignored-suppression rule. After the two-second grace period, desktop paints in three consecutive ten-second suppressed intervals trigger a return to live. Cursor changes, preview windows and resize redraws cannot trigger it.

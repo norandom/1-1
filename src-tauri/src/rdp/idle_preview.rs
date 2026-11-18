@@ -8,6 +8,9 @@ const PREVIEW_WINDOW: Duration = Duration::from_secs(2);
 const RECENT_GRAPHICS: Duration = Duration::from_secs(10);
 const DISTINCT_UPDATES: Duration = Duration::from_secs(1);
 const MIN_TRIAL_BYTES: u64 = 4 * 1024;
+const SUPPRESSION_GRACE: Duration = Duration::from_secs(2);
+const OBSERVATION_INTERVAL: Duration = Duration::from_secs(10);
+const REFUSAL_INTERVALS: u8 = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,8 +29,57 @@ pub enum DisplayAction {
     Allow,
 }
 
+struct SuppressedPaints {
+    observe_from: Instant,
+    last_interval: Option<u64>,
+    consecutive: u8,
+}
+
+impl SuppressedPaints {
+    fn new(now: Instant) -> Self {
+        Self {
+            observe_from: now + SUPPRESSION_GRACE,
+            last_interval: None,
+            consecutive: 0,
+        }
+    }
+
+    fn interval(&self, now: Instant) -> Option<u64> {
+        now.checked_duration_since(self.observe_from)
+            .map(|elapsed| elapsed.as_secs() / OBSERVATION_INTERVAL.as_secs())
+    }
+
+    fn record(&mut self, now: Instant) {
+        let Some(interval) = self.interval(now) else {
+            return;
+        };
+        if self.last_interval == Some(interval) || self.consecutive == REFUSAL_INTERVALS {
+            return;
+        }
+        self.consecutive = if self.last_interval.is_some_and(|last| last + 1 == interval) {
+            self.consecutive + 1
+        } else {
+            1
+        };
+        self.last_interval = Some(interval);
+    }
+
+    fn confirmed(&self, now: Instant) -> bool {
+        self.consecutive == REFUSAL_INTERVALS && self.interval(now) > self.last_interval
+    }
+}
+
+struct ManualPause {
+    next_preview: Instant,
+    redraw_pending: bool,
+}
+
 pub struct IdlePreview {
     state: IdlePreviewState,
+    automatic_enabled: bool,
+    manual: Option<ManualPause>,
+    suppressed_paints: SuppressedPaints,
+    pause_unavailable_reason: Option<&'static str>,
     next_transition: Instant,
     /// A single refresh split into many rectangles should count as one burst.
     recent_updates: [Option<Instant>; 2],
@@ -38,7 +90,77 @@ pub struct IdlePreview {
     cycle_bytes: u64,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Session-actions tasks 1.2 and 1.3 wire these methods to the actor"
+    )
+)]
 impl IdlePreview {
+    pub fn pause(&mut self, now: Instant) -> Option<DisplayAction> {
+        if self.manual.is_some() || self.pause_unavailable_reason.is_some() {
+            return None;
+        }
+        let action = if self.state == IdlePreviewState::Suppressed {
+            None
+        } else {
+            Some(self.suppress_until(now, now + PREVIEW_PERIOD))
+        };
+        self.manual = Some(ManualPause {
+            next_preview: self.next_transition,
+            redraw_pending: false,
+        });
+        action
+    }
+
+    pub fn is_manually_paused(&self) -> bool {
+        self.manual.is_some()
+    }
+
+    pub fn pause_unavailable_reason(&self) -> Option<&'static str> {
+        self.pause_unavailable_reason
+    }
+
+    pub fn begin_manual_redraw(&mut self, now: Instant) -> Option<DisplayAction> {
+        self.manual.as_mut()?.redraw_pending = true;
+        (self.state == IdlePreviewState::Suppressed).then(|| self.open_preview(now))
+    }
+
+    pub fn finish_manual_redraw(&mut self, now: Instant) -> Option<DisplayAction> {
+        if self.manual.as_ref()?.redraw_pending {
+            self.close_manual_preview(now)
+        } else {
+            None
+        }
+    }
+}
+
+impl IdlePreview {
+    fn close_manual_preview(&mut self, now: Instant) -> Option<DisplayAction> {
+        let manual = self.manual.as_mut()?;
+        manual.redraw_pending = false;
+        if manual.next_preview <= now {
+            manual.next_preview = now + PREVIEW_PERIOD;
+        }
+        let deadline = manual.next_preview;
+        Some(self.suppress_until(now, deadline))
+    }
+
+    fn suppress_until(&mut self, now: Instant, deadline: Instant) -> DisplayAction {
+        self.state = IdlePreviewState::Suppressed;
+        self.suppressed_paints = SuppressedPaints::new(now);
+        self.next_transition = deadline;
+        DisplayAction::Suppress
+    }
+
+    fn open_preview(&mut self, now: Instant) -> DisplayAction {
+        self.state = IdlePreviewState::Preview;
+        self.next_transition = now + PREVIEW_WINDOW;
+        self.recent_updates = [None; 2];
+        DisplayAction::Allow
+    }
+
     pub fn new(enabled: bool, supported: bool, now: Instant) -> Self {
         let state = match (enabled, supported) {
             (false, _) => IdlePreviewState::Off,
@@ -47,6 +169,11 @@ impl IdlePreview {
         };
         Self {
             state,
+            automatic_enabled: enabled,
+            manual: None,
+            suppressed_paints: SuppressedPaints::new(now),
+            pause_unavailable_reason: (!supported)
+                .then_some("Host does not support display pause."),
             next_transition: now + IDLE_DELAY,
             recent_updates: [None; 2],
             origin: now,
@@ -63,6 +190,12 @@ impl IdlePreview {
     /// While live, count only identifiable desktop bytes. During a trial,
     /// charge every received PDU, including fragments that have yet to paint.
     pub fn on_transfer(&mut self, now: Instant, encoded_bytes: usize, desktop_painted: bool) {
+        if desktop_painted && self.state == IdlePreviewState::Suppressed {
+            self.suppressed_paints.record(now);
+        }
+        if self.manual.is_some() {
+            return;
+        }
         match self.state {
             IdlePreviewState::Live => {
                 let second = now.duration_since(self.origin).as_secs();
@@ -98,13 +231,38 @@ impl IdlePreview {
             return None;
         }
         let action = (self.state == IdlePreviewState::Suppressed).then_some(DisplayAction::Allow);
-        self.state = IdlePreviewState::Live;
+        self.manual = None;
+        self.state = if self.automatic_enabled {
+            IdlePreviewState::Live
+        } else {
+            IdlePreviewState::Off
+        };
         self.next_transition = now + IDLE_DELAY;
         self.recent_updates = [None; 2];
         action
     }
 
     pub fn on_timer(&mut self, now: Instant) -> Option<DisplayAction> {
+        if let Some(manual) = &mut self.manual {
+            if self.state == IdlePreviewState::Suppressed && self.suppressed_paints.confirmed(now) {
+                self.manual = None;
+                self.pause_unavailable_reason = Some("Host continues sending display updates.");
+                self.state = if self.automatic_enabled {
+                    IdlePreviewState::Unsupported
+                } else {
+                    IdlePreviewState::Off
+                };
+                return Some(DisplayAction::Allow);
+            }
+            if now < self.next_transition {
+                return None;
+            }
+            if self.state == IdlePreviewState::Preview {
+                return self.close_manual_preview(now);
+            }
+            manual.next_preview = now + PREVIEW_PERIOD;
+            return Some(self.open_preview(now));
+        }
         if now < self.next_transition {
             return None;
         }
@@ -128,23 +286,14 @@ impl IdlePreview {
                 }
                 self.projected_minute_bytes = projected;
                 self.cycle_bytes = 0;
-                self.state = IdlePreviewState::Suppressed;
-                self.next_transition = now + PREVIEW_PERIOD;
-                Some(DisplayAction::Suppress)
+                Some(self.suppress_until(now, now + PREVIEW_PERIOD))
             }
-            IdlePreviewState::Suppressed => {
-                self.state = IdlePreviewState::Preview;
-                self.next_transition = now + PREVIEW_WINDOW;
-                self.recent_updates = [None; 2];
-                Some(DisplayAction::Allow)
-            }
+            IdlePreviewState::Suppressed => Some(self.open_preview(now)),
             IdlePreviewState::Preview
                 if active_desktop && self.cycle_is_cheaper(self.projected_minute_bytes) =>
             {
                 self.cycle_bytes = 0;
-                self.state = IdlePreviewState::Suppressed;
-                self.next_transition = now + (PREVIEW_PERIOD - PREVIEW_WINDOW);
-                Some(DisplayAction::Suppress)
+                Some(self.suppress_until(now, now + (PREVIEW_PERIOD - PREVIEW_WINDOW)))
             }
             // Once the agent stops producing output, ordinary deltas can
             // cost less than requesting a full desktop on every preview.
@@ -237,6 +386,162 @@ mod tests {
         assert_eq!(p.on_timer(start + IDLE_DELAY), Some(Suppress));
         assert_eq!(p.state(), Suppressed);
         p
+    }
+
+    #[test]
+    fn manual_minute_previews_survive_quiet_and_costly_windows_with_auto_off_or_on() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        for auto in [false, true] {
+            let mut p = IdlePreview::new(auto, true, start);
+            assert_eq!(p.pause_unavailable_reason(), None);
+            assert_eq!(p.pause(start), Some(Suppress));
+            assert!(p.is_manually_paused());
+            assert_eq!(p.state(), Suppressed);
+            assert_eq!(p.pause(at(35)), None);
+            for minute in [60, 120] {
+                assert_eq!(p.on_timer(at(minute - 1)), None);
+                assert_eq!(p.on_timer(at(minute)), Some(Allow));
+                assert_eq!(p.state(), Preview);
+                assert_eq!(p.pause(at(minute)), None);
+                if minute == 120 {
+                    p.on_graphics(at(minute), 1_000_000);
+                    p.on_graphics(at(minute + 1), 1_000_000);
+                }
+                assert_eq!(p.on_timer(at(minute + 1)), None);
+                assert_eq!(p.on_timer(at(minute + 2)), Some(Suppress));
+            }
+            assert_eq!(p.on_activity(at(123)), Some(Allow));
+            assert_eq!(p.on_activity(at(123)), None);
+            assert!(!p.is_manually_paused());
+            assert_eq!(p.state(), if auto { Live } else { Off });
+            p.on_graphics(at(421), 4096);
+            p.on_graphics(at(422), 4096);
+            assert_eq!(p.on_timer(at(422)), None);
+            assert_eq!(p.on_timer(at(423)), auto.then_some(Suppress));
+        }
+    }
+
+    #[test]
+    fn manual_pause_adopts_auto_suppression_or_closes_an_open_auto_preview() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut suppressed = active_but_unattended(start);
+        assert_eq!(suppressed.pause(at(320)), None);
+        assert!(suppressed.is_manually_paused());
+        assert_eq!(suppressed.on_timer(at(360)), Some(Allow));
+        assert_eq!(suppressed.on_activity(at(361)), None);
+        assert_eq!(suppressed.state(), Live);
+
+        let mut preview = active_but_unattended(start);
+        assert_eq!(preview.on_timer(at(360)), Some(Allow));
+        assert_eq!(preview.pause(at(361)), Some(Suppress));
+        assert_eq!(preview.on_timer(at(362)), None);
+        assert_eq!(preview.on_timer(at(420)), None);
+        assert_eq!(preview.on_timer(at(421)), Some(Allow));
+    }
+
+    #[test]
+    fn manual_pause_keeps_observations_from_the_same_uninterrupted_auto_suppression() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut p = active_but_unattended(start);
+        p.on_graphics(at(302), 4096);
+        p.on_graphics(at(312), 4096);
+        assert_eq!(p.pause(at(318)), None);
+        p.on_graphics(at(322), 4096);
+        assert_eq!(p.on_timer(at(331)), None);
+        assert_eq!(p.on_timer(at(332)), Some(Allow));
+        assert!(!p.is_manually_paused());
+    }
+
+    #[test]
+    fn manual_late_timers_coalesce_without_replaying_missed_windows() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut p = IdlePreview::new(false, true, start);
+        assert_eq!(p.pause(start), Some(Suppress));
+        assert_eq!(p.on_timer(at(212)), Some(Allow));
+        assert_eq!(p.on_timer(at(212)), None);
+        assert_eq!(p.on_timer(at(215)), Some(Suppress));
+        assert_eq!(p.on_timer(at(271)), None);
+        assert_eq!(p.on_timer(at(272)), Some(Allow));
+        assert_eq!(p.on_timer(at(500)), Some(Suppress));
+        assert_eq!(p.on_timer(at(500)), None);
+    }
+
+    #[test]
+    fn manual_pause_requires_negotiated_support_even_when_auto_is_off() {
+        let now = Instant::now();
+        for auto in [false, true] {
+            let mut p = IdlePreview::new(auto, false, now);
+            assert!(p.pause_unavailable_reason().is_some());
+            assert_eq!(p.pause(now), None);
+            assert!(!p.is_manually_paused());
+            assert_eq!(p.state(), if auto { Unsupported } else { Off });
+        }
+    }
+
+    #[test]
+    fn manual_suppression_refusal_requires_paints_in_three_consecutive_full_intervals() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        for auto in [false, true] {
+            let mut p = IdlePreview::new(auto, true, start);
+            assert_eq!(p.pause(start), Some(Suppress));
+            p.on_graphics(at(1), 9000); // In flight during grace.
+            p.on_transfer(at(4), 4096, false); // Cursor or channel traffic.
+            for second in [12, 14, 21, 22, 29] {
+                p.on_graphics(at(second), 4096);
+            }
+            assert_eq!(p.on_timer(at(32)), None);
+            p.on_transfer(at(33), 9999, false); // Break the consecutive streak.
+            p.on_graphics(at(42), 4096);
+            assert_eq!(p.on_timer(at(52)), None);
+            assert_eq!(p.on_timer(at(60)), Some(Allow));
+            p.on_graphics(at(61), 4096); // Requested preview.
+            assert_eq!(p.on_timer(at(62)), Some(Suppress));
+            for second in [63, 64, 74, 84, 85] {
+                p.on_graphics(at(second), 4096);
+            }
+            assert_eq!(p.on_timer(at(93)), None);
+            assert_eq!(p.on_timer(at(94)), Some(Allow));
+            assert_eq!(
+                p.pause_unavailable_reason(),
+                Some("Host continues sending display updates.")
+            );
+            assert!(!p.is_manually_paused());
+            assert_eq!(p.pause(at(95)), None);
+            assert_eq!(p.on_timer(at(122)), None);
+            assert_eq!(p.state(), if auto { Unsupported } else { Off });
+            let fresh = IdlePreview::new(auto, true, at(124));
+            assert_eq!(fresh.pause_unavailable_reason(), None);
+            assert!(!fresh.is_manually_paused());
+            assert_eq!(fresh.state(), if auto { Live } else { Off });
+        }
+    }
+
+    #[test]
+    fn manual_resize_redraws_reset_observation_and_preserve_the_minute_deadline() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut p = IdlePreview::new(false, true, start);
+        assert_eq!(p.pause(start), Some(Suppress));
+        p.on_graphics(at(3), 4096);
+        p.on_graphics(at(13), 4096);
+        assert_eq!(p.begin_manual_redraw(at(22)), Some(Allow));
+        assert_eq!(p.begin_manual_redraw(at(23)), None);
+        p.on_graphics(at(23), 8000);
+        assert_eq!(p.finish_manual_redraw(at(23)), Some(Suppress));
+        assert_eq!(p.finish_manual_redraw(at(23)), None);
+        p.on_graphics(at(24), 4096); // In flight after the redraw.
+        assert_eq!(p.on_timer(at(33)), None);
+        assert_eq!(p.on_timer(at(60)), Some(Allow));
+        assert_eq!(p.begin_manual_redraw(at(61)), None);
+        assert_eq!(p.on_timer(at(62)), Some(Suppress));
+        assert!(p.is_manually_paused());
+        assert_eq!(p.on_timer(at(120)), Some(Allow));
+        assert_eq!(p.finish_manual_redraw(at(120)), None); // Ordinary preview.
     }
 
     #[test]
