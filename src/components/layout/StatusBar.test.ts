@@ -52,9 +52,10 @@ it('shows the bar with the top toolbar for a host that chose it, and as a row ev
   // An overlay line: it never takes a layout row from the desktop.
   expect(pending).toContain('fixed inset-x-0 bottom-0');
   expect(pending).not.toMatch(/data-status-bar-mode="with-toolbar"[^>]*style=/);
-  // Hidden until the toolbar shows, yet still reachable from the keyboard.
+  // Hidden until the pointer reaches the top edge and the toolbar shows.
   expect(pending).toContain('translate-y-full');
-  expect(pending).toContain('aria-keyshortcuts="Control+Alt+Shift+S"');
+  expect(pending).not.toContain('aria-keyshortcuts');
+  expect(pending).toContain('Keep shown');
   expect(pending).toContain('data-local-input="true"');
   useSessionChrome.getInitialState().visible = true;
   expect(render('/session/opaque-id')).toContain('translate-y-0');
@@ -70,4 +71,6 @@ it('shows the bar with the top toolbar for a host that chose it, and as a row ev
   useConnectionStore.getInitialState().connections = [{ ...build, hostProfile: { ...DEFAULT_HOST_PROFILE, bottomBar: 'always' } }];
   expect(render('/session/session-id')).toContain('data-status-bar-mode="visible"');
   expect(render('/session/session-id')).toContain('style="height:28px"');
+  expect(render('/session/session-id')).toContain('>Hide</span>');
+  expect(render('/')).not.toContain('>Hide</span>');
 });

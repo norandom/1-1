@@ -277,7 +277,7 @@ export function SessionCanvas({
   useEffect(() => {
     if (inputBlocked) return;
     return subscribeCanvasKeyboard(window, document.getElementById('session-options-trigger'), onKeyDown, onKeyUp,
-      document.getElementById('status-bar-focus-target'), { isPaused: isDisplayPaused, canvas: canvasRef.current });
+      { isPaused: isDisplayPaused, canvas: canvasRef.current });
   }, [onKeyDown, onKeyUp, status, inputBlocked, isDisplayPaused]);
 
   const getMouseBounds = useCallback((): MouseSurfaceBounds | null => {

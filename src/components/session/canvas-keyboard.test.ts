@@ -21,24 +21,24 @@ function pausedCanvas() {
   vi.stubGlobal('KeyboardEvent', Key);
   const canvas = Object.assign(new EventTarget(), { tagName: 'CANVAS' });
   const menu = Object.assign(new EventTarget(), { focus: vi.fn() });
-  const bar = Object.assign(new EventTarget(), { focus: vi.fn() });
   const sent: string[] = [];
   const stop = subscribeCanvasKeyboard(canvas, menu,
-    (e) => sent.push('down ' + e.code), (e) => sent.push('up ' + e.code), bar,
+    (e) => sent.push('down ' + e.code), (e) => sent.push('up ' + e.code),
     { isPaused: () => true, canvas });
   const key = (type: 'keydown' | 'keyup', code: string, held: Partial<KeyboardEvent> = {}) =>
     canvas.dispatchEvent(new Key(type, { code, ...held }));
-  return { canvas, menu, bar, sent, stop, key };
+  return { canvas, menu, sent, stop, key };
 }
 
-it.each(['KeyS', 'KeyP'])('keeps a paused session asleep for the entire physical %s local chord', (code) => {
-  const { bar, menu, sent, key, stop } = pausedCanvas();
+it('keeps a paused session asleep for the entire physical session-options chord', () => {
+  const code = 'KeyP';
+  const { menu, sent, key, stop } = pausedCanvas();
   key('keydown', 'ControlRight', { ctrlKey: true });
   key('keydown', 'ShiftLeft', { ctrlKey: true, shiftKey: true });
   key('keydown', 'AltLeft', { ctrlKey: true, shiftKey: true, altKey: true });
   key('keydown', code, { ctrlKey: true, shiftKey: true, altKey: true });
   for (const physical of ['ControlRight', 'ShiftLeft', 'AltLeft', code]) key('keyup', physical);
-  expect(code === 'KeyS' ? bar.focus : menu.focus).toHaveBeenCalledOnce();
+  expect(menu.focus).toHaveBeenCalledOnce();
   expect(sent).toEqual([]);
   stop();
 });
@@ -85,7 +85,7 @@ it('leaves the first wake to clipboard acknowledgement when the paused user pres
     'bidirectional', () => true, { toRemote });
   const down = vi.fn();
   const up = vi.fn();
-  const stopKeys = subscribeCanvasKeyboard(target, null, down, up, null, { canvas: target, isPaused: () => true });
+  const stopKeys = subscribeCanvasKeyboard(target, null, down, up, { canvas: target, isPaused: () => true });
   target.dispatchEvent(new Key('keydown', { code: 'ControlLeft', ctrlKey: true }));
   target.dispatchEvent(new Key('keydown', { code: 'KeyV', ctrlKey: true }));
   target.dispatchEvent(new Key('keyup', { code: 'KeyV', ctrlKey: true }));
@@ -97,7 +97,7 @@ it('leaves the first wake to clipboard acknowledgement when the paused user pres
   stopPaste();
 });
 
-it('leaves the status shortcut to the remote session when auto-hide has no reveal target', () => {
+it('forwards Ctrl+Alt+Shift+S to the remote session: the app no longer claims it', () => {
   const target = new EventTarget();
   const down = vi.fn();
   const cleanup = subscribeCanvasKeyboard(target, null, down, vi.fn());
@@ -105,30 +105,6 @@ it('leaves the status shortcut to the remote session when auto-hide has no revea
   target.dispatchEvent(chord);
   expect(down).toHaveBeenCalledExactlyOnceWith(chord);
   vi.stubGlobal('KeyboardEvent', Key);
-  cleanup();
-});
-
-it.each(['CANVAS', 'BUTTON'])('reveals status bar by shortcut from %s without forwarding it or changing remote Tab', (tagName) => {
-  vi.stubGlobal('KeyboardEvent', Key);
-  const target = Object.assign(new EventTarget(), { tagName: 'CANVAS' });
-  const down = vi.fn();
-  const up = vi.fn();
-  const statusBar = Object.assign(new EventTarget(), { focus: vi.fn() });
-  const cleanup = subscribeCanvasKeyboard(target, null, down, up, statusBar);
-  for (const code of ['ControlLeft', 'AltLeft', 'ShiftLeft']) target.dispatchEvent(new Key('keydown', { code }));
-  target.tagName = tagName;
-  const shortcut = new Key('keydown', { code: 'KeyS', key: 'S', ctrlKey: true, altKey: true, shiftKey: true });
-  target.dispatchEvent(shortcut);
-  expect(shortcut.defaultPrevented).toBe(true);
-  expect(statusBar.focus).toHaveBeenCalledOnce();
-  expect(down).toHaveBeenCalledTimes(3);
-  expect(up.mock.calls.map(([event]) => event.code)).toEqual(['ControlLeft', 'AltLeft', 'ShiftLeft']);
-  target.dispatchEvent(new Key('keyup', { code: 'KeyS', ctrlKey: true, altKey: true, shiftKey: true }));
-  expect(up).toHaveBeenCalledTimes(3);
-  target.tagName = 'CANVAS';
-  const tab = new Key('keydown', { code: 'Tab', key: 'Tab' });
-  target.dispatchEvent(tab);
-  expect(down).toHaveBeenLastCalledWith(tab);
   cleanup();
 });
 

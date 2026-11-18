@@ -1,7 +1,9 @@
-import { Sun, Moon, MonitorCog } from 'lucide-react';
+import { ChevronsDown, Pin, Sun, Moon, MonitorCog } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useConnectionStore } from '../../stores/connectionStore';
+import { selectIsWriteBlocked, useLibraryStore } from '../../stores/libraryStore';
+import { useToastStore } from '../../stores/toastStore';
 import { sessionChrome, useSessionChrome } from '../../stores/sessionChromeStore';
 import { useLocation } from 'react-router-dom';
 import { useTheme } from '../../hooks/useTheme';
@@ -17,12 +19,16 @@ import { bottomBarFollowsToolbar, buildStatusBarText, sessionCountLabel, statusB
 /**
  * The bottom control bar. By default it is a status row below the desktop.
  * A saved host can instead show it as an overlay line that appears and hides
- * with the top session toolbar, leaving the whole window to the desktop.
+ * with the top session toolbar, leaving the whole window to the desktop. The
+ * bar's own button switches the viewed host between the two.
  */
 export function StatusBar() {
   const sessions = useSessionStore((s) => s.sessions);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const connections = useConnectionStore((s) => s.connections);
+  const updateConnection = useConnectionStore((s) => s.updateConnection);
+  const writeBlocked = useLibraryStore(selectIsWriteBlocked);
+  const addToast = useToastStore((s) => s.addToast);
   const chromeVisible = useSessionChrome((s) => s.visible);
   const { pathname } = useLocation();
   const { theme, toggle } = useTheme();
@@ -43,7 +49,19 @@ export function StatusBar() {
     for (const reason of ['bar-hover', 'bar-focus', 'bar-menu'] as const) sessionChrome.release(reason);
   }, [overlay, pathname]);
   const shown = !overlay || chromeVisible || focused;
-  const hasSessionShortcut = overlay || !!selectedSession;
+  // The host of the viewed session, or of a session still being opened.
+  const viewedHostId = selectedSession?.connectionId
+    ?? (routeId && connections.some((c) => c.id === routeId) ? routeId : undefined);
+  const switchBottomBar = async () => {
+    if (!viewedHostId) return;
+    // Hand focus back so a newly hidden bar does not stay up for its button.
+    (document.activeElement as HTMLElement | null)?.blur();
+    try {
+      await updateConnection(viewedHostId, { hostProfile: { bottomBar: overlay ? 'always' : 'withToolbar' } });
+    } catch (e) {
+      addToast({ message: `Bottom bar not saved: ${e instanceof Error ? e.message : String(e)}`, type: 'error' });
+    }
+  };
   const hold = (reason: 'bar-hover' | 'bar-focus' | 'bar-menu', on: boolean) => {
     if (!overlay) return;
     if (on) sessionChrome.hold(reason);
@@ -51,7 +69,7 @@ export function StatusBar() {
   };
 
   return (
-    <div id={hasSessionShortcut ? 'status-bar-focus-target' : undefined} role="region" aria-label="Connection status bar" aria-keyshortcuts={hasSessionShortcut ? 'Control+Alt+Shift+S' : undefined} tabIndex={hasSessionShortcut ? -1 : undefined}
+    <div role="region" aria-label="Connection status bar"
       data-local-input data-status-bar-mode={overlay ? 'with-toolbar' : 'visible'}
       className={cn(
         'focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-[-2px]',
@@ -105,6 +123,19 @@ export function StatusBar() {
 
       <DisplayPauseControl session={selectedSession} />
       <ClipboardStatus onOpenChange={(open) => hold('bar-menu', open)} />
+      {viewedHostId && (
+        <Button
+          variant="ghost"
+          size="xs"
+          className="h-5 shrink-0 gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
+          disabled={writeBlocked}
+          title={overlay ? 'Keep this bar shown for this host' : 'Show this bar only with the top toolbar for this host'}
+          onClick={() => void switchBottomBar()}
+        >
+          {overlay ? <Pin size={11} /> : <ChevronsDown size={11} />}
+          <span>{overlay ? 'Keep shown' : 'Hide'}</span>
+        </Button>
+      )}
       <Button
         variant="ghost"
         size="xs"

@@ -77,7 +77,7 @@ export function SessionOptionsMenu({ connection, session }: { connection: Connec
               <DropdownMenuRadioItem disabled={disabled} value="always" onSelect={(e) => e.preventDefault()}>Always show</DropdownMenuRadioItem>
               <DropdownMenuRadioItem disabled={disabled} value="withToolbar" onSelect={(e) => e.preventDefault()}>Show with top toolbar</DropdownMenuRadioItem>
             </DropdownMenuRadioGroup>
-            <p className="px-2 py-2 text-xs text-muted-foreground">With the top toolbar, the bar appears over the desktop when the pointer reaches the top edge or you press Ctrl+Alt+Shift+S, so the desktop keeps the full window.</p>
+            <p className="px-2 py-2 text-xs text-muted-foreground">With the top toolbar, the bar appears over the desktop when the pointer reaches the top edge, so the desktop keeps the full window. The bar's Hide and Keep shown button switches this too.</p>
           </DropdownMenuSubContent>
           </DropdownMenuPortal>
         </DropdownMenuSub>
