@@ -6,9 +6,26 @@ import {
   closeContextMenu,
   closedContextMenu,
   contextMenuItems,
+  isSessionActive,
   menuActionFor,
   openContextMenu,
 } from '../tree-menu';
+
+describe('Disconnect in place of Connect', () => {
+  it('offers Disconnect only for a connection with a live session', () => {
+    const live = contextMenuItems('connection', { sessionActive: true });
+    expect(live[0]).toBe('Disconnect');
+    expect(live).not.toContain('Connect');
+    expect(menuActionFor('Disconnect')).toBe('disconnect');
+    expect(contextMenuItems('connection', { sessionActive: false })[0]).toBe('Connect');
+    expect(contextMenuItems('folder', { sessionActive: true })).toEqual(contextMenuItems('folder'));
+  });
+
+  it('treats connecting, connected and reconnecting sessions as live', () => {
+    for (const status of ['connecting', 'connected', 'reconnecting']) expect(isSessionActive(status)).toBe(true);
+    for (const status of ['disconnected', 'error', null, undefined]) expect(isSessionActive(status)).toBe(false);
+  });
+});
 
 const con = (id: string): NodeId => ({ kind: 'connection', id });
 const fol = (id: string): NodeId => ({ kind: 'folder', id });

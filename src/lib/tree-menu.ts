@@ -12,6 +12,7 @@ import type { NodeId, NodeKind } from '../types';
 /** Every context action the tree can dispatch, by menu item label. */
 export type ContextMenuAction =
   | 'connect'
+  | 'disconnect'
   | 'test-credentials'
   | 'review-server-identity'
   | 'edit'
@@ -29,13 +30,25 @@ export const CONTEXT_MENU_ITEMS: Record<NodeKind, readonly string[]> = {
   library: ['New Connection', 'New Folder', 'Rename', 'Delete'],
 };
 
-/** The 10.7 item set for a node kind (fresh array; callers may not mutate the pins). */
-export function contextMenuItems(kind: NodeKind): string[] {
-  return [...CONTEXT_MENU_ITEMS[kind]];
+/**
+ * The 10.7 item set for a node kind (fresh array; callers may not mutate the
+ * pins). A connection with a live session offers Disconnect in Connect's place.
+ */
+export function contextMenuItems(kind: NodeKind, options: { sessionActive?: boolean } = {}): string[] {
+  const items = [...CONTEXT_MENU_ITEMS[kind]];
+  return kind === 'connection' && options.sessionActive
+    ? items.map((item) => (item === 'Connect' ? 'Disconnect' : item))
+    : items;
+}
+
+/** Statuses for which a connection's session can be disconnected. */
+export function isSessionActive(status: string | null | undefined): boolean {
+  return status === 'connecting' || status === 'connected' || status === 'reconnecting';
 }
 
 const ITEM_ACTIONS: Record<string, ContextMenuAction> = {
   'Connect': 'connect',
+  'Disconnect': 'disconnect',
   'Test credentials': 'test-credentials',
   'Review server identity': 'review-server-identity',
   'Edit': 'edit',

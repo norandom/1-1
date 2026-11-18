@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   DndContext,
@@ -41,7 +42,8 @@ import {
   treeItemAria,
   treeItemLabel,
 } from '../../lib/tree-a11y';
-import { contextMenuItems, menuActionFor } from '../../lib/tree-menu';
+import { contextMenuItems, isSessionActive, menuActionFor } from '../../lib/tree-menu';
+import { sessionRouteIdFromPath } from '../../lib/session-route';
 import { isMenuActionBlocked, RECOVERY_BLOCKED_MESSAGE } from '../../lib/recovery';
 import { dragEventToMove, moveDestinations, moveTreeNodes } from '../../lib/tree-move';
 import type { MoveOutcome, MoveTrigger } from '../../lib/tree-move';
@@ -267,14 +269,14 @@ function TreeRow({
             focusRow(key);
           }}
         >
-          {contextMenuItems(a11y.kind).map((item) => menuActionFor(item) === 'test-credentials' ? (
+          {contextMenuItems(a11y.kind, { sessionActive: isSessionActive(status) }).map((item) => menuActionFor(item) === 'test-credentials' ? (
             <CredentialTestMenuItem key={item} id={a11y.node.id} name={a11y.name} />
           ) : (
             <DropdownMenuItem
               key={item}
               // 8.7 (Req 10.12): every mutating item disabled while
               // write-blocked — Connect stays available.
-              disabled={mutationsBlocked && menuActionFor(item) !== 'connect'}
+              disabled={mutationsBlocked && !['connect', 'disconnect'].includes(menuActionFor(item))}
               onSelect={() => {
                 onMenuItemSelect(a11y.node, item);
               }}
@@ -384,6 +386,25 @@ export function ConnectionTree() {
     if (location.pathname !== '/') navigate('/');
   };
 
+  /** Disconnect every session of a connection, like closing its tabs. */
+  const disconnectNode = async (node: NodeId): Promise<void> => {
+    const ids = [...useSessionStore.getState().sessions.values()]
+      .filter((session) => session.connectionId === node.id)
+      .map((session) => session.id);
+    for (const id of ids) {
+      try {
+        await tauri.disconnect(id);
+      } catch {
+        // The backend session may already be gone; still remove it here.
+      }
+      // Leave the session route before removing it, as a tab close does.
+      flushSync(() => {
+        if (sessionRouteIdFromPath(window.location.pathname) === id) navigate('/');
+        removeSession(id);
+      });
+    }
+  };
+
   const nodeName = (node: NodeId): string => {
     if (node.kind === 'library') return tree.libraries.find((l) => l.id === node.id)?.name ?? node.id;
     if (node.kind === 'folder') return tree.folders.find((f) => f.id === node.id)?.name ?? node.id;
@@ -438,6 +459,9 @@ export function ConnectionTree() {
     switch (action) {
       case 'connect':
         connectNode(node);
+        break;
+      case 'disconnect':
+        void disconnectNode(node);
         break;
       case 'review-server-identity':
         setIdentityNode(node);
