@@ -1,0 +1,112 @@
+# Folder sharing implementation plan
+
+All checkboxes are open. Task 1 delivers the server identity check shared with session actions. Task 2 prepares the Windows drive backend. Tasks 3–5 deliver one ordinary RDP share, and task 6 tests the Windows build against the three remote hosts. Each leaf is a focused implementation or test session, estimated at one to three hours.
+
+- [ ] 1. Establish the server identity used by both features
+- [ ] 1.1 Verify the peer on the connection that will use it
+  - Return the observed SHA-256 SPKI and normalized endpoint only after the TLS handshake verifies the server signature and validates the chain and DNS/IP name or a confirmed endpoint pin.
+  - Use a credential-free discovery connection to present a candidate key. The actual session or credential test must prove the same identity on its own connection.
+  - Fixtures cover valid chain, trusted key, wrong name/port, changed key and bad handshake signature. A discovery result alone conveys no permission.
+  - _Boundary: TLS peer verification_
+  - _Requirements: 1.4_
+- [ ] 1.2 Integrate server identity review into the saved-host menu
+  - Show the endpoint and observed fingerprint, including old and new keys on change. Save a pin only after the operator confirms it for that endpoint.
+  - Store pins atomically outside exported profiles. Bind confirmation to the selected host revision. On cancellation or write failure, retain the prior trust decision.
+  - A test can review and confirm a self-signed host without a folder grant or a credential exchange. A fresh connection accepts the confirmed key and withholds trust after rotation.
+  - _Boundary: Saved-host menu and TLS peer verification integration_
+  - _Depends: 1.1_
+  - _Requirements: 1.4_
+
+- [ ] 2. Establish the native Windows fixture and dependency lock
+  - Resolve compatible IronRDP protocol/native drive crates and native folder picker on the current MSVC toolchain. Keep platform-specific dependencies Windows-scoped.
+  - Create a disposable directory fixture under the configured project artifact directory. Reuse its sentinels, read-only and writable files, and sparse file with data above 4 GiB in subsequent tests.
+  - The locked build can create a single redirected drive and round-trip a decoded request through the upstream completion types in the fixture.
+  - _Boundary: Windows drive dependencies and fixture_
+  - _Requirements: 2.1, 2.2, 3.1, 3.2_
+
+- [ ] 3. Keep a single explicit folder grant per saved host
+- [ ] 3.1 Persist grants and invalidate them with profile mutations
+  - Bind a grant to the profile ID, endpoint, server key, volume/directory identity, share name and mode. Serialize revocation with retargeting, import and single/cascaded deletion.
+  - Test restart, failed save/revoke, changing an address away and back, display-name edits, duplicates and imports. Missing or corrupt data leaves sharing off. A stale grant never reactivates.
+  - _Boundary: Folder grant store and saved profile mutation integration_
+  - _Depends: 1.2_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4_
+- [ ] 3.2 Integrate the native folder picker and grant controls
+  - Issue opaque selections for local drive-letter subdirectories and reject volume roots. Show host/port, key, folder, portable name and mode together. Start at read-only and offer explicit read/write.
+  - Register read, select, confirm and revoke commands. Reject expired selections or endpoint changes at confirmation. Cancel, failed writes and repeated revoke show the committed state.
+  - In the saved-host editor, saving shows “next connection.” An active grant displays how to end access immediately by disconnecting. Confirming a new host key alone leaves the folder withheld.
+  - _Boundary: Host editor and folder grant command integration_
+  - _Depends: 2, 3.1_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4_
+
+- [ ] 4. Confine Windows filesystem requests to the granted directory
+- [ ] 4.1 (P) Bind the selected root and retain descendant handles
+  - Open the authorized volume/directory by verified identity with retained no-reparse handles. Use the approved upstream extension or ancestor-guard approach. Fail closed if confinement is unavailable.
+  - Keep the target and its ancestor chain guarded until the final operation on each remote handle. Deny links, namespace escapes and multiply linked targets whose aliases cannot be confined.
+  - In the local fixture, replace a root, move an ancestor or attempt to move an open target outside while a request is pending. Outside contents and metadata stay protected through the last I/O.
+  - _Boundary: Windows filesystem handles_
+  - _Depends: 2_
+  - _Requirements: 2.1, 2.2, 2.3, 2.4_
+- [ ] 4.2 Enforce read-only and ordinary workstation permissions
+  - Allow list/read in read-only mode. Deny mutating open dispositions, writes, truncation, delete-on-close, rename, streams, metadata/security changes and mutating or unknown control operations.
+  - In both modes, reject privilege-enabling requests before delegation. Enforce the workstation user's ACLs and surface a denied operation to its caller.
+  - Tests verify bytes and metadata after every attempted mutation and confirm ordinary read, short read, EOF, zero-length and sparse high-offset cases.
+  - _Boundary: Windows drive access policy_
+  - _Depends: 4.1_
+  - _Requirements: 2.1, 2.2, 2.3, 3.2, 3.3_
+- [ ] 4.3 Support scoped creation, copy, rename and delete
+  - Guard source and destination parents across rename, allow in-folder operations, and protect the grant root from removal or rename. Deny remote hard-link creation and outside destinations.
+  - Verify create/list directory, write, flush, close and rename/delete with ordinary access. Refused local operations and competing local opens return the appropriate filesystem error.
+  - Fixture copies match independent hashes. Renaming into a replaced parent leaves the outside sentinel untouched.
+  - _Boundary: Windows drive operations_
+  - _Depends: 4.2_
+  - _Requirements: 2.2, 2.3, 3.2, 3.3_
+
+- [ ] 5. Integrate redirection with the desktop session
+- [ ] 5.1 Service overlapping file requests off the interactive path
+  - Dispatch ordered local I/O through a bounded per-session worker, cap handles, queued bytes, request count and reply batch size. Drain synchronous and deferred completions fairly alongside input and rendering.
+  - Track generation/device/completion IDs, operation, payload length and peak outstanding count. Each live request receives one correctly shaped reply, including overload and filesystem errors.
+  - Interleave reads, writes and deferred locks/notifications across file IDs. Stalling disk still lets the session process input. The fixture reports matching completions and file bytes.
+  - _Boundary: RDPDR processor and session worker integration_
+  - _Depends: 2, 4.3_
+  - _Requirements: 2.4, 3.2, 3.3, 3.4, 3.5, 4.3_
+- [ ] 5.2 Attach one drive to the authorized connection and tear it down on disconnect
+  - Check the effective grant, current peer and accessible root after TLS and before static channels are advertised. Disabled, stale, inaccessible or unverified grants omit the channel and device name.
+  - Start a fresh worker and handle table on every reconnect. Stop admissions and cancel pending I/O on teardown. Return errors while the channel is available and record interruptions when the socket is gone.
+  - Exercise disconnect mid-write, reconnect with changed grant and simultaneous sessions. Observe worker termination, handle release, rejection of late completions, and a usable desktop after a share-only failure.
+  - _Boundary: Connector and session lifecycle integration_
+  - _Depends: 1.1, 3.2, 5.1_
+  - _Requirements: 1.1, 1.3, 1.4, 1.5, 2.4, 3.1, 3.4, 3.5_
+- [ ] 5.3 Show effective status from protocol evidence
+  - Use the existing session details to show effective access mode and latest failure separately from the host's saved preference.
+  - Show offered after the announcement is written, accepted after the matching acknowledgement, and access observed after a successful file operation reply is written. Keep explicit refusal, unsupported, inaccessible, unverified and unknown outcomes distinct.
+  - Drive the UI with actual session events in a fixture. No reply and failed reads cannot advance the result to successful access. Retain the desktop layout and viewport.
+  - _Boundary: Session event and existing status details integration_
+  - _Depends: 3.2, 5.2_
+  - _Requirements: 1.3, 1.5, 1.6_
+
+- [ ] 6. Validate ordinary transfers and measure the cost of copying
+- [ ] 6.1 Verify the Windows build with ordinary tools on all three hosts
+  - Run focused frontend tests and native Windows nextest plus doctests. Exercise the built app against the Windows workstation and both designated Linux hosts. Record actual server software/build, client build, known policy and offered name.
+  - Record the observed UNC or mount path. Use Explorer or PowerShell on Windows and normal shell tools on Linux. Confirm RO write denial and independently hash RW copies in both directions, including an empty file and directory operations.
+  - Record successful access, explicit refusal, unsupported capability or an inconclusive result per host in the spec's validation report. Preserve outstanding checks if a server is unavailable.
+  - _Boundary: Windows client real-host acceptance_
+  - _Depends: 4.3, 5.3_
+  - _Requirements: 1.5, 1.6, 2.1, 3.1, 3.2, 3.3, 4.1, 4.2_
+- [ ] 6.2 Benchmark ordinary transfers alongside interactive typing
+  - For each usable host and direction, fix build, resolution, profile, network and storage conditions. Repeat a single large file and a tree of small source files with consistent cache state, plus the same typing workload without transfer.
+  - Send a repeatable sequence of unique text markers to a remote editor or terminal. Capture each input timestamp and its first matching visible echo on a single client clock, using timestamped input and a synchronized screen recording. Save the paired samples with clock precision, capture rate and missed echoes. Exclude unrelated frames.
+  - Record copy program, payload size, elapsed time, effective throughput, session RX/TX deltas, peak actual outstanding requests, and median/p95 input-to-visible echo. Verify hashes and the tree manifest.
+  - The report includes the matched no-copy typing baseline and identifies which hosts show both room for a speed gain and independently schedulable requests.
+  - _Boundary: Transfer and typing benchmark_
+  - _Depends: 5.1, 6.1_
+  - _Requirements: 3.4, 4.3_
+- [ ] 6.3 Evaluate segmented copying only where the baseline justifies it
+  - If no host shows a useful opportunity, close the evaluation with the measured reason. Ordinary sharing is ready for its own release decision after acceptance.
+  - Where justified, use a test copier to compare one range with bounded disjoint parallel ranges on the same file and RDP connection under matched cache conditions. Confirm actual overlapping requests, byte-for-byte output, throughput, transferred session bytes and typing latency.
+  - Record the result per host and whether an explicit copy command warrants a separate proposal.
+  - _Boundary: Transfer benchmark_
+  - _Depends: 6.2_
+  - _Requirements: 3.4, 4.4_
+
+Kiro task-graph review passed independently on 18 November 2026. All 19 acceptance criteria are covered. Task approval is tracked in [spec.json](spec.json).

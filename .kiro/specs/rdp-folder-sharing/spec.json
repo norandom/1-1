@@ -1,0 +1,13 @@
+{
+  "feature_name": "rdp-folder-sharing",
+  "created_at": "2026-11-18T06:57:12Z",
+  "updated_at": "2026-11-18T08:05:08Z",
+  "language": "en",
+  "phase": "implementation",
+  "approvals": {
+    "requirements": { "generated": true, "approved": true },
+    "design": { "generated": true, "approved": true },
+    "tasks": { "generated": true, "approved": true }
+  },
+  "ready_for_implementation": true
+}
