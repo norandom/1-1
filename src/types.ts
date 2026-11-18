@@ -81,6 +81,8 @@ export interface SessionInfo {
   network?: NetworkMetrics | null;
   graphics?: GraphicsObservation;
   displayStalled?: boolean;
+  /** The remote desktop supplies the pointer image or requests an invisible pointer. */
+  hideLocalCursor?: boolean;
   id: string;
   connectionId: string;
   connectionName: string;

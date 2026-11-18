@@ -69,6 +69,8 @@ impl PerformanceMetrics {
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     #[serde(default)]
+    pub hide_local_cursor: bool,
+    #[serde(default)]
     pub idle_preview_state: IdlePreviewState,
     pub idle_preview_updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -249,6 +251,7 @@ impl SessionEventSink {
 /// It receives commands via an mpsc channel and publishes session info via a watch channel.
 /// Frames are streamed to the frontend via a Tauri channel.
 struct SessionActor {
+    hide_local_cursor: bool,
     idle_preview: IdlePreview,
     idle_preview_updated_at: Option<DateTime<Utc>>,
     clipboard_epoch: String,
@@ -302,6 +305,7 @@ impl SessionActor {
 
         Self {
             id,
+            hide_local_cursor: false,
             idle_preview: IdlePreview::new(false, false, tokio::time::Instant::now()),
             idle_preview_updated_at: None,
             config,
@@ -352,6 +356,7 @@ impl SessionActor {
         let connected = self.state == SessionState::Connected;
         let unavailable = self.idle_preview.pause_unavailable_reason();
         SessionInfo {
+            hide_local_cursor: connected && self.hide_local_cursor,
             display_paused: connected && self.idle_preview.is_manually_paused(),
             display_pause_available: connected && unavailable.is_none(),
             display_pause_unavailable_reason: unavailable.filter(|_| connected).map(str::to_owned),
@@ -535,6 +540,47 @@ impl SessionActor {
             encode_image_update_packet(image, &[plan.rect], &mut self.frame_packet_scratch)
         };
         self.send_frame_packet(receipt, packet)
+    }
+
+    /// Deliver the same composited damage to both consumers. Local pointer
+    /// movement uses the normal single-outstanding-frame IPC limit.
+    fn present_image_update(
+        &mut self,
+        image: &ironrdp_session::image::DecodedImage,
+        plan: frame_batch::BatchPlan,
+    ) -> Result<(), DisconnectReason> {
+        use ironrdp_pdu::geometry::Rectangle as _;
+        let surface = (image.width(), image.height());
+        if let Some(shared) = &self.shared_frame {
+            let started = std::time::Instant::now();
+            let mut guard = shared.begin_write();
+            if plan.full_refresh
+                || guard.width() != u32::from(surface.0)
+                || guard.height() != u32::from(surface.1)
+            {
+                guard.update_full(u32::from(surface.0), u32::from(surface.1), image.data());
+            } else {
+                guard.update_rect(
+                    plan.rect.left,
+                    plan.rect.top,
+                    plan.rect.width(),
+                    plan.rect.height(),
+                    image.data_for_rect(&plan.rect),
+                    image.stride(),
+                );
+            }
+            drop(guard);
+            shared.mark_dirty();
+            if started.elapsed().as_millis() > 2 {
+                log::debug!(
+                    "[Session {}] SharedFrame write: {:.2}ms",
+                    self.id,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
+        self.delivery.damage(surface, plan);
+        self.flush_image_frame(image)
     }
 
     fn check_display_stall(&mut self) {
@@ -1114,6 +1160,7 @@ impl SessionActor {
                     }
 
                     let mut updated_regions = Vec::new();
+                    let mut hide_local_cursor = self.hide_local_cursor;
                     let mut deactivate_all = false;
                     for out in outputs {
                         match out {
@@ -1162,10 +1209,11 @@ impl SessionActor {
                                 deactivate_all = true;
                                 break;
                             }
-                            _ => {
-                                // PointerDefault, PointerHidden, PointerPosition, PointerBitmap
-                                // Ignored for now
-                            }
+                            ActiveStageOutput::PointerDefault => hide_local_cursor = false,
+                            // IronRDP emits this for both a hidden pointer and a shape
+                            // that it has composited into the decoded desktop.
+                            ActiveStageOutput::PointerHidden => hide_local_cursor = true,
+                            _ => {}
                         }
                     }
 
@@ -1217,6 +1265,10 @@ impl SessionActor {
                         }
                     }
 
+                    if self.hide_local_cursor != hide_local_cursor {
+                        self.hide_local_cursor = hide_local_cursor;
+                        self.publish_info();
+                    }
                     let surface = (image.width(), image.height());
                     let resized = (self.width, self.height) != (u32::from(surface.0), u32::from(surface.1));
                     if graphics.output_reset || resized {
@@ -1271,78 +1323,11 @@ impl SessionActor {
                     if let Some(plan) = plan
                         && !retaining_previous_image
                     {
-                        // Task 9.4 (design L316; Reqs 4.1/4.4/9.8): merge
-                        // every dirty region drained from this processed
-                        // PDU batch into ONE bounding rectangle and choose
-                        // the packet kind — kind 1 (full frame) for the
-                        // initial delivery on this surface, a resize, or
-                        // full-surface invalidation (upstream
-                        // `widen_to_full_refresh` after a graphics reset);
-                        // otherwise kind 2 with the single merged rect. The
-                        // payload is extracted from the authoritative
-                        // composited decoded image, so unchanged pixels
-                        // inside the bounds come from the framebuffer and
-                        // accumulated dirty regions are never lost.
-
-                        let rect_start = std::time::Instant::now();
-                        let region_count = updated_regions.len();
-
-                        // Write the merged damage to the SharedFrame for
-                        // the GPU renderer (one lock, one rect)
-                        if let Some(ref sf) = self.shared_frame {
-                            use ironrdp_pdu::geometry::Rectangle as _;
-                            let stride = image.stride();
-                            let img_data = image.data();
-                            let mut guard = sf.begin_write();
-                            // Task 9.2 (Req 4.1/4.2): an EGFX
-                            // graphics-output reset resizes the decoded
-                            // image upstream (`ResetGraphics` →
-                            // `reset_preserving_pointer` inside
-                            // `ActiveStage::process`). Resize the
-                            // SharedFrame with it and repaint in full
-                            // so the GPU surface and the webview canvas
-                            // never see a mixed-size buffer. Task 9.4
-                            // extends the full repaint to every
-                            // full-refresh plan (initial delivery,
-                            // full-surface invalidation); partial
-                            // batches write their single merged
-                            // bounding rect — unchanged pixels inside
-                            // the bounds copy from the composited
-                            // image (identical values).
-                            if plan.full_refresh
-                                || guard.width() != u32::from(surface.0)
-                                || guard.height() != u32::from(surface.1)
-                            {
-                                guard.update_full(
-                                    u32::from(surface.0),
-                                    u32::from(surface.1),
-                                    img_data,
-                                );
-                            } else {
-                                let row_start = usize::from(plan.rect.top) * stride
-                                    + usize::from(plan.rect.left) * 4;
-                                if row_start < img_data.len() {
-                                    guard.update_rect(
-                                        plan.rect.left,
-                                        plan.rect.top,
-                                        plan.rect.width(),
-                                        plan.rect.height(),
-                                        &img_data[row_start..],
-                                        stride,
-                                    );
-                                }
-                            }
-                            drop(guard);
-                            sf.mark_dirty(); // Wakes render thread via condvar
-
-                            let write_time = rect_start.elapsed();
-                            if write_time.as_millis() > 2 {
-                                log::debug!(
-                                    "[Session {}] SharedFrame write: {} regions in {:.2}ms",
-                                    self.id, region_count, write_time.as_secs_f64() * 1000.0
-                                );
-                            }
-
+                        if let Err(reason) = self.present_image_update(&image, plan) {
+                            return reason;
+                        }
+                        delivered_surface = Some(surface);
+                        if self.shared_frame.is_some() {
                             // Track FPS at the session level
                             self.metrics.frames_sent += 1;
                             if self.metrics.frames_sent.is_multiple_of(100) {
@@ -1355,16 +1340,10 @@ impl SessionActor {
                                     self.metrics.frames_sent as f64 / elapsed.as_secs_f64();
                                 log::info!(
                                     "[Session {}] RDP frames received: {} (avg {:.1} fps) | {} regions this PDU",
-                                    self.id, self.metrics.frames_sent, fps, region_count
+                                    self.id, self.metrics.frames_sent, fps, updated_regions.len()
                                 );
                             }
                         }
-
-                        self.delivery.damage(surface, plan);
-                        if self.flush_image_frame(&image).is_err() {
-                            return DisconnectReason::ConnectionLost;
-                        }
-                        delivered_surface = Some(surface);
                     }
 
                     if self
@@ -1486,11 +1465,24 @@ impl SessionActor {
                             match active_stage.process_fastpath_input(&mut image, &[event]) {
                                 Ok(outputs) => {
                                     for out in outputs {
-                                        if let ActiveStageOutput::ResponseFrame(frame) = out
-                                            && let Err(e) = writer.write_all(&frame).await {
-                                                log::warn!("Write error on mouse event: {}", e);
-                                                return DisconnectReason::ConnectionLost;
+                                        match out {
+                                            ActiveStageOutput::ResponseFrame(frame) => {
+                                                if let Err(e) = writer.write_all(&frame).await {
+                                                    log::warn!("Write error on mouse event: {}", e);
+                                                    return DisconnectReason::ConnectionLost;
+                                                }
                                             }
+                                            ActiveStageOutput::GraphicsUpdate(region) if !retaining_previous_image => {
+                                                let surface = (image.width(), image.height());
+                                                if let Some(plan) = frame_batch::plan_batch(&[region], surface, delivered_surface) {
+                                                    if let Err(reason) = self.present_image_update(&image, plan) {
+                                                        return reason;
+                                                    }
+                                                    delivered_surface = Some(surface);
+                                                }
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -1712,6 +1704,14 @@ impl SessionActor {
                     pointer_software_rendering,
                     ..
                 } => {
+                    let size = (desktop_size.width, desktop_size.height);
+                    if self.hide_local_cursor
+                        && size == (image.width(), image.height())
+                        && let Err(error) = reset_software_pointer(active_stage, image)
+                    {
+                        log::warn!("Session {} could not reset its pointer: {}", self.id, error);
+                        return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
+                    }
                     let rearmed = active_stage.reactivate(
                         factory.io_channel_id(),
                         factory.user_channel_id(),
@@ -1731,14 +1731,14 @@ impl SessionActor {
 
                     let new_width = u32::from(desktop_size.width);
                     let new_height = u32::from(desktop_size.height);
-                    if (image.width(), image.height()) != (desktop_size.width, desktop_size.height)
-                    {
+                    if (image.width(), image.height()) != size {
                         *image = DecodedImage::new(
                             PixelFormat::RgbA32,
                             desktop_size.width,
                             desktop_size.height,
                         );
                     }
+                    self.hide_local_cursor = false;
                     self.width = new_width;
                     self.height = new_height;
 
@@ -1768,6 +1768,7 @@ impl SessionActor {
         let mut attempt = 0u32;
 
         while attempt < MAX_RECONNECT_ATTEMPTS {
+            self.hide_local_cursor = false;
             self.reset_idle_preview(false);
             self.network_counters = None;
             self.network = None;
@@ -2078,6 +2079,33 @@ enum ReactivationOutcome {
     /// protocol failure, server redirection, user disconnect). The actor
     /// must unwind with the carried reason.
     Stop(DisconnectReason),
+}
+
+/// Reactivation replaces IronRDP's pointer cache. When retaining the old
+/// desktop pixels, let its current processor restore the background beneath
+/// its pointer before discarding the cache. This update stays local.
+fn reset_software_pointer(
+    stage: &mut ironrdp_session::ActiveStage,
+    image: &mut ironrdp_session::image::DecodedImage,
+) -> ironrdp_session::SessionResult<()> {
+    use ironrdp_core::encode_vec;
+    use ironrdp_pdu::fast_path::{
+        EncryptionFlags, FastPathHeader, FastPathUpdatePdu, Fragmentation, UpdateCode,
+    };
+    use ironrdp_session::{SessionError, SessionErrorExt as _};
+    let update = encode_vec(&FastPathUpdatePdu {
+        fragmentation: Fragmentation::Single,
+        update_code: UpdateCode::DefaultPointer,
+        compression_flags: None,
+        compression_type: None,
+        data: &[],
+    })
+    .map_err(SessionError::encode)?;
+    let mut frame = encode_vec(&FastPathHeader::new(EncryptionFlags::empty(), update.len()))
+        .map_err(SessionError::encode)?;
+    frame.extend(update);
+    stage.process(image, ironrdp_pdu::Action::FastPath, &frame, None)?;
+    Ok(())
 }
 
 /// Keep one request while the server opens the channel and sends capabilities.
@@ -2399,6 +2427,7 @@ impl SessionManager {
 
         // Build initial info for the watch channel
         let initial_info = SessionInfo {
+            hide_local_cursor: false,
             display_paused: false,
             display_pause_available: false,
             display_pause_unavailable_reason: None,
@@ -5169,7 +5198,7 @@ mod tests {
             demand_active_frame_for(REACTIVATION_WIDTH, REACTIVATION_HEIGHT)
         }
 
-        fn demand_active_frame_for(width: u16, height: u16) -> Vec<u8> {
+        pub(super) fn demand_active_frame_for(width: u16, height: u16) -> Vec<u8> {
             demand_active_with_suppression(width, height, false)
         }
 
@@ -5223,7 +5252,7 @@ mod tests {
         }
 
         /// All server frames of a complete Deactivation-Reactivation Sequence.
-        fn reactivation_script_frames() -> Vec<Vec<u8>> {
+        pub(super) fn reactivation_script_frames() -> Vec<Vec<u8>> {
             use ironrdp_pdu::rdp::capability_sets::SERVER_CHANNEL_ID;
             use ironrdp_pdu::rdp::finalization_messages::{
                 ControlAction, ControlPdu, FontPdu, SynchronizePdu,
@@ -5336,7 +5365,7 @@ mod tests {
             }
         }
 
-        fn bitmap_wire_frames(
+        pub(super) fn bitmap_wire_frames(
             rect: ironrdp_pdu::geometry::InclusiveRectangle,
             rows: &[u8],
         ) -> Vec<Vec<u8>> {
@@ -5359,7 +5388,7 @@ mod tests {
                 .collect()
         }
 
-        async fn settle_actor() {
+        pub(super) async fn settle_actor() {
             // All transport and command work here is in-memory on one runtime.
             // Yield without advancing paused time: specifically ACK before the
             // first graphics update of the replacement share, not on a timer.

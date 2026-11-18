@@ -27,6 +27,7 @@ const liveDisplay = () => false;
 
 interface Props {
   displayMode?: DisplayMode;
+  hideLocalCursor?: boolean;
   inputBlocked?: boolean;
   isDisplayPaused?: () => boolean;
   overlays?: React.ReactNode;
@@ -51,6 +52,7 @@ interface Props {
 
 export function SessionCanvas({
   displayMode = 'fit',
+  hideLocalCursor = false,
   inputBlocked = false,
   isDisplayPaused = liveDisplay,
   overlays,
@@ -382,8 +384,9 @@ export function SessionCanvas({
           <canvas
             ref={canvasRef}
             tabIndex={0}
-            className="absolute cursor-default outline-none"
+            className="absolute outline-none"
             style={{
+              cursor: hideLocalCursor ? 'none' : 'default',
               left: displaySize.left,
               top: displaySize.top,
               imageRendering: displayMode === 'native' ? 'pixelated' : 'auto',

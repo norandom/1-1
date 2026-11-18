@@ -318,6 +318,7 @@ function SessionContent() {
         {/* Canvas */}
         <SessionCanvas
           displayMode={profile.displayMode}
+          hideLocalCursor={sessionResolution?.hideLocalCursor}
           isDisplayPaused={isDisplayPaused}
           inputBlocked={showDisconnectConfirm}
           lastError={sessionResolution?.lastError}

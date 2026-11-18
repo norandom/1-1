@@ -22,6 +22,14 @@ async fn start_session(
     manager: &SessionManager,
     tag: &str,
 ) -> (String, TokioFramed<DuplexStream>, Arc<SharedFrame>) {
+    start_session_with_frame_sizes(manager, tag, Default::default()).await
+}
+
+async fn start_session_with_frame_sizes(
+    manager: &SessionManager,
+    tag: &str,
+    frame_sizes: Arc<StdMutex<Vec<usize>>>,
+) -> (String, TokioFramed<DuplexStream>, Arc<SharedFrame>) {
     let shared = SharedFrame::new(u32::from(W), u32::from(H));
     let (client, peer) = tokio::io::duplex(EGFX_DUPLEX_CAPACITY);
     let client = StdMutex::new(Some(client));
@@ -30,6 +38,8 @@ async fn start_session(
         Box::pin(async move {
             let mut result = crate::rdp::baseline::synthetic_connection_result(W, H);
             result.suppress_output_support = true;
+            result.enable_server_pointer = true;
+            result.pointer_software_rendering = true;
             let policy = Arc::new(CodecErrorPolicy::new());
             crate::rdp::egfx::attach_to_stage_channels(
                 &mut result.static_channels,
@@ -55,7 +65,7 @@ async fn start_session(
         .create_session_with_transport(
             test_config(tag),
             None,
-            scripted_frame_channel(manager, FrameScript::Ok, Default::default()),
+            scripted_frame_channel(manager, FrameScript::Ok, frame_sizes),
             SessionEventSink::recorded(events.clone()),
             false,
             Some(Arc::clone(&shared)),
@@ -96,6 +106,148 @@ async fn next_frame(peer: &mut TokioFramed<DuplexStream>) -> Vec<u8> {
         .unwrap()
         .1
         .to_vec()
+}
+
+#[tokio::test(start_paused = true)]
+async fn remote_pointer_tracks_local_motion_on_a_quiet_paused_desktop() {
+    use super::super::real_session_reactivation::{
+        bitmap_wire_frames, demand_active_frame_for, reactivation_script_frames, settle_actor,
+    };
+    use ironrdp_pdu::fast_path::{
+        EncryptionFlags, FastPathHeader, FastPathUpdatePdu, Fragmentation, UpdateCode,
+    };
+    use ironrdp_pdu::pointer::{ColorPointerAttribute, Point16, PointerAttribute};
+
+    let manager = SessionManager::new();
+    let frame_sizes = Arc::new(StdMutex::new(Vec::new()));
+    let (id, mut peer, shared) =
+        start_session_with_frame_sizes(&manager, "remote-pointer", Arc::clone(&frame_sizes)).await;
+    let command = manager.get_cmd_sender(&id).await.unwrap();
+    let background = ironrdp_pdu::geometry::InclusiveRectangle {
+        left: 42,
+        top: 42,
+        right: 43,
+        bottom: 43,
+    };
+    for pdu in bitmap_wire_frames(background, &[0xf8; 8]) {
+        peer.write_all(&pdu).await.unwrap();
+    }
+    settle_actor().await;
+    let pointer = encode_vec(&PointerAttribute {
+        xor_bpp: 24,
+        color_pointer: ColorPointerAttribute {
+            cache_index: 2,
+            hot_spot: Point16 { x: 0, y: 0 },
+            width: 2,
+            height: 2,
+            xor_mask: &[255; 12],
+            and_mask: &[0; 4],
+        },
+    })
+    .unwrap();
+    let wire = |kind, bytes: &[u8]| {
+        let body = encode_vec(&FastPathUpdatePdu {
+            fragmentation: Fragmentation::Single,
+            update_code: kind,
+            compression_flags: None,
+            compression_type: None,
+            data: bytes,
+        })
+        .unwrap();
+        let mut wire =
+            encode_vec(&FastPathHeader::new(EncryptionFlags::empty(), body.len())).unwrap();
+        wire.extend(body);
+        wire
+    };
+    let cursor_hidden =
+        |info: SessionInfo| serde_json::to_value(info).unwrap()["hideLocalCursor"].clone();
+    assert_eq!(
+        cursor_hidden(manager.get_session_info(&id).await.unwrap()),
+        false
+    );
+    for (kind, data, hidden) in [
+        (UpdateCode::NewPointer, pointer.as_slice(), true),
+        (UpdateCode::DefaultPointer, &[][..], false),
+        (UpdateCode::HiddenPointer, &[][..], true),
+        (UpdateCode::CachedPointer, &[2, 0][..], true),
+    ] {
+        peer.write_all(&wire(kind, data)).await.unwrap();
+        settle_actor().await;
+        assert_eq!(
+            cursor_hidden(manager.get_session_info(&id).await.unwrap()),
+            hidden
+        );
+    }
+    let before_move = frame_sizes.lock().unwrap().len();
+    let cursor_pixel = shared.publish().unwrap().data[..3].to_vec();
+    assert!(cursor_pixel.iter().all(|channel| *channel > 200));
+    manager.set_display_paused(&id, true).await.unwrap();
+    expect_display(&mut peer, DisplayAction::Suppress).await;
+    let desktop_age = manager
+        .get_session_info(&id)
+        .await
+        .unwrap()
+        .idle_preview_updated_at
+        .unwrap();
+    command
+        .send(SessionCommand::SendMouse {
+            x: 12,
+            y: 8,
+            button: None,
+            event_type: "move".into(),
+            scroll_delta: 0,
+        })
+        .await
+        .unwrap();
+    let sent = next_frame(&mut peer).await;
+    assert!(matches!(
+        decode::<FastPathInput>(&sent).unwrap().input_events(),
+        [FastPathInputEvent::MouseEvent(_)]
+    ));
+    let frame = shared
+        .publish()
+        .expect("local movement must deliver cursor pixels without server redraw");
+    assert_eq!(&frame.data[..3], &[0; 3]);
+    let position = (8 * usize::from(W) + 12) * 4;
+    assert_eq!(&frame.data[position..position + 3], cursor_pixel.as_slice());
+    assert_eq!(frame_sizes.lock().unwrap().len(), before_move + 1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    settle_actor().await;
+    let info = manager.get_session_info(&id).await.unwrap();
+    assert!(info.display_paused);
+    assert_eq!(info.idle_preview_updated_at, Some(desktop_age));
+
+    // Reactivation at the same size retains the backing desktop. Its first
+    // repaint is elsewhere, so it cannot erase a stale cursor by accident.
+    let mut reactivation = reactivation_script_frames();
+    reactivation[1] = demand_active_frame_for(W, H);
+    for pdu in reactivation {
+        peer.write_all(&pdu).await.unwrap();
+    }
+    settle_actor().await;
+    assert_eq!(
+        cursor_hidden(manager.get_session_info(&id).await.unwrap()),
+        false
+    );
+    let rect = ironrdp_pdu::geometry::InclusiveRectangle {
+        left: 30,
+        top: 30,
+        right: 31,
+        bottom: 31,
+    };
+    for pdu in bitmap_wire_frames(rect, &[0xf8; 8]) {
+        peer.write_all(&pdu).await.unwrap();
+    }
+    settle_actor().await;
+    let repaint = shared.publish().expect("replacement share repainted");
+    assert_eq!(
+        (repaint.width, repaint.height),
+        (u32::from(W), u32::from(H))
+    );
+    assert_eq!(&repaint.data[position..position + 3], &[0; 3]);
+    let retained = (42 * usize::from(W) + 42) * 4;
+    assert_ne!(&repaint.data[retained..retained + 3], &[0; 3]);
+    manager.remove_session(&id).await.unwrap();
 }
 
 async fn next_channel_payload(peer: &mut TokioFramed<DuplexStream>, channel: u16) -> Vec<u8> {

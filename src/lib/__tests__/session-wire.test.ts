@@ -46,6 +46,22 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+it.each([[true, 'none'], [false, 'default'], [undefined, 'default']] as const)(
+  'renders the local cursor only as requested by the host (hideLocalCursor=%s)',
+  async (hideLocalCursor, cursor) => {
+    ipc.invoke.mockResolvedValue({ ...wire, status: 'connected', hideLocalCursor });
+    const session = (await getSessionInfo(wire.id))!;
+    const noop = () => {};
+    const html = renderToStaticMarkup(createElement(SessionCanvas, {
+      status: session.status, hideLocalCursor: session.hideLocalCursor,
+      surfaceWidth: session.width, surfaceHeight: session.height,
+      subscribeToFrames: () => noop, onKeyDown: noop, onKeyUp: noop,
+      onMouseMove: noop, onMouseDown: noop, onMouseUp: noop, onWheel: noop,
+    }));
+    expect(html.match(/<canvas\b[^>]*>/)?.[0]).toContain(`cursor:${cursor}`);
+  }
+);
+
 it('submits a remote click after its deferred modifier reaches the actor, independently per session', async () => {
   for (const id of ['A', 'B']) {
     useSessionStore.getState().addSession({ ...wire, id, status: 'connected', connectedAt: 'first', displayPaused: true });
