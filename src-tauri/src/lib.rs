@@ -18,6 +18,9 @@ use renderer::shared_frame::SharedFrame;
 use store::library::LibraryStore;
 use store::settings::SettingsStore;
 
+/// Opt-in for the experimental native wgpu renderer (off by default).
+const NATIVE_RENDERER_ENV: &str = "ONE_ONE_NATIVE_RENDERER";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install the ring crypto provider for rustls (required for TLS in spawned tasks)
@@ -131,7 +134,16 @@ pub fn run() {
             app.manage(credential_store);
             app.manage(shared_frame.clone());
 
-            // Create GPU renderer from the main window
+            // The web view's canvas draws remote frames from IPC. The native
+            // wgpu renderer drew into the window's own surface under the opaque
+            // web view: invisible on Windows, and on Wayland it shared GTK's
+            // top-level surface, which explicit-sync compositors reject with
+            // protocol error 71 (issue #1). Keep it for experiments only.
+            let native_renderer = std::env::var_os(NATIVE_RENDERER_ENV).is_some_and(|v| v == "1");
+            if !native_renderer {
+                log::info!("Remote frames are drawn by the web view; set {NATIVE_RENDERER_ENV}=1 to try the native renderer.");
+                return Ok(());
+            }
             let window = app.get_webview_window("main").unwrap();
             let sf = shared_frame.clone();
 

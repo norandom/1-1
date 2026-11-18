@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tauri::{
-    AppHandle, State,
+    AppHandle, Manager, State,
     ipc::{Channel, InvokeResponseBody},
 };
 
@@ -153,6 +153,10 @@ pub async fn connect(
     );
 
     // Create and spawn the session actor (with password for CredSSP/NLA)
+    // Only the opt-in native renderer reads the shared frame.
+    let native_frame = app
+        .try_state::<Arc<crate::renderer::gpu::GpuRenderer>>()
+        .map(|_| Arc::clone(&shared_frame));
     let session_id = session_mgr
         .create_session(
             config,
@@ -160,7 +164,7 @@ pub async fn connect(
             frame_channel,
             app,
             auto_reconnect,
-            Some(Arc::clone(&shared_frame)),
+            native_frame,
         )
         .await?;
 
