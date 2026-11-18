@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Maximize,
@@ -10,6 +10,8 @@ import {
   Monitor,
 } from 'lucide-react';
 import { useSessionStore } from '../../stores/sessionStore';
+import { sessionChrome, useSessionChrome } from '../../stores/sessionChromeStore';
+import { isChromeRevealPoint } from '../../lib/session-chrome';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
@@ -42,23 +44,19 @@ export function SessionToolbar({
   onDisconnect,
   isFullscreen,
 }: Props) {
-  const [visible, setVisible] = useState(false);
+  // Shared with the bottom bar of hosts that show it with this toolbar.
+  const visible = useSessionChrome((s) => s.visible);
   const togglePerformanceHud = useSessionStore((s) => s.togglePerformanceHud);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      if (e.clientY < 60) {
-        setVisible(true);
-        if (timerRef.current) clearTimeout(timerRef.current);
-        timerRef.current = setTimeout(() => setVisible(false), 3000);
-      }
+      if (isChromeRevealPoint(e.clientY)) sessionChrome.reveal();
     };
 
     window.addEventListener('mousemove', handleMouseMove);
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
-      if (timerRef.current) clearTimeout(timerRef.current);
+      sessionChrome.reset();
     };
   }, []);
 
@@ -71,12 +69,8 @@ export function SessionToolbar({
           exit={{ y: -60, opacity: 0 }}
           transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
           className="absolute top-0 left-1/2 z-30 mt-2 w-[min(calc(100%-1rem),42rem)] -translate-x-1/2"
-          onMouseEnter={() => {
-            if (timerRef.current) clearTimeout(timerRef.current);
-          }}
-          onMouseLeave={() => {
-            timerRef.current = setTimeout(() => setVisible(false), 1500);
-          }}
+          onMouseEnter={() => sessionChrome.hold('toolbar-hover')}
+          onMouseLeave={() => sessionChrome.release('toolbar-hover')}
         >
           <div className="glass flex items-center gap-1 overflow-hidden rounded-xl px-2 py-1.5 shadow-2xl">
             {/* Connection info */}

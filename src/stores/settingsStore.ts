@@ -15,7 +15,6 @@ export const defaultSettings: AppSettings = {
   theme: 'system',
   defaultPort: 3389,
   autoReconnect: true,
-  autoHideStatusBar: false,
   showPerformanceHud: false,
   sidebarCollapsed: false,
   sidebarHidden: false,

@@ -5416,7 +5416,8 @@ mod connection_crud_tests {
             "displayMode":"native", "resizeMode":"fixed", "wallpaper":true,
             "fullWindowDrag":false, "menuAnimations":true, "themes":true,
             "cursorShadow":true, "cursorBlinking":false, "desktopComposition":true,
-            "networkHint":"satellite", "colorDepth":"16", "bulkCompression":"rdp61", "clipboardDirection":"remoteToLocal", "idlePreview":true
+            "networkHint":"satellite", "colorDepth":"16", "bulkCompression":"rdp61", "clipboardDirection":"remoteToLocal", "idlePreview":true,
+            "bottomBar":"withToolbar"
         });
         let mut value = serde_json::to_value(sample("Profile", "profile.invalid")).unwrap();
         value["hostProfile"] = profile.clone();

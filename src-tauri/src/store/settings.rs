@@ -13,8 +13,6 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub auto_reconnect: bool,
     #[serde(default)]
-    pub auto_hide_status_bar: bool,
-    #[serde(default)]
     pub show_performance_hud: bool,
     #[serde(default)]
     pub sidebar_collapsed: bool,
@@ -80,7 +78,6 @@ impl Default for AppSettings {
             theme: default_theme(),
             default_port: default_port(),
             auto_reconnect: true,
-            auto_hide_status_bar: false,
             show_performance_hud: false,
             sidebar_collapsed: false,
             sidebar_hidden: false,
@@ -103,7 +100,6 @@ pub struct AppSettingsPatch {
     pub theme: Option<String>,
     pub default_port: Option<u16>,
     pub auto_reconnect: Option<bool>,
-    pub auto_hide_status_bar: Option<bool>,
     pub show_performance_hud: Option<bool>,
     pub sidebar_collapsed: Option<bool>,
     pub sidebar_hidden: Option<bool>,
@@ -171,9 +167,6 @@ impl SettingsStore {
         if let Some(auto_reconnect) = patch.auto_reconnect {
             settings.auto_reconnect = auto_reconnect;
         }
-        if let Some(auto_hide_status_bar) = patch.auto_hide_status_bar {
-            settings.auto_hide_status_bar = auto_hide_status_bar;
-        }
         if let Some(show_performance_hud) = patch.show_performance_hud {
             settings.show_performance_hud = show_performance_hud;
         }
@@ -229,31 +222,20 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn status_bar_preference_persists_true_false_and_legacy_defaults() {
+    async fn retired_status_bar_setting_still_loads() {
+        // The bottom bar is a per-host choice now; older files keep loading.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("settings.json"), r#"{"theme":"dark"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"theme":"dark","autoHideStatusBar":true}"#,
+        )
+        .unwrap();
         let store = SettingsStore::new(dir.path().to_path_buf());
-        assert!(!store.get().await.auto_hide_status_bar);
-        for enabled in [true, false] {
-            let patch =
-                serde_json::from_value(serde_json::json!({"autoHideStatusBar": enabled})).unwrap();
-            assert_eq!(
-                store.apply(patch).await.unwrap().auto_hide_status_bar,
-                enabled
-            );
-            store
-                .apply(AppSettingsPatch {
-                    quality: Some(42),
-                    ..Default::default()
-                })
-                .await
-                .unwrap();
-            let reopened = SettingsStore::new(dir.path().to_path_buf());
-            assert_eq!(reopened.get().await.auto_hide_status_bar, enabled);
-            assert_eq!(reopened.get().await.theme, "dark");
-        }
+        assert_eq!(store.get().await.theme, "dark");
+        let patch: AppSettingsPatch =
+            serde_json::from_value(serde_json::json!({"autoHideStatusBar": true})).unwrap();
+        assert_eq!(store.apply(patch).await.unwrap().theme, "dark");
     }
-
     #[tokio::test]
     async fn status_bar_failed_save_does_not_publish_unsaved_settings() {
         let dir = tempfile::tempdir().unwrap();
@@ -262,14 +244,14 @@ mod tests {
         assert!(
             store
                 .apply(AppSettingsPatch {
-                    auto_hide_status_bar: Some(true),
+                    show_performance_hud: Some(true),
                     theme: Some("dark".into()),
                     ..Default::default()
                 })
                 .await
                 .is_err()
         );
-        assert!(!store.get().await.auto_hide_status_bar);
+        assert!(!store.get().await.show_performance_hud);
         assert_eq!(store.get().await.theme, "system");
     }
 

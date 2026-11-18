@@ -90,6 +90,17 @@ impl ClipboardDirection {
     }
 }
 
+/// Where the session's bottom control bar appears.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BottomBar {
+    /// A status row below the desktop.
+    #[default]
+    Always,
+    /// An overlay shown and hidden with the top session toolbar.
+    WithToolbar,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HostProfile {
@@ -107,6 +118,7 @@ pub struct HostProfile {
     pub cursor_blinking: bool,
     pub desktop_composition: bool,
     pub network_hint: NetworkHint,
+    pub bottom_bar: BottomBar,
 }
 impl Default for HostProfile {
     fn default() -> Self {
@@ -125,6 +137,7 @@ impl Default for HostProfile {
             cursor_blinking: true,
             desktop_composition: false,
             network_hint: NetworkHint::Lan,
+            bottom_bar: BottomBar::Always,
         }
     }
 }
@@ -409,6 +422,19 @@ mod tests {
                 assert_eq!(profile["bulkCompression"], expected);
             }
         }
+    }
+
+    #[test]
+    fn bottom_bar_defaults_to_always_and_round_trips() {
+        let legacy: HostProfile = serde_json::from_str(r#"{"idlePreview":true}"#).unwrap();
+        assert_eq!(legacy.bottom_bar, BottomBar::Always);
+        let chosen: HostProfile = serde_json::from_str(r#"{"bottomBar":"withToolbar"}"#).unwrap();
+        assert_eq!(chosen.bottom_bar, BottomBar::WithToolbar);
+        assert_eq!(
+            serde_json::to_value(chosen).unwrap()["bottomBar"],
+            "withToolbar"
+        );
+        assert!(serde_json::from_str::<HostProfile>(r#"{"bottomBar":"sometimes"}"#).is_err());
     }
 
     #[test]

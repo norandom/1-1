@@ -24,7 +24,7 @@ const RESOLUTIONS = [
 ];
 
 export function SettingsPage() {
-  const { settings, fetchSettings, updateSettings, isLoading, isSaving, error } = useSettingsStore();
+  const { settings, fetchSettings, updateSettings, error } = useSettingsStore();
   const { theme, setTheme } = useTheme();
 
   useEffect(() => {
@@ -89,15 +89,6 @@ export function SettingsPage() {
                 </ToggleGroup>
               </div>
 
-              <Separator />
-
-              <div className="flex items-center justify-between gap-4">
-                <div className="space-y-0.5">
-                  <Label htmlFor="auto-hide-status-bar" className="text-sm font-medium">Auto-hide status bar</Label>
-                  <p id="auto-hide-status-bar-help" className="text-[11px] text-muted-foreground">Free the bottom row during remote sessions. Move to the bottom edge or press Ctrl+Alt+Shift+S to reveal it. The desktop resizes to make room.</p>
-                </div>
-                <Switch id="auto-hide-status-bar" aria-describedby="auto-hide-status-bar-help" checked={settings.autoHideStatusBar} disabled={isLoading || isSaving} onCheckedChange={(checked) => void updateSettings({ autoHideStatusBar: checked })} />
-              </div>
               {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
 
               <Separator />

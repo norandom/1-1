@@ -19,7 +19,6 @@ const BACKEND_DEFAULTS = {
   theme: 'system',
   defaultPort: 3389,
   autoReconnect: true,
-  autoHideStatusBar: false,
   showPerformanceHud: false,
   sidebarCollapsed: false,
   sidebarHidden: false,
@@ -37,7 +36,6 @@ describe('defaultSettings', () => {
       theme: 'system',
       defaultPort: 3389,
       autoReconnect: true,
-      autoHideStatusBar: false,
       showPerformanceHud: false,
       sidebarCollapsed: false,
       sidebarHidden: false,
@@ -60,35 +58,35 @@ describe('defaultSettings', () => {
 });
 
 describe('settingsStore', () => {
-  it('defaults a legacy settings response to a visible status bar', async () => {
+  it('defaults a legacy settings response to a visible sidebar', async () => {
     const legacy = { ...defaultSettings };
-    Reflect.deleteProperty(legacy, 'autoHideStatusBar');
+    Reflect.deleteProperty(legacy, 'sidebarHidden');
     vi.mocked(tauri.getSettings).mockResolvedValueOnce(legacy);
     await useSettingsStore.getState().fetchSettings();
-    expect(useSettingsStore.getState().settings.autoHideStatusBar).toBe(false);
+    expect(useSettingsStore.getState().settings.sidebarHidden).toBe(false);
   });
   it('serializes saves and retains both confirmed patches', async () => {
     let complete!: (value: typeof defaultSettings) => void;
     vi.mocked(tauri.updateSettings).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
-    vi.mocked(tauri.updateSettings).mockResolvedValueOnce({ ...defaultSettings, autoHideStatusBar: true, theme: 'dark' });
-    const first = useSettingsStore.getState().updateSettings({ autoHideStatusBar: true });
+    vi.mocked(tauri.updateSettings).mockResolvedValueOnce({ ...defaultSettings, showPerformanceHud: true, theme: 'dark' });
+    const first = useSettingsStore.getState().updateSettings({ showPerformanceHud: true });
     const second = useSettingsStore.getState().updateSettings({ theme: 'dark' });
     await Promise.resolve();
     expect(tauri.updateSettings).toHaveBeenCalledTimes(1);
-    complete({ ...defaultSettings, autoHideStatusBar: true });
+    complete({ ...defaultSettings, showPerformanceHud: true });
     await Promise.all([first, second]);
-    expect(useSettingsStore.getState().settings).toMatchObject({ autoHideStatusBar: true, theme: 'dark' });
+    expect(useSettingsStore.getState().settings).toMatchObject({ showPerformanceHud: true, theme: 'dark' });
     expect(useSettingsStore.getState().isSaving).toBe(false);
   });
-  it('does not publish auto-hide before the backend confirms persistence', async () => {
+  it('does not publish a setting before the backend confirms persistence', async () => {
     let complete!: (value: typeof defaultSettings) => void;
     vi.mocked(tauri.updateSettings).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
-    const saving = useSettingsStore.getState().updateSettings({ autoHideStatusBar: true });
+    const saving = useSettingsStore.getState().updateSettings({ showPerformanceHud: true });
     await Promise.resolve();
-    expect(useSettingsStore.getState().settings.autoHideStatusBar).toBe(false);
-    complete({ ...defaultSettings, autoHideStatusBar: true });
+    expect(useSettingsStore.getState().settings.showPerformanceHud).toBe(false);
+    complete({ ...defaultSettings, showPerformanceHud: true });
     await saving;
-    expect(useSettingsStore.getState().settings.autoHideStatusBar).toBe(true);
+    expect(useSettingsStore.getState().settings.showPerformanceHud).toBe(true);
   });
   beforeEach(() => {
     vi.clearAllMocks();

@@ -2,49 +2,27 @@ import type { ConnectionConfig, SessionInfo } from '../types';
 
 import { SESSION_STATUS_TEXT } from './ux-tree-states';
 import { isLiveSessionStatus, resolveSessionView, sessionRouteIdFromPath } from './session-route';
+import { normalizeHostProfile } from './host-profile';
 
 
-export type StatusBarRevealState = { pointer: boolean; focus: boolean };
-export type StatusBarRevealEvent = 'pointer-enter' | 'pointer-leave' | 'focus-enter' | 'focus-leave';
-/** Pointer dwell only: focus/keyboard reveal is handled immediately by the row. */
-export function createStatusBarHoverReveal(dispatch: (event: StatusBarRevealEvent) => void) {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let revealed = false;
-  const cancel = () => {
-    clearTimeout(timer);
-    timer = undefined;
-  };
-  const reveal = () => {
-    cancel();
-    revealed = true;
-    dispatch('pointer-enter');
-  };
-  return {
-    enter(alreadyFocused = false) {
-      if (revealed) return;
-      if (alreadyFocused) reveal();
-      else if (timer === undefined) timer = setTimeout(reveal, 1000);
-    },
-    leave() {
-      cancel();
-      revealed = false;
-      dispatch('pointer-leave');
-    },
-  };
-}
-
-export function statusBarRevealReducer(state: StatusBarRevealState, event: StatusBarRevealEvent): StatusBarRevealState {
-  const next = event.startsWith('pointer') ? { ...state, pointer: event === 'pointer-enter' } : { ...state, focus: event === 'focus-enter' };
-  return next.pointer === state.pointer && next.focus === state.focus ? state : next;
-}
-export function statusBarRowHeight(autoHide: boolean, state: StatusBarRevealState): number {
-  return !autoHide || (state.pointer || state.focus) ? 28 : 0;
-}
-
-export function shouldAutoHideStatusBar(enabled: boolean, pathname: string, sessions: Iterable<SessionInfo>, connections: Pick<ConnectionConfig, 'id'>[]): boolean {
-  if (!enabled) return false;
+/**
+ * Whether this route shows the bottom bar as an overlay that appears with the
+ * top toolbar: a live or pending session whose saved host chose `withToolbar`.
+ * Every other view keeps the ordinary status row.
+ */
+export function bottomBarFollowsToolbar(
+  pathname: string,
+  sessions: Iterable<SessionInfo>,
+  connections: Pick<ConnectionConfig, 'id' | 'hostProfile'>[],
+): boolean {
   const id = sessionRouteIdFromPath(pathname);
-  return !!id && resolveSessionView(id, sessions, (connectionId) => connections.some((c) => c.id === connectionId)).kind !== 'stale';
+  if (!id) return false;
+  const live = [...sessions];
+  const view = resolveSessionView(id, live, (connectionId) => connections.some((c) => c.id === connectionId));
+  if (view.kind === 'stale') return false;
+  const connectionId = live.find((session) => session.id === id)?.connectionId ?? id;
+  const profile = connections.find((c) => c.id === connectionId)?.hostProfile;
+  return normalizeHostProfile(profile).bottomBar === 'withToolbar';
 }
 
 export type StatusBarSession = Pick<

@@ -71,6 +71,13 @@ export function SessionOptionsMenu({ connection, session }: { connection: Connec
               <DropdownMenuRadioItem disabled={disabled} value="fixed" onSelect={(e) => e.preventDefault()}>Fixed resolution</DropdownMenuRadioItem>
             </DropdownMenuRadioGroup>
             <p className="px-2 py-2 text-xs text-muted-foreground">Applies immediately. Fixed mode stops automatic resizing; reconnect to use the saved {connection.displayWidth ?? 1920} × {connection.displayHeight ?? 1080} resolution.</p>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Bottom bar</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={profile.bottomBar} onValueChange={(bottomBar) => void save({ hostProfile: { bottomBar: bottomBar as HostProfile['bottomBar'] } })}>
+              <DropdownMenuRadioItem disabled={disabled} value="always" onSelect={(e) => e.preventDefault()}>Always show</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem disabled={disabled} value="withToolbar" onSelect={(e) => e.preventDefault()}>Show with top toolbar</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+            <p className="px-2 py-2 text-xs text-muted-foreground">With the top toolbar, the bar appears over the desktop when the pointer reaches the top edge or you press Ctrl+Alt+Shift+S, so the desktop keeps the full window.</p>
           </DropdownMenuSubContent>
           </DropdownMenuPortal>
         </DropdownMenuSub>

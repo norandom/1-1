@@ -30,6 +30,8 @@ export interface HostProfile {
   cursorBlinking: boolean;
   desktopComposition: boolean;
   networkHint: 'lan' | 'wan' | 'broadbandHigh' | 'broadbandLow' | 'satellite' | 'modem';
+  /** A status row below the desktop, or an overlay shown with the top toolbar. */
+  bottomBar: 'always' | 'withToolbar';
 }
 
 // Task 6.6 (Req 10.1/10.19): `libraryId`/`folderId`/`mock` mirror the v2
@@ -121,7 +123,6 @@ export interface AppSettings {
   theme: 'system' | 'light' | 'dark';
   defaultPort: number;
   autoReconnect: boolean;
-  autoHideStatusBar: boolean;
   showPerformanceHud: boolean;
   sidebarCollapsed: boolean;
   /** Hidden behind a thin strip at the left edge; overrides the rail. */

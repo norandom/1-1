@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import { buildStatusBarText, createStatusBarHoverReveal, sessionCountLabel, statusBarRevealReducer, statusBarRowHeight } from '../status-bar';
+import { bottomBarFollowsToolbar, buildStatusBarText, sessionCountLabel } from '../status-bar';
 import type { StatusBarSession } from '../status-bar';
+import { DEFAULT_HOST_PROFILE } from '../host-profile';
+import type { SessionInfo } from '../../types';
 
 const session = (overrides: Partial<StatusBarSession>): StatusBarSession => ({
   connectionId: 'conn-1',
@@ -11,69 +13,29 @@ const session = (overrides: Partial<StatusBarSession>): StatusBarSession => ({
   ...overrides,
 });
 
-afterEach(() => vi.useRealTimers());
+describe('bottomBarFollowsToolbar', () => {
+  const host = (id: string, bottomBar?: 'always' | 'withToolbar') => ({
+    id, hostProfile: bottomBar ? { ...DEFAULT_HOST_PROFILE, bottomBar } : undefined,
+  });
+  const live = (id: string, connectionId: string) =>
+    ({ id, connectionId, connectionName: '', host: '', status: 'connected', fps: 0, latency: 0, bandwidth: 0,
+      width: 1, height: 1, reconnectAttempts: 0, maxReconnectAttempts: 5 }) as SessionInfo;
 
-it('requires one second of continuous pointer dwell without restarting for duplicate enters', () => {
-  vi.useFakeTimers();
-  const dispatch = vi.fn();
-  const hover = createStatusBarHoverReveal(dispatch);
-  hover.enter();
-  vi.advanceTimersByTime(999);
-  expect(dispatch).not.toHaveBeenCalled();
-  hover.enter();
-  vi.advanceTimersByTime(1);
-  expect(dispatch).toHaveBeenCalledExactlyOnceWith('pointer-enter');
-  hover.leave();
-  expect(dispatch).toHaveBeenLastCalledWith('pointer-leave');
+  it('follows the saved host of the viewed session, pending or live', () => {
+    const connections = [host('overlay', 'withToolbar'), host('row', 'always'), host('legacy')];
+    expect(bottomBarFollowsToolbar('/session/overlay', [], connections)).toBe(true);
+    expect(bottomBarFollowsToolbar('/session/s1', [live('s1', 'overlay')], connections)).toBe(true);
+    expect(bottomBarFollowsToolbar('/session/s2', [live('s2', 'row')], connections)).toBe(false);
+    expect(bottomBarFollowsToolbar('/session/legacy', [], connections)).toBe(false);
+  });
+
+  it('keeps the status row outside session views and for stale routes', () => {
+    const connections = [host('overlay', 'withToolbar')];
+    for (const path of ['/', '/settings', '/session/stale']) {
+      expect(bottomBarFollowsToolbar(path, [], connections)).toBe(false);
+    }
+  });
 });
-
-it('cancels pending reveal on leave or lifecycle cleanup and requires a fresh dwell', () => {
-  vi.useFakeTimers();
-  const dispatch = vi.fn();
-  const hover = createStatusBarHoverReveal(dispatch);
-  hover.enter();
-  vi.advanceTimersByTime(600);
-  hover.leave(); // Also the component cleanup on route/mode change and unmount.
-  dispatch.mockClear();
-  vi.advanceTimersByTime(1000);
-  expect(dispatch).not.toHaveBeenCalled();
-  hover.enter();
-  vi.advanceTimersByTime(999);
-  expect(dispatch).not.toHaveBeenCalled();
-  vi.advanceTimersByTime(1);
-  expect(dispatch).toHaveBeenCalledExactlyOnceWith('pointer-enter');
-});
-
-it('keeps keyboard reveal immediate and preserves pointer ownership of an already focused bar', () => {
-  vi.useFakeTimers();
-  let state = { pointer: false, focus: false };
-  const hover = createStatusBarHoverReveal((event) => { state = statusBarRevealReducer(state, event); });
-  hover.enter();
-  state = statusBarRevealReducer(state, 'focus-enter');
-  expect(statusBarRowHeight(true, state)).toBe(28);
-  hover.enter(true);
-  state = statusBarRevealReducer(state, 'focus-leave');
-  expect(statusBarRowHeight(true, state)).toBe(28);
-  hover.leave();
-  expect(statusBarRowHeight(true, state)).toBe(0);
-  vi.advanceTimersByTime(1000);
-  expect(statusBarRowHeight(true, state)).toBe(0);
-});
-
-it('reserves one row while pointer or focus stays inside and only reclaims it after both leave', () => {
-  let state = { pointer: false, focus: false };
-  expect(statusBarRowHeight(true, state)).toBe(0);
-  state = statusBarRevealReducer(state, 'pointer-enter');
-  expect(statusBarRowHeight(true, state)).toBe(28);
-  expect(statusBarRevealReducer(state, 'pointer-enter')).toBe(state);
-  state = statusBarRevealReducer(state, 'focus-enter');
-  state = statusBarRevealReducer(state, 'pointer-leave');
-  expect(statusBarRowHeight(true, state)).toBe(28);
-  state = statusBarRevealReducer(state, 'focus-leave');
-  expect(statusBarRowHeight(true, state)).toBe(0);
-  expect(statusBarRowHeight(false, state)).toBe(28);
-});
-
 describe('buildStatusBarText', () => {
   it.each(['connecting', 'connected', 'reconnecting', 'error', 'disconnected'] as const)('resolves readable host labels for %s without leaking IDs', (status) => {
     const current = session({ connectionId: '44444444-secret-id', status });
