@@ -1,34 +1,56 @@
 # 1-1 maintainer handover
 
-**17 November 2026.** 1-1 (pronounced “zero”) is an RDP client for coding and monitoring remote agents. The maintainer reported a successful manual test of the Windows x64 preview built from `98b6081`. The priorities are legible text while typing and resizing, responsive input, and clipboard recovery during long sessions.
+**18 November 2026, end of day.** 1-1 (pronounced “zero”) is an RDP client for coding and monitoring remote agents. The latest release is **v0.1.0-alpha.5**. The maintainer tested it on Windows and on Linux (Hyprland, Wayland), and found no regressions. Folder sharing comes next, through attaching the drive to sessions (task 5.2), before the usability items below. [Releases](https://github.com/norandom/1-1/releases)
 
-## November 18 implementation
+## Releases
 
-The maintainer approved two new specs. The first Windows test milestone is **Pause display** in the existing status bar. The saved-host credential test shares the server identity check with folder sharing. The test uses one verified connection and ends before a desktop opens. A host that selects plain TLS without NLA can still open a desktop, but its response cannot verify a saved password in this check. [Session actions and task status](specs/rdp-session-actions/tasks.md)
+- **alpha.5** (`c84ab4b`, current feed). Fixes the Wayland exit with protocol error 71 ([#1](https://github.com/norandom/1-1/issues/1), closed). The native wgpu renderer drew under the web view, which already draws every frame. It now starts only with `ONE_ONE_NATIVE_RENDERER=1`. This release also adds the folder sharing preview (the choice is saved, but no session offers the folder yet) and a Linux `.deb`.
+- **alpha.4** (`832ca8c`). Pause display, credential test, server identity review, sidebar Disconnect, resizable and hideable sidebar, per-host bottom bar, and fixes for the window-snapping drag and a resize crash.
+- **Published assets:** each release has the Windows x64 installer plus the Linux `.deb` and AppImage, with signatures and `SHA256SUMS.txt`. `latest.json` on `preview-channel` lists Windows x64 and the AppImage. A `.deb` cannot replace itself, so `.deb` users update by installing the next release's `.deb`. Windows ARM64 and macOS are built in CI but not published.
+- **Releasing:**
+  1. Bump the five version files and push.
+  2. When CI is green, push a `v*` tag. The tag triggers `preview-build.yml`, which exports the signed AppImage and the `.deb` together.
+  3. Verify each asset's SHA-256 against its `build-info.json`, and check that the `.sig` key ID matches the updater key in `tauri.conf.json`.
+  4. Create the release, then run `scripts/update-manifest.mjs` and upload `latest.json`.
 
-The Windows folder fixture reads a selected directory through IronRDP, including offsets above 4 GiB. The next user-visible step is granting one folder to a saved host. Ordinary copies on Windows and both Linux hosts will establish whether parallel ranges save time and how copying affects typing. The rsync-style overlay remains deferred until those measurements exist. [Folder-sharing tasks](specs/rdp-folder-sharing/tasks.md) · [Windows test results](specs/rdp-folder-sharing/validation.md)
+  GitHub's macOS arm64 runners often fail to start a job. Rerun that job, or release on green code checks when macOS is not shipped.
 
 ## Where to resume
 
-1. **Finish the Windows-client smart resize check (11.4).** Open the native app, connect to the Windows workstation and FreeRDP targets in turn, shrink the window, then restore it. Record the remote desktop dimensions and a fresh desktop update after each change. All three lab targets passed connection, first frame and shutdown. The automated probe confirmed both resize steps on IronRDP. It timed out waiting for confirmation on Windows and FreeRDP. One earlier native Windows run confirmed a single resize.
-2. **Check clipboard recovery on those sessions.** Copy text and a screenshot in both directions after resizing. Use **Resync clipboard** in the status bar, reconnect and repeat. Record which direction, format and recovery step succeeded. Keep clipboard contents and credentials out of test reports. End Computer Use after each native check.
-3. **Measure active and unattended bandwidth separately.** For active coding, compare XCRUSH with bulk compression off using the same host, resolution and repeatable scrolling workload. Reconnect between runs, let the initial desktop settle, then measure the change in the Performance HUD’s received and sent totals. For unattended agent output, hold compression fixed and compare idle preview on and off. Record first-update latency and text clarity after wake and resize. [Bandwidth research and Windows measurements](specs/windows-clearcodec-royalts-e2e/bandwidth-research.md)
+1. **Fix the task 4.1 review findings**, then mark 4.1 done. Code is in `src-tauri/src/rdp/folder_share.rs`; `BoundRoot` and `LinkSafeBackend` are not wired into sessions yet.
+   - *Blocker:* a create of `name:stream` on a multiply-linked file passes the link check, because the stream doesn't exist yet. New streams attach to the file itself. Strip `:stream` before counting links.
+   - Count links fail-closed: only "not found" forwards the request.
+   - Refuse a `FileRenameInformation` that replaces a multiply-linked destination, and refuse remote hard-link creation (`FileLinkInformation`).
+   - After binding, re-check every guard's attributes and compare the root guard's final path with the expected path. A junction swapped in between two guard opens can otherwise pass.
+   - Note in the design that a same-user `DefineDosDevice` remap of the drive letter is out of scope.
+   - In the refusal test, decode the reply's status, completion ID and file ID. Add tests for streams, rename-overwrite and the binding race.
+2. **Continue folder sharing:** 4.2 read-only and permission enforcement, 4.3 scoped create, copy, rename and delete, 5.1 a bounded file worker off the input path, 5.2 attaching the drive. The maintainer's main past pain was RDP file transfers making the mouse and typing slow. Keep input traffic ahead of file replies and measure typing latency during copies (6.2). [Folder-sharing tasks](specs/rdp-folder-sharing/tasks.md)
+3. **Usability backlog, after 5.2:**
+   - **Native pointer, as Royal TS and mstsc do it:** set `pointer_software_rendering` to false, show the remote pointer bitmap as the CSS cursor over the canvas, and hide and restore it cleanly at the window edge. The local pointer currently stays visible next to the drawn one.
+   - **HiDPI:** `rdp/client.rs` sends `desktop_scale_factor: 0` while requesting physical pixels, so the remote UI is tiny on a MacBook. Add a per-host Scaling option: Automatic (device pixel ratio × 100), 100%, or Low resolution.
+   - **Clipboard line endings:** convert CRLF to LF for the Linux and macOS clipboards, and back to CRLF when sending to the remote. Wayland currently gets an extra `\r`.
+   - **Command line:** `1-1 --host <saved name|address[:port]>` connects directly, asks for the password if none is saved, and opens only the session with the sidebar hidden.
+   - **CPU:** about 2% per connection on an i9 at high resolution with RDP 6.1 compression. Measure after the pointer change.
+4. **Open acceptance checks from 17 November:**
+   - Windows and FreeRDP shrink and restore (11.4).
+   - Clipboard Resync in both directions after resize and reconnect.
+   - Separate active and unattended bandwidth comparisons. [Bandwidth research](specs/windows-clearcodec-royalts-e2e/bandwidth-research.md)
+5. **Note for the server side:** hypr_rdp ignores Suppress Output. 1-1 detects this after about 8 seconds and falls back to live updates. Windows and xfreerdp honor pause.
 
 ## Spec status
 
-Requirements, design and tasks are approved. Groups 1–10 and tasks 11.0d–11.0p are checked off. **62 of 77 numbered subtasks are complete**. A separate unnumbered bandwidth measurement is open. The tracked task list contains acceptance criteria. The full requirements and design documents were available in the maintainer’s local checkout at this checkpoint. [Spec metadata](specs/windows-clearcodec-royalts-e2e/spec.json) · [Task list](specs/windows-clearcodec-royalts-e2e/tasks.md)
+- **Session actions:** tasks 1 and 2 are complete. Task 3 (Windows acceptance runs) is open. A click or scroll within 5 seconds after Pause does not resume, and pause refusal is detected after about 8 seconds. [Tasks](specs/rdp-session-actions/tasks.md)
+- **Folder sharing:** tasks 1–3 are complete: server identity, Windows fixture, grant store, and folder picker with grant controls. Task 4.1 is implemented, with the review findings above open. Recorded decisions (18 November):
+  - An already-open handle that a local program moves outside the folder stays usable until it is closed.
+  - Multiply-linked files are read-only through the share.
+  - NTFS refuses to move a folder that holds an open file.
+- **windows-clearcodec-royalts-e2e:** 62 of 77 numbered subtasks are complete. Open work is the 11.x end-to-end harness, interoperability, DPI/text fidelity, performance and release evidence. [Task list](specs/windows-clearcodec-royalts-e2e/tasks.md)
 
-| Open tasks | Work remaining |
-| --- | --- |
-| 11.0a–c | Build the shared end-to-end test harness, starting with the Windows adapter. Current runtime testing scope is Windows. |
-| 11.1–3 | Exercise library migration and recovery, tree and keyboard navigation, sessions and settings in the built app. |
-| 11.4–6 | Complete Windows workstation, Windows Server and GNOME Remote Desktop interoperability checks. The three lab targets are Windows workstation, FreeRDP and IronRDP. |
-| 11.7–12 | Check text at 100%, 125%, 150% and 200% scaling, verify performance and memory budgets, and collect final release evidence. |
+## CI and local builds
 
-## Preview and release
-
-The published alpha.3 Windows x64 installer includes the updater, professional graphics settings and text/image clipboard controls. The newer standalone adds measured TCP receive/send totals, observed graphics codecs and opt-in per-host adaptive idle preview. The four platform builds for alpha.3 succeeded. A full updater download, install and restart still needs a later published version. [Published installer](https://github.com/norandom/1-1/releases/tag/v0.1.0-alpha.3) · [Platform build run](https://github.com/norandom/1-1/actions/runs/44143737759)
-
-The standalone passed 365 Windows Rust tests with five skipped, and 561 frontend tests. The quiet Windows desktop received 275 bytes in one live minute and 33,494 bytes in a forced preview minute at 1280 × 720. The first graphics update after a separate wake arrived in 84 ms. This result explains why the adaptive policy leaves a quiet editor live. The manual pass supplied no comparative traffic totals for active coding.
-
-On the development workstation, the tested executable is `D:/BuildArtifacts/drift-rdp/releases/idle-preview-20261117/1-1-idle-preview.exe`. Windows test logs are under `D:/BuildArtifacts/drift-rdp/idle-preview/`. Run native PowerShell from the repository and reuse the configured Cargo target directory. For occasional cleanup while builds are idle, the project storage script provides `-Action CleanProject`. [Baseline runner](../scripts/Invoke-Baseline.ps1) · [Storage script](../scripts/Invoke-BuildStorage.ps1)
+- **CI times:** a full run takes about 9 minutes with the Rust build cache. Docs-only pushes are skipped. The macOS cold-launch spike runs only on a manual dispatch with `macos_cold_launch` checked. Intel macOS builds only on a manual dispatch.
+- **Linux coverage:** Linux CI compiles and tests the non-Windows code paths. Keep test paths portable.
+- **Contract checks:** `pwsh -NoProfile -File scripts/Invoke-CI.Tests.ps1` passes 249 of 249.
+- **Local preview:** `pwsh -NoProfile -File scripts/Invoke-WindowsPreview.ps1` builds into `D:/BuildArtifacts/cargo-target/release/rdp-client.exe`. Copy it under `D:/BuildArtifacts/drift-rdp/releases/` before testing; later builds overwrite the target. Launch it with stderr redirected and `RUST_BACKTRACE=1` to capture a panic.
+- **Logs:** the app log is `%LOCALAPPDATA%/com.drift.app/logs/1-1.log`. It keeps five 2 MB files and records panics with a backtrace.
+- **Storage:** run native PowerShell from the repository and reuse the configured Cargo target directory. [Storage script](../scripts/Invoke-BuildStorage.ps1)
