@@ -1,0 +1,16 @@
+flowchart TB
+    subgraph WV["WebView: React + shadcn/ui"]
+        UI["Toolbar, Sidebar, Tabs, StatusBar, Settings<br/>(transparent overlay only)"]
+    end
+    subgraph WGPU["wgpu surface (Metal / Vulkan), Tauri window"]
+        GR["GpuRenderer<br/>SharedFrame.publish, zero-copy<br/>queue.write_texture, DMA<br/>render_pass, present"]
+    end
+    subgraph RB["Rust backend"]
+        SM["SessionManager"]
+        SA["SessionActor, one per connection<br/>IronRDP ActiveStage, TLS + CredSSP/NLA<br/>SharedFrame.update_rect, input forwarding"]
+        ST["ConnectionStore, JSON<br/>CredentialStore, OS keychain<br/>SettingsStore"]
+    end
+    UI -->|"Tauri IPC: input events"| SM
+    SM --> SA
+    SM --- ST
+    SA -->|"frames, zero-copy"| GR

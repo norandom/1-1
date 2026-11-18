@@ -1,0 +1,9 @@
+flowchart LR
+    G["IronRDP GraphicsUpdate<br/>dirty rects"] --> BW["SharedFrame.begin_write<br/>1 mutex lock for all rects"]
+    BW --> UR["update_rect x N<br/>memcpy, ~0.3 ms"]
+    UR --> MD["mark_dirty<br/>condvar wakes render thread"]
+    MD --> WF["GpuRenderer, dedicated OS thread<br/>wait_for_frame, 0% CPU when idle"]
+    WF --> P["publish<br/>zero-copy buffer swap"]
+    P --> WT["write_texture<br/>DMA upload, ~1 ms"]
+    WT --> RP["render_pass<br/>fullscreen quad shader"]
+    RP --> PR["present<br/>Metal / Vulkan"]

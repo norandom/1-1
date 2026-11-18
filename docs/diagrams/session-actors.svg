@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 651.7669999999999 322.3" width="651.7669999999999" height="322.3" style="--bg:#ffffff;--fg:#1f2328;--line:#d1d9e0;--accent:#0969da;--muted:#59636e;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Inter', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 85%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="5" refX="7" refY="2.5" orient="auto">
+    <polygon points="0 0, 8 2.5, 0 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="5" refX="1" refY="2.5" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.5, 8 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+</defs>
+<polyline class="edge" data-from="SM" data-to="H1" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="389.239,93.80000000000001 389.239,109.80000000000001 171.75449999999995,109.80000000000001 171.75449999999995,125.80000000000001" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="SM" data-to="H2" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="389.239,93.80000000000001 389.239,109.80000000000001 389.239,109.80000000000001 389.239,125.80000000000001" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="SM" data-to="H3" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="389.239,93.80000000000001 389.239,109.80000000000001 545.591,109.80000000000001 545.591,125.80000000000001" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="H1" data-to="A1" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="171.75449999999995,196.5 171.75449999999998,211.60000000000002" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="H2" data-to="A2" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="389.239,162.70000000000002 389.239,211.60000000000002" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="H3" data-to="A3" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="545.5909999999999,162.70000000000002 545.591,211.60000000000002" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<g class="node" data-id="SM" data-label="SessionManager
+lightweight registry" data-shape="rectangle">
+  <rect x="313.05949999999996" y="40" width="152.359" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="389.239" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="389.239" dy="-3.9000000000000012">SessionManager</tspan><tspan x="389.239" dy="16.900000000000002">lightweight registry</tspan></text>
+</g>
+<g class="node" data-id="H1" data-label="SessionHandle
+cmd_tx, mpsc
+info, watch" data-shape="rectangle">
+  <rect x="105.57849999999996" y="125.80000000000001" width="132.352" height="70.7" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="171.75449999999995" y="161.15" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="171.75449999999995" dy="-12.350000000000001">SessionHandle</tspan><tspan x="171.75449999999995" dy="16.900000000000002">cmd_tx, mpsc</tspan><tspan x="171.75449999999995" dy="16.900000000000002">info, watch</tspan></text>
+</g>
+<g class="node" data-id="H2" data-label="SessionHandle" data-shape="rectangle">
+  <rect x="323.063" y="125.80000000000001" width="132.352" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="389.239" y="144.25" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">SessionHandle</text>
+</g>
+<g class="node" data-id="H3" data-label="SessionHandle" data-shape="rectangle">
+  <rect x="479.41499999999996" y="125.80000000000001" width="132.352" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="545.591" y="144.25" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">SessionHandle</text>
+</g>
+<g class="node" data-id="A1" data-label="SessionActor
+IronRDP session, SharedFrame, state" data-shape="rectangle">
+  <rect x="40" y="211.60000000000002" width="263.50899999999996" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="171.75449999999998" y="238.50000000000003" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="171.75449999999998" dy="-3.9000000000000012">SessionActor</tspan><tspan x="171.75449999999998" dy="16.900000000000002">IronRDP session, SharedFrame, state</tspan></text>
+</g>
+<g class="node" data-id="A2" data-label="SessionActor" data-shape="rectangle">
+  <rect x="327.50899999999996" y="211.60000000000002" width="123.46000000000001" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="389.239" y="230.05" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">SessionActor</text>
+</g>
+<g class="node" data-id="A3" data-label="SessionActor" data-shape="rectangle">
+  <rect x="483.861" y="211.60000000000002" width="123.46000000000001" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="545.591" y="230.05" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">SessionActor</text>
+</g>
+</svg>

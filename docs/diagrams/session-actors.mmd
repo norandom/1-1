@@ -1,0 +1,7 @@
+flowchart TB
+    SM["SessionManager<br/>lightweight registry"] --> H1["SessionHandle<br/>cmd_tx, mpsc<br/>info, watch"]
+    SM --> H2["SessionHandle"]
+    SM --> H3["SessionHandle"]
+    H1 --> A1["SessionActor<br/>IronRDP session, SharedFrame, state"]
+    H2 --> A2["SessionActor"]
+    H3 --> A3["SessionActor"]

@@ -4,66 +4,17 @@
 
 One Tauri process: a React WebView for the UI on top, a Rust backend below, and a dedicated wgpu thread that owns the actual pixels.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        TAURI PROCESS                                 │
-│                                                                      │
-│  ┌──── WebView (React) ──────────────────────────────────────────┐  │
-│  │  App.tsx                                                       │  │
-│  │  ├── ErrorBoundary                                             │  │
-│  │  ├── Titlebar (custom frameless)                               │  │
-│  │  ├── Sidebar (collapsible nav)                                 │  │
-│  │  ├── Routes                                                    │  │
-│  │  │   ├── / → ConnectionGrid → ConnectionCard[]                  │  │
-│  │  │   ├── /session/:connectionId → SessionView                  │  │
-│  │  │   │   ├── SessionCanvas (HTML5 Canvas fallback, input)      │  │
-│  │  │   │   ├── SessionToolbar (auto-hide)                        │  │
-│  │  │   │   ├── SessionTabs (multi-session)                       │  │
-│  │  │   │   └── PerformanceHUD                                    │  │
-│  │  │   └── /settings → SettingsPage                              │  │
-│  │  ├── QuickConnect (Cmd+K)                                      │  │
-│  │  ├── ShortcutOverlay (Cmd+?)                                   │  │
-│  │  ├── StatusBar + ClipboardStatus + DisplayPauseControl         │  │
-│  │  └── ToastContainer                                            │  │
-│  │                                                                │  │
-│  │  Stores: connectionStore, sessionStore, settingsStore, toast   │  │
-│  └────────────────────┬───────────────────────────────────────────┘  │
-│                       │ Tauri IPC (invoke)                           │
-│                       ▼                                              │
-│  ┌──── Rust Backend ─────────────────────────────────────────────┐   │
-│  │  commands/ (CRUD, session incl. pause_display, updater, ...)   │  │
-│  │  store/ (connections.json, settings.json, OS keychain)         │  │
-│  │  rdp/ (SessionManager + SessionActor per connection,           │  │
-│  │        IronRDP client, input, cliprdr clipboard, pause/idle    │  │
-│  │        preview, network metrics)                              │  │
-│  │  renderer/ (wgpu GpuRenderer + SharedFrame) ◄──────────────────┘  │
-│  │  utils/ (TCP probe, latency measurement)                       │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
-```
+![1-1 architecture](docs/diagrams/architecture.svg)
+
+Editable source: [docs/diagrams/architecture.mmd](docs/diagrams/architecture.mmd). The WebView tree: App.tsx with ErrorBoundary, frameless Titlebar, collapsible Sidebar, routes (`/` ConnectionGrid, `/session/:id` SessionView with SessionCanvas fallback, SessionToolbar, SessionTabs, PerformanceHUD, `/settings`), QuickConnect (Cmd+K), ShortcutOverlay (Cmd+?), StatusBar, ClipboardStatus, DisplayPauseControl, ToastContainer; stores for connections, sessions, settings, toasts. The backend: `commands/` (CRUD, session incl. pause_display, updater), `store/` (connections.json, settings.json, OS keychain), `rdp/` (SessionManager + one SessionActor per connection, IronRDP client, input, cliprdr clipboard, pause/idle preview, network metrics), `renderer/` (wgpu GpuRenderer + SharedFrame), `utils/` (TCP probe, latency).
 
 ## Session model: one actor per session
 
 `SessionManager` is a lightweight registry of handles. Each handle owns an mpsc command channel and a watch channel for session info; dropping the handle kills the actor task.
 
-```
-                   SessionManager
-                   (lightweight registry)
-                        │
-           ┌────────────┼────────────┐
-           ▼            ▼            ▼
-     SessionHandle  SessionHandle  SessionHandle
-     ├── cmd_tx     ├── cmd_tx     ├── cmd_tx
-     │  (mpsc)      │  (mpsc)      │  (mpsc)
-     ▼              ▼              ▼
-     SessionActor   SessionActor   SessionActor
-     ├── IronRDP    ├── IronRDP    ├── IronRDP
-     │   Session    │   Session    │   Session
-     ├── SharedFrame├── SharedFrame├── SharedFrame
-     ├── State      ├── State      ├── State
-     └── AppHandle  └── AppHandle  └── AppHandle
-         (for emit)     (for emit)     (for emit)
-```
+![Session actors](docs/diagrams/session-actors.svg)
+
+Editable source: [docs/diagrams/session-actors.mmd](docs/diagrams/session-actors.mmd).
 
 Why actors instead of one shared mutex:
 
@@ -94,30 +45,15 @@ enum SessionCommand {
 
 The session actor writes dirty rects into a `SharedFrame`, a zero-copy double buffer shared with the renderer thread. One mutex lock covers a whole batch of rects, and a condvar wakes the renderer only when there is work, so an idle session costs 0% CPU. The renderer uploads the frame with `queue.write_texture` and presents a fullscreen quad via wgpu (Metal on macOS, Vulkan on Linux). If no GPU is available, the frontend falls back to 2D Canvas rendering in the WebView.
 
+![Frame pipeline](docs/diagrams/frame-pipeline.svg)
+
+Editable source: [docs/diagrams/frame-pipeline.mmd](docs/diagrams/frame-pipeline.mmd).
+
 ## Session state machine
 
-```
-                    ┌──────────────┐
-                    │ Disconnected │ ◄──── initial
-                    └──────┬───────┘
-                           │ connect()
-                           ▼
-                    ┌──────────────┐
-              ┌────►│  Connecting  │────────┐
-              │     └──────┬───────┘        │ 30s timeout
-              │            │ success        ▼
-              │            ▼          ┌───────────┐
-              │     ┌──────────────┐  │ Error(msg) │
-              │     │  Connected   │  └─────┬─────┘
-              │     └──────┬───────┘        │ auto_reconnect
-              │            │ network drop   ▼
-              │            ▼          ┌──────────────┐
-              │     ┌──────────────┐  │ Reconnecting │ (backoff: 1,2,4,8...30s)
-              │     │ Disconnected │  └──────┬───────┘
-              │     └──────────────┘         │ success → Connected
-              │                              │ max retries → Error
-              └──────────────────────────────┘
-```
+![Session state machine](docs/diagrams/session-state-machine.svg)
+
+Editable source: [docs/diagrams/session-state-machine.mmd](docs/diagrams/session-state-machine.mmd).
 
 ## Fork additions on top of Drift
 

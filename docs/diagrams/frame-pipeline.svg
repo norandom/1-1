@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2012.0559999999998 133.8" width="2012.0559999999998" height="133.8" style="--bg:#ffffff;--fg:#1f2328;--line:#d1d9e0;--accent:#0969da;--muted:#59636e;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Inter', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 85%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="5" refX="7" refY="2.5" orient="auto">
+    <polygon points="0 0, 8 2.5, 0 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="5" refX="1" refY="2.5" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.5, 8 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+</defs>
+<polyline class="edge" data-from="G" data-to="BW" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="230.891,66.9 270.89099999999996,66.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="BW" data-to="UR" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="466.96899999999994,66.9 506.96899999999994,66.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="UR" data-to="MD" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="645.249,66.9 685.249,66.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="MD" data-to="WF" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="902.816,66.9 942.8159999999999,66.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="WF" data-to="P" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="1190.023,66.9 1230.023,66.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="P" data-to="WT" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="1403.1299999999999,66.9 1443.1299999999999,66.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="WT" data-to="RP" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="1590.302,66.9 1630.302,66.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="RP" data-to="PR" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="1808.5959999999998,66.9 1848.5959999999998,66.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<g class="node" data-id="G" data-label="IronRDP GraphicsUpdate
+dirty rects" data-shape="rectangle">
+  <rect x="40" y="40" width="190.891" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="135.44549999999998" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="135.44549999999998" dy="-3.9000000000000012">IronRDP GraphicsUpdate</tspan><tspan x="135.44549999999998" dy="16.900000000000002">dirty rects</tspan></text>
+</g>
+<g class="node" data-id="BW" data-label="SharedFrame.begin_write
+1 mutex lock for all rects" data-shape="rectangle">
+  <rect x="270.89099999999996" y="40" width="196.07799999999997" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="368.92999999999995" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="368.92999999999995" dy="-3.9000000000000012">SharedFrame.begin_write</tspan><tspan x="368.92999999999995" dy="16.900000000000002">1 mutex lock for all rects</tspan></text>
+</g>
+<g class="node" data-id="UR" data-label="update_rect x N
+memcpy, ~0.3 ms" data-shape="rectangle">
+  <rect x="506.96899999999994" y="40" width="138.28000000000003" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="576.1089999999999" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="576.1089999999999" dy="-3.9000000000000012">update_rect x N</tspan><tspan x="576.1089999999999" dy="16.900000000000002">memcpy, ~0.3 ms</tspan></text>
+</g>
+<g class="node" data-id="MD" data-label="mark_dirty
+condvar wakes render thread" data-shape="rectangle">
+  <rect x="685.249" y="40" width="217.56699999999995" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="794.0325" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="794.0325" dy="-3.9000000000000012">mark_dirty</tspan><tspan x="794.0325" dy="16.900000000000002">condvar wakes render thread</tspan></text>
+</g>
+<g class="node" data-id="WF" data-label="GpuRenderer, dedicated OS thread
+wait_for_frame, 0% CPU when idle" data-shape="rectangle">
+  <rect x="942.8159999999999" y="40" width="247.20699999999997" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1066.4195" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="1066.4195" dy="-3.9000000000000012">GpuRenderer, dedicated OS thread</tspan><tspan x="1066.4195" dy="16.900000000000002">wait_for_frame, 0% CPU when idle</tspan></text>
+</g>
+<g class="node" data-id="P" data-label="publish
+zero-copy buffer swap" data-shape="rectangle">
+  <rect x="1230.023" y="40" width="173.107" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1316.5765" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="1316.5765" dy="-3.9000000000000012">publish</tspan><tspan x="1316.5765" dy="16.900000000000002">zero-copy buffer swap</tspan></text>
+</g>
+<g class="node" data-id="WT" data-label="write_texture
+DMA upload, ~1 ms" data-shape="rectangle">
+  <rect x="1443.1299999999999" y="40" width="147.17200000000003" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1516.716" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="1516.716" dy="-3.9000000000000012">write_texture</tspan><tspan x="1516.716" dy="16.900000000000002">DMA upload, ~1 ms</tspan></text>
+</g>
+<g class="node" data-id="RP" data-label="render_pass
+fullscreen quad shader" data-shape="rectangle">
+  <rect x="1630.302" y="40" width="178.29399999999998" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1719.4489999999998" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="1719.4489999999998" dy="-3.9000000000000012">render_pass</tspan><tspan x="1719.4489999999998" dy="16.900000000000002">fullscreen quad shader</tspan></text>
+</g>
+<g class="node" data-id="PR" data-label="present
+Metal / Vulkan" data-shape="rectangle">
+  <rect x="1848.5959999999998" y="40" width="123.46" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1910.3259999999998" y="66.9" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="1910.3259999999998" dy="-3.9000000000000012">present</tspan><tspan x="1910.3259999999998" dy="16.900000000000002">Metal / Vulkan</tspan></text>
+</g>
+</svg>

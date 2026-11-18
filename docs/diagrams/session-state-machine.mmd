@@ -1,0 +1,9 @@
+flowchart TB
+    D["Disconnected<br/>(initial)"] -->|"connect()"| C["Connecting"]
+    C -->|"success"| CD["Connected"]
+    C -->|"30s timeout"| E["Error (msg)"]
+    CD -->|"network drop"| R["Reconnecting<br/>backoff 1, 2, 4, 8, ... 30s"]
+    CD -->|"user disconnect"| D
+    R -->|"success"| CD
+    R -->|"max retries"| E
+    E -->|"auto_reconnect"| R

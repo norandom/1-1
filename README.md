@@ -133,59 +133,13 @@ Upload the immutable installer assets to the matching version release first, the
 
 ## Architecture
 
-```
-                    1-1 Architecture
-    ================================================
-
-    ┌─────────── Tauri Window ───────────────────┐
-    │                                             │
-    │  ┌─── wgpu Surface (Metal/Vulkan) ───────┐ │
-    │  │  GpuRenderer                           │ │
-    │  │  ├── SharedFrame.publish() [zero-copy] │ │
-    │  │  ├── queue.write_texture() [DMA]       │ │
-    │  │  └── render_pass → present             │ │
-    │  └────────────────────────────────────────┘ │
-    │                                             │
-    │  ┌─── WebView (React + shadcn/ui) ───────┐  │
-    │  │  Toolbar, Sidebar, Tabs, StatusBar,    │  │
-    │  │  Settings (transparent overlay only)   │  │
-    │  └────────────────────────────────────────┘  │
-    └────────────────────┬────────────────────────┘
-                         │
-               Tauri IPC (input events)
-                         │
-    ┌─────────── Rust Backend ────────────────────┐
-    │                                              │
-    │  SessionManager                              │
-    │  ├── SessionActor (1 per connection)         │
-    │  │   ├── IronRDP ActiveStage                 │
-    │  │   ├── TLS + CredSSP/NLA                   │
-    │  │   ├── SharedFrame.update_rect()           │
-    │  │   └── Input forwarding (kbd/mouse/scroll) │
-    │  ├── ConnectionStore (JSON persistence)      │
-    │  ├── CredentialStore (OS keychain)           │
-    │  └── SettingsStore                           │
-    └──────────────────────────────────────────────┘
-```
+![1-1 architecture](docs/diagrams/architecture.svg)
 
 ### Frame pipeline
 
-```
-IronRDP GraphicsUpdate (dirty rects)
-    │
-    ▼
-SharedFrame.begin_write()          ← 1 mutex lock for all rects
-    ├── update_rect() × N          ← memcpy, ~0.3ms
-    └── mark_dirty()               ← condvar wakes render thread
-    │
-    ▼
-GpuRenderer (dedicated OS thread)
-    ├── wait_for_frame()           ← sleeps until signaled (0% CPU idle)
-    ├── publish()                  ← zero-copy buffer swap
-    ├── write_texture()            ← DMA upload to GPU, ~1ms
-    ├── render_pass()              ← fullscreen quad shader
-    └── present()                  ← Metal/Vulkan display
-```
+![Frame pipeline](docs/diagrams/frame-pipeline.svg)
+
+Both diagrams are generated from editable Mermaid sources in [docs/diagrams/](docs/diagrams/); full details in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Tech stack
 
