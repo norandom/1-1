@@ -314,7 +314,7 @@ function SessionContent() {
       {/* Task 8.6 (Req 11.1): the tab strip is hoisted to App above the
           routes — it no longer renders inside the session view. */}
 
-      <div ref={viewportRef} className="relative min-h-0 flex-1 overflow-hidden">
+      <div ref={viewportRef} data-rdp-session={sessionId ?? undefined} className="relative min-h-0 flex-1 overflow-hidden">
         {/* Canvas */}
         <SessionCanvas
           displayMode={profile.displayMode}

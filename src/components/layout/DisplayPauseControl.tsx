@@ -49,6 +49,13 @@ export function DisplayPauseControl({ session }: { session?: SessionInfo }) {
       aria-disabled={!displayPauseAvailable || busy} aria-busy={busy}
       aria-describedby={hint ? hintId : undefined}
       title={hint || 'Request a desktop update about once a minute. Remote input resumes live updates.'}
+      onMouseDown={event => {
+        const focused = event.currentTarget.ownerDocument.activeElement;
+        if (event.button === 0 && focused?.tagName === 'CANVAS'
+          && focused.closest('[data-rdp-session]')?.getAttribute('data-rdp-session') === id) {
+          event.preventDefault();
+        }
+      }}
       className="h-5 shrink-0 gap-1 text-[10px] aria-disabled:opacity-60" onClick={() => void toggle()}>
       {displayPaused ? <Play size={11} /> : <Pause size={11} />}
       {displayPaused ? 'Resume live' : 'Pause display'}
