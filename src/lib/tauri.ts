@@ -113,6 +113,10 @@ export async function disconnect(sessionId: string): Promise<void> {
   await invoke('disconnect', { sessionId });
 }
 
+export async function sessionViewReturned(sessionId: string): Promise<void> {
+  await invoke('session_view_returned', { sessionId });
+}
+
 export async function resumeDisplay(sessionId: string): Promise<void> {
   await invoke('resume_display', { sessionId });
 }

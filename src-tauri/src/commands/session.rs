@@ -40,7 +40,23 @@ fn initial_config(
 }
 
 #[tauri::command]
+pub async fn pause_display(
+    session_id: String,
+    session_mgr: State<'_, SessionManager>,
+) -> Result<(), String> {
+    session_mgr.set_display_paused(&session_id, true).await
+}
+
+#[tauri::command]
 pub async fn resume_display(
+    session_id: String,
+    session_mgr: State<'_, SessionManager>,
+) -> Result<(), String> {
+    session_mgr.set_display_paused(&session_id, false).await
+}
+
+#[tauri::command]
+pub async fn session_view_returned(
     session_id: String,
     session_mgr: State<'_, SessionManager>,
 ) -> Result<(), String> {
@@ -49,7 +65,7 @@ pub async fn resume_display(
         .await
         .ok_or_else(|| "Session not found".to_string())?;
     sender
-        .send(SessionCommand::ResumeDisplay)
+        .send(SessionCommand::ViewReturned)
         .await
         .map_err(|_| "Session stopped".to_string())
 }
