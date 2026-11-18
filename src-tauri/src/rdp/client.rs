@@ -14,7 +14,11 @@ use crate::store::connections::ConnectionConfig;
 /// Commands that can be sent to a running session actor.
 #[derive(Debug)]
 pub enum SessionCommand {
-    ResumeDisplay,
+    SetDisplayPaused {
+        paused: bool,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    ViewReturned,
     FrameConsumed {
         receipt: crate::rdp::frame_delivery::FrameReceipt,
         refresh: bool,

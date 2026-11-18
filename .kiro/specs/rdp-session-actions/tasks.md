@@ -13,7 +13,7 @@ The independent Kiro task-plan review passed on 18 November 2026. The review cov
   - Exercise the capability flag and ignored-suppression rule. After the two-second grace period, desktop paints in three consecutive ten-second suppressed intervals trigger a return to live. Cursor changes, preview windows and resize redraws cannot trigger it.
   - _Boundary: Idle preview policy_
   - _Requirements: 2.1, 2.2, 2.7, 2.8_
-- [ ] 1.2 Apply pause and input to the same session writer
+- [x] 1.2 Apply pause and input to the same session writer
   - Route idempotent Pause and Resume commands through the connected actor. Reject a stale session ID. Keep the framebuffer, socket reads, graphics acknowledgements, clipboard transfers and Resync running.
   - Classify deliberate remote keystrokes, clicks, scroll and paste separately from pointer movement, focus, local modifier release and background clipboard updates. When suppressed, send Allow before the triggering input. When a preview is already open, keep output live without sending a duplicate Allow. Forward the triggering input exactly once in either case.
   - Capture two sessions' wire events with pending clipboard traffic. Assert ordered wake/input, continued acknowledgements, unchanged manual state on incidental activity and a cleared manual override after reconnect. The new session starts from its saved automatic preference.

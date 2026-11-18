@@ -90,13 +90,6 @@ pub struct IdlePreview {
     cycle_bytes: u64,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Session-actions tasks 1.2 and 1.3 wire these methods to the actor"
-    )
-)]
 impl IdlePreview {
     pub fn pause(&mut self, now: Instant) -> Option<DisplayAction> {
         if self.manual.is_some() || self.pause_unavailable_reason.is_some() {
@@ -121,7 +114,13 @@ impl IdlePreview {
     pub fn pause_unavailable_reason(&self) -> Option<&'static str> {
         self.pause_unavailable_reason
     }
+}
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Task 1.3 wires resize redraws to the actor")
+)]
+impl IdlePreview {
     pub fn begin_manual_redraw(&mut self, now: Instant) -> Option<DisplayAction> {
         self.manual.as_mut()?.redraw_pending = true;
         (self.state == IdlePreviewState::Suppressed).then(|| self.open_preview(now))

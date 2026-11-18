@@ -733,10 +733,13 @@ impl SessionActor {
                         let (width, height) = normalize_remote_resolution(width, height);
                         self.pending_resize = Some((width, height));
                     }
+                    Some(SessionCommand::SetDisplayPaused { reply, .. }) => {
+                        let _ = reply.send(Err("Session is not connected".into()));
+                    }
                     Some(SessionCommand::ClipboardContext { .. }) => {}
-                Some(SessionCommand::ClipboardPaste { reply, .. }) => { let _ = reply.send(Err("Session is not connected".into())); }
-                Some(SessionCommand::ClipboardSync { reply, .. }) => { let _ = reply.send(Err("Clipboard requires a connected real session.".into())); }
-                Some(SessionCommand::ClipboardWrite { text }) => {
+                    Some(SessionCommand::ClipboardPaste { reply, .. }) => { let _ = reply.send(Err("Session is not connected".into())); }
+                    Some(SessionCommand::ClipboardSync { reply, .. }) => { let _ = reply.send(Err("Clipboard requires a connected real session.".into())); }
+                    Some(SessionCommand::ClipboardWrite { text }) => {
                         self.local_clipboard_text = Some(text);
                     }
                     _ => {}
@@ -899,6 +902,42 @@ impl SessionActor {
             tokio::time::Instant::now(),
         );
         self.idle_preview_updated_at = None;
+    }
+
+    fn display_action_for_command(&mut self, cmd: &SessionCommand) -> Option<DisplayAction> {
+        let now = tokio::time::Instant::now();
+        let manual = self.idle_preview.is_manually_paused();
+        let wake = match cmd {
+            SessionCommand::SetDisplayPaused { paused: true, .. } => {
+                return self.idle_preview.pause(now);
+            }
+            SessionCommand::SetDisplayPaused { paused: false, .. } => matches!(
+                self.idle_preview.state(),
+                IdlePreviewState::Suppressed | IdlePreviewState::Preview
+            ),
+            SessionCommand::ClipboardPaste { .. } => true,
+            // Key-up may be a synthetic release when the operator focuses local controls.
+            // Always forward it, keeping a manual pause unless a remote key is pressed.
+            SessionCommand::SendKey { key_code, is_down } => {
+                key_code & 0xff != 0 && (*is_down || !manual)
+            }
+            SessionCommand::SendMouse {
+                event_type,
+                scroll_delta,
+                ..
+            } => {
+                !manual
+                    || matches!(event_type.as_str(), "down" | "up")
+                    || (event_type == "scroll" && *scroll_delta != 0)
+            }
+            SessionCommand::ViewReturned | SessionCommand::Resize { .. } => !manual,
+            _ => false,
+        };
+        if wake {
+            self.idle_preview.on_activity(now)
+        } else {
+            None
+        }
     }
 
     async fn write_display_action<SW: ironrdp_tokio::FramedWrite>(
@@ -1288,19 +1327,43 @@ impl SessionActor {
                         None => self.cmd_rx.recv().await,
                     }
                 } => {
-                    if matches!(cmd, Some(SessionCommand::ResumeDisplay | SessionCommand::SendKey { .. }
-                        | SessionCommand::SendMouse { .. } | SessionCommand::ClipboardPaste { .. }
-                        | SessionCommand::Resize { .. })) {
-                        let before = self.idle_preview.state();
-                        if let Some(action) = self.idle_preview.on_activity(tokio::time::Instant::now())
+                    // A request can expire while queued for the replacement share.
+                    // Check the waiter and paste readiness before touching the display or input.
+                    let cmd = match cmd {
+                        Some(SessionCommand::SetDisplayPaused { reply, .. } | SessionCommand::ClipboardPaste { reply, .. })
+                            if reply.is_closed() => continue,
+                        Some(SessionCommand::ClipboardPaste { epoch, reply })
+                            if epoch != self.clipboard_epoch || !self.config.host_profile.clipboard_direction.sends() => {
+                            let _ = reply.send(Err("Clipboard session or policy changed.".into()));
+                            continue;
+                        }
+                        Some(SessionCommand::ClipboardPaste { reply, .. })
+                            if !active_stage.get_svc_processor::<ironrdp_cliprdr::CliprdrClient>().is_some_and(|channel| channel.is_ready()) => {
+                            let _ = reply.send(Err("Clipboard channel is not ready. Retry shortly or reconnect.".into()));
+                            continue;
+                        }
+                        cmd => cmd,
+                    };
+                    if let Some(cmd) = &cmd {
+                        let before = (self.idle_preview.state(), self.idle_preview.is_manually_paused());
+                        if let Some(action) = self.display_action_for_command(cmd)
                             && let Err(reason) = self.write_display_action(action, &mut active_stage, (image.width(), image.height()), &mut writer).await
                         {
                             return reason;
                         }
-                        if before != self.idle_preview.state() { self.publish_info(); }
+                        if before != (self.idle_preview.state(), self.idle_preview.is_manually_paused()) {
+                            self.publish_info();
+                        }
                     }
                     match cmd {
-                        Some(SessionCommand::ResumeDisplay) => {}
+                        Some(SessionCommand::SetDisplayPaused { paused, reply }) => {
+                            let result = match (paused, self.idle_preview.pause_unavailable_reason()) {
+                                (true, Some(reason)) => Err(reason.to_owned()),
+                                _ => Ok(()),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ViewReturned) => {}
                         Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
                             let was_stalled = self.delivery.stalled;
                             if self.delivery.acknowledge(&receipt, refresh) {
@@ -1384,8 +1447,7 @@ impl SessionActor {
                             log::info!("Session {} resize request to {}x{}", self.id, width, height);
                             self.pending_resize = Some((width, height));
                         }
-                        Some(SessionCommand::ClipboardPaste { epoch, reply }) => {
-                            if epoch != self.clipboard_epoch || !self.config.host_profile.clipboard_direction.sends() { let _ = reply.send(Err("Clipboard session or policy changed.".into())); continue; }
+                        Some(SessionCommand::ClipboardPaste { reply, .. }) => {
                             let keys: Vec<_> = clipboard_paste_sequence(&held_modifiers).into_iter().filter_map(|(code, down)| encode_keyboard_fastpath_event(code, down)).collect();
                             match active_stage.process_fastpath_input(&mut image, &keys) {
                                 Ok(outputs) => {
@@ -1787,10 +1849,13 @@ impl SessionActor {
                             let (width, height) = normalize_remote_resolution(width, height);
                             self.pending_resize = Some((width, height));
                         }
+                        Some(SessionCommand::SetDisplayPaused { reply, .. }) => {
+                            let _ = reply.send(Err("Session is not connected".into()));
+                        }
                         Some(SessionCommand::ClipboardContext { .. }) => {}
-                Some(SessionCommand::ClipboardPaste { reply, .. }) => { let _ = reply.send(Err("Session is not connected".into())); }
-                Some(SessionCommand::ClipboardSync { reply, .. }) => { let _ = reply.send(Err("Clipboard requires a connected real session.".into())); }
-                Some(SessionCommand::ClipboardWrite { text }) => {
+                        Some(SessionCommand::ClipboardPaste { reply, .. }) => { let _ = reply.send(Err("Session is not connected".into())); }
+                        Some(SessionCommand::ClipboardSync { reply, .. }) => { let _ = reply.send(Err("Clipboard requires a connected real session.".into())); }
+                        Some(SessionCommand::ClipboardWrite { text }) => {
                             self.local_clipboard_text = Some(text);
                         }
                         _ => {} // Ignore key/mouse during reconnect
@@ -1859,7 +1924,15 @@ impl SessionActor {
                         return DisconnectReason::ConnectionLost;
                     }
                 }
-                Some(SessionCommand::ResumeDisplay) => {}
+                Some(SessionCommand::ViewReturned) => {}
+                Some(SessionCommand::SetDisplayPaused { paused, reply }) => {
+                    let result = if paused {
+                        Err("Host does not support display pause.".into())
+                    } else {
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
+                }
                 Some(SessionCommand::SendKey { key_code, is_down }) => {
                     log::debug!(
                         "Session {} key event: code={}, down={}",
@@ -2547,6 +2620,28 @@ impl SessionManager {
                 state.deleted_connections.remove(id);
             }
         }
+    }
+
+    pub async fn set_display_paused(&self, session_id: &str, paused: bool) -> Result<(), String> {
+        let request = async {
+            let sender = {
+                let state = self.state.lock().await;
+                let handle = state.handles.get(session_id).ok_or("Session not found")?;
+                if handle.info_rx.borrow().status != SessionState::Connected {
+                    return Err("Session is not connected".into());
+                }
+                handle.cmd_tx.clone()
+            };
+            let (reply, confirmation) = tokio::sync::oneshot::channel();
+            sender
+                .send(SessionCommand::SetDisplayPaused { paused, reply })
+                .await
+                .map_err(|_| "Session stopped")?;
+            confirmation.await.map_err(|_| "Session stopped")?
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), request)
+            .await
+            .map_err(|_| "Display command timed out. Check the display status and retry.")?
     }
 
     /// Get a clone of the command sender for a session.
@@ -5234,27 +5329,12 @@ mod tests {
         }
 
         fn expected_first_key_pair() -> Vec<u8> {
-            use ironrdp_graphics::image_processing::PixelFormat;
-            use ironrdp_session::{ActiveStageOutput, image::DecodedImage};
-            let mut stage = crate::rdp::client::active_stage_from_connection_result(
-                crate::rdp::baseline::synthetic_connection_result(64, 64),
-            );
-            let mut image = DecodedImage::new(PixelFormat::RgbA32, 64, 64);
-            let mut wire = Vec::new();
-            for down in [true, false] {
-                for out in stage
-                    .process_fastpath_input(
-                        &mut image,
-                        &[encode_keyboard_fastpath_event(0x1e, down).unwrap()],
-                    )
-                    .unwrap()
-                {
-                    if let ActiveStageOutput::ResponseFrame(frame) = out {
-                        wire.extend_from_slice(&frame);
-                    }
-                }
-            }
-            wire
+            [true, false]
+                .into_iter()
+                .flat_map(|down| {
+                    input_frame(&[encode_keyboard_fastpath_event(0x1e, down).unwrap()])
+                })
+                .collect()
         }
 
         async fn send_first_key_pair(sender: &mpsc::Sender<SessionCommand>) {
@@ -5269,19 +5349,18 @@ mod tests {
             }
         }
 
-        async fn suppressed_session() -> (SessionManager, String, tokio::io::DuplexStream) {
-            use crate::rdp::baseline::synthetic_connection_result;
-            use ironrdp_pdu::geometry::InclusiveRectangle;
-            use tokio::io::AsyncWriteExt;
-            use tokio::time::{Duration, advance};
-
-            let manager = SessionManager::new();
-            let (client, mut peer) = tokio::io::duplex(64 * 1024);
-            let client = std::sync::Mutex::new(Some(client));
+        async fn start_preview_session(
+            manager: &SessionManager,
+            tag: &str,
+            automatic: bool,
+            reconnect: bool,
+        ) -> (String, mpsc::UnboundedReceiver<tokio::io::DuplexStream>) {
+            let (peers, receiver) = mpsc::unbounded_channel();
             let connect: ConnectFn = Arc::new(move |_, _, _, _| {
-                let client = client.lock().unwrap().take().unwrap();
+                let (client, peer) = tokio::io::duplex(64 * 1024);
+                peers.send(peer).unwrap();
                 Box::pin(async move {
-                    let mut result = synthetic_connection_result(64, 64);
+                    let mut result = crate::rdp::baseline::synthetic_connection_result(64, 64);
                     result.suppress_output_support = true;
                     ConnectionOutcome::RealSessionLocal {
                         connection_result: Box::new(result),
@@ -5290,22 +5369,33 @@ mod tests {
                     }
                 })
             });
-            let mut config = test_config("idle-wake");
-            config.host_profile.idle_preview = true;
+            let mut config = test_config(tag);
+            config.host_profile.idle_preview = automatic;
             let (events, _) = RecordedEvents::new();
             let id = manager
                 .create_session_with_transport(
                     config,
                     None,
-                    scripted_frame_channel(&manager, FrameScript::Ok, Default::default()),
+                    scripted_frame_channel(manager, FrameScript::Ok, Default::default()),
                     SessionEventSink::recorded(events),
-                    false,
+                    reconnect,
                     None,
                     connect,
                 )
                 .await
                 .unwrap();
             settle_actor().await;
+            (id, receiver)
+        }
+
+        async fn suppressed_session() -> (SessionManager, String, tokio::io::DuplexStream) {
+            use ironrdp_pdu::geometry::InclusiveRectangle;
+            use tokio::io::AsyncWriteExt;
+            use tokio::time::{Duration, advance};
+
+            let manager = SessionManager::new();
+            let (id, mut peers) = start_preview_session(&manager, "idle-wake", true, false).await;
+            let mut peer = peers.recv().await.unwrap();
             let tile = InclusiveRectangle {
                 left: 0,
                 top: 0,
@@ -5330,6 +5420,383 @@ mod tests {
                 IdlePreviewState::Suppressed
             );
             (manager, id, peer)
+        }
+
+        fn display_frame(action: DisplayAction) -> Vec<u8> {
+            let stage = crate::rdp::client::active_stage_from_connection_result(
+                crate::rdp::baseline::synthetic_connection_result(64, 64),
+            );
+            encode_action(&stage, action, 64, 64).unwrap()
+        }
+
+        fn input_frame(events: &[FastPathInputEvent]) -> Vec<u8> {
+            use ironrdp_graphics::image_processing::PixelFormat;
+            use ironrdp_session::{ActiveStageOutput, image::DecodedImage};
+            let mut stage = crate::rdp::client::active_stage_from_connection_result(
+                crate::rdp::baseline::synthetic_connection_result(64, 64),
+            );
+            let mut image = DecodedImage::new(PixelFormat::RgbA32, 64, 64);
+            stage
+                .process_fastpath_input(&mut image, events)
+                .unwrap()
+                .into_iter()
+                .filter_map(|out| match out {
+                    ActiveStageOutput::ResponseFrame(frame) => Some(frame),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        }
+
+        async fn assert_wire(peer: &mut tokio::io::DuplexStream, expected: &[u8]) {
+            use tokio::io::AsyncReadExt;
+            use tokio::time::{Duration, timeout};
+            let mut actual = vec![0; expected.len()];
+            timeout(Duration::from_millis(100), peer.read_exact(&mut actual))
+                .await
+                .expect("actor did not emit the expected wire events")
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert!(
+                timeout(Duration::ZERO, peer.read_u8()).await.is_err(),
+                "unexpected extra wire event"
+            );
+        }
+
+        fn mouse_input(event_type: &str) -> (SessionCommand, FastPathInputEvent) {
+            (
+                SessionCommand::SendMouse {
+                    x: 10,
+                    y: 11,
+                    button: Some("1".into()),
+                    event_type: event_type.into(),
+                    scroll_delta: -120,
+                },
+                encode_mouse_fastpath_event(10, 11, Some("1"), event_type, -120),
+            )
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn manual_pause_keeps_incidental_input_on_one_session_and_rejects_stale_requests() {
+            let manager = SessionManager::new();
+            let (id, mut peers) = start_preview_session(&manager, "paused", false, false).await;
+            let mut peer = peers.recv().await.unwrap();
+            let (other, mut others) = start_preview_session(&manager, "live", true, false).await;
+            let mut other_peer = others.recv().await.unwrap();
+            let sender = manager.get_cmd_sender(&id).await.unwrap();
+            let key = |is_down| SessionCommand::SendKey {
+                key_code: 0x1d,
+                is_down,
+            };
+            sender.send(key(true)).await.unwrap();
+            manager.set_display_paused(&id, true).await.unwrap();
+            manager.set_display_paused(&id, true).await.unwrap();
+            let epoch = {
+                let (reply, wait) = tokio::sync::oneshot::channel();
+                sender
+                    .send(SessionCommand::ClipboardContext { reply })
+                    .await
+                    .unwrap();
+                wait.await.unwrap().epoch
+            };
+            sender.send(SessionCommand::ViewReturned).await.unwrap();
+            sender
+                .send(SessionCommand::Resize {
+                    width: 640,
+                    height: 480,
+                })
+                .await
+                .unwrap();
+            sender.send(key(false)).await.unwrap();
+            let (motion, event) = mouse_input("move");
+            sender.send(motion).await.unwrap();
+            for epoch in ["stale".to_owned(), epoch] {
+                let (reply, wait) = tokio::sync::oneshot::channel();
+                sender
+                    .send(SessionCommand::ClipboardPaste { epoch, reply })
+                    .await
+                    .unwrap();
+                assert!(
+                    wait.await.unwrap().is_err(),
+                    "a stale epoch or absent channel cannot paste"
+                );
+            }
+            assert_eq!(
+                manager
+                    .get_session_info(&id)
+                    .await
+                    .unwrap()
+                    .idle_preview_state,
+                IdlePreviewState::Suppressed
+            );
+            assert_wire(
+                &mut peer,
+                &[
+                    input_frame(&[encode_keyboard_fastpath_event(0x1d, true).unwrap()]),
+                    display_frame(DisplayAction::Suppress),
+                    input_frame(&[encode_keyboard_fastpath_event(0x1d, false).unwrap()]),
+                    input_frame(&[event]),
+                ]
+                .concat(),
+            )
+            .await;
+            send_first_key_pair(&manager.get_cmd_sender(&other).await.unwrap()).await;
+            settle_actor().await;
+            assert_wire(&mut other_peer, &expected_first_key_pair()).await;
+            assert_wire(&mut peer, &[]).await;
+            manager.remove_session(&id).await.unwrap();
+            assert!(manager.set_display_paused(&id, true).await.is_err());
+            assert!(manager.set_display_paused(&id, false).await.is_err());
+            manager.remove_session(&other).await.unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn manual_pause_wakes_once_before_deliberate_input_in_either_graphics_state() {
+            use tokio::time::{Duration, advance};
+            let manager = SessionManager::new();
+            let (id, mut peers) = start_preview_session(&manager, "deliberate", false, false).await;
+            let mut peer = peers.recv().await.unwrap();
+            let sender = manager.get_cmd_sender(&id).await.unwrap();
+            for preview in [false, true] {
+                for trigger in ["key", "down", "scroll", "resume"] {
+                    manager.set_display_paused(&id, true).await.unwrap();
+                    assert_wire(&mut peer, &display_frame(DisplayAction::Suppress)).await;
+                    if preview {
+                        advance(Duration::from_secs(60)).await;
+                        settle_actor().await;
+                        assert_wire(&mut peer, &display_frame(DisplayAction::Allow)).await;
+                    }
+                    let mut expected = if preview {
+                        vec![]
+                    } else {
+                        display_frame(DisplayAction::Allow)
+                    };
+                    match trigger {
+                        "key" => {
+                            send_first_key_pair(&sender).await;
+                            expected.extend(expected_first_key_pair());
+                        }
+                        "resume" => manager.set_display_paused(&id, false).await.unwrap(),
+                        _ => {
+                            let (cmd, event) = mouse_input(trigger);
+                            sender.send(cmd).await.unwrap();
+                            expected.extend(input_frame(&[event]));
+                        }
+                    }
+                    settle_actor().await;
+                    assert_eq!(
+                        manager
+                            .get_session_info(&id)
+                            .await
+                            .unwrap()
+                            .idle_preview_state,
+                        IdlePreviewState::Off
+                    );
+                    manager.set_display_paused(&id, false).await.unwrap();
+                    assert_wire(&mut peer, &expected).await;
+                }
+            }
+            manager.remove_session(&id).await.unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn manual_pause_clears_on_reconnect_and_restores_the_saved_preference() {
+            use tokio::time::{Duration, advance};
+            for automatic in [true, false] {
+                let manager = SessionManager::new();
+                let (id, mut peers) =
+                    start_preview_session(&manager, "reconnect", automatic, true).await;
+                let mut old = peers.recv().await.unwrap();
+                manager.set_display_paused(&id, true).await.unwrap();
+                assert_wire(&mut old, &display_frame(DisplayAction::Suppress)).await;
+                drop(old);
+                settle_actor().await;
+                assert!(manager.set_display_paused(&id, true).await.is_err());
+                advance(Duration::from_secs(2)).await;
+                let mut replacement = peers.recv().await.unwrap();
+                settle_actor().await;
+                assert_eq!(
+                    manager
+                        .get_session_info(&id)
+                        .await
+                        .unwrap()
+                        .idle_preview_state,
+                    if automatic {
+                        IdlePreviewState::Live
+                    } else {
+                        IdlePreviewState::Off
+                    }
+                );
+                advance(Duration::from_secs(60)).await;
+                assert_wire(&mut replacement, &[]).await;
+                manager.remove_session(&id).await.unwrap();
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn manual_pause_uses_one_deadline_for_queue_and_confirmation() {
+            use tokio::time::{Duration, Instant, sleep, timeout};
+            let manager = SessionManager::new();
+            let (id, mut peers) = start_preview_session(&manager, "full-queue", false, false).await;
+            let _peer = peers.recv().await.unwrap();
+            let (sender, mut commands) = mpsc::channel(1);
+            sender.send(SessionCommand::ViewReturned).await.unwrap();
+            let original = {
+                let mut state = manager.state.lock().await;
+                std::mem::replace(&mut state.handles.get_mut(&id).unwrap().cmd_tx, sender)
+            };
+            let started = Instant::now();
+            let request = async {
+                timeout(
+                    Duration::from_secs(4),
+                    manager.set_display_paused(&id, true),
+                )
+                .await
+                .expect("display control outlived its end-to-end deadline")
+            };
+            let receiver = async {
+                sleep(Duration::from_secs(2)).await;
+                assert!(matches!(
+                    commands.recv().await,
+                    Some(SessionCommand::ViewReturned)
+                ));
+                let Some(SessionCommand::SetDisplayPaused { reply, .. }) = commands.recv().await
+                else {
+                    panic!("pause did not enter the freed slot");
+                };
+                reply
+            };
+            let (result, reply) = tokio::join!(request, receiver);
+            assert!(result.unwrap_err().contains("timed out"));
+            assert!(reply.is_closed());
+            assert_eq!(started.elapsed(), Duration::from_secs(3));
+            manager
+                .state
+                .lock()
+                .await
+                .handles
+                .get_mut(&id)
+                .unwrap()
+                .cmd_tx = original;
+            manager.remove_session(&id).await.unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn manual_pause_expired_during_reactivation_is_skipped_and_can_be_retried() {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::time::{Duration, timeout};
+            let manager = SessionManager::new();
+            let (id, mut peers) =
+                start_preview_session(&manager, "pause-expiry", false, false).await;
+            let mut peer = peers.recv().await.unwrap();
+            let mut script = reactivation_script_frames();
+            script[1] = demand_active_with_suppression(96, 80, true);
+            peer.write_all(&script[0]).await.unwrap();
+            settle_actor().await;
+            let failed = timeout(
+                Duration::from_secs(4),
+                manager.set_display_paused(&id, true),
+            )
+            .await
+            .expect("stalled reactivation kept the display request pending");
+            assert!(failed.unwrap_err().contains("timed out"));
+            for frame in &script[1..] {
+                peer.write_all(frame).await.unwrap();
+            }
+            settle_actor().await;
+            let info = manager.get_session_info(&id).await.unwrap();
+            assert_eq!((info.width, info.height), (96, 80));
+            assert_eq!(info.idle_preview_state, IdlePreviewState::Off);
+            let mut share = crate::rdp::baseline::synthetic_connection_result(96, 80);
+            share.share_id = REACTIVATION_SHARE_ID;
+            let stage = crate::rdp::client::active_stage_from_connection_result(share);
+            let suppress = encode_action(&stage, DisplayAction::Suppress, 96, 80).unwrap();
+            let mut wire = vec![0; 64 * 1024];
+            let len = timeout(Duration::from_secs(1), peer.read(&mut wire))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !wire[..len]
+                    .windows(suppress.len())
+                    .any(|frame| frame == suppress)
+            );
+            manager.set_display_paused(&id, true).await.unwrap();
+            assert_wire(&mut peer, &suppress).await;
+            manager.remove_session(&id).await.unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn manual_pause_duplicate_resume_keeps_the_automatic_deadline_and_samples() {
+            use ironrdp_pdu::geometry::InclusiveRectangle;
+            use tokio::io::AsyncWriteExt;
+            use tokio::time::{Duration, advance};
+            let manager = SessionManager::new();
+            let (id, mut peers) =
+                start_preview_session(&manager, "duplicate-resume", true, false).await;
+            let mut peer = peers.recv().await.unwrap();
+            advance(Duration::from_secs(297)).await;
+            let tile = InclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 31,
+                bottom: 31,
+            };
+            for i in 0..2 {
+                for frame in bitmap_wire_frames(tile.clone(), &[i; 2048]) {
+                    peer.write_all(&frame).await.unwrap();
+                }
+                settle_actor().await;
+                advance(Duration::from_secs(1)).await;
+                settle_actor().await;
+            }
+            manager.set_display_paused(&id, false).await.unwrap();
+            advance(Duration::from_secs(1)).await;
+            settle_actor().await;
+            assert_eq!(
+                manager
+                    .get_session_info(&id)
+                    .await
+                    .unwrap()
+                    .idle_preview_state,
+                IdlePreviewState::Suppressed,
+                "duplicate Resume discarded real desktop activity or restarted idle timing"
+            );
+            assert_wire(&mut peer, &display_frame(DisplayAction::Suppress)).await;
+            manager.set_display_paused(&id, false).await.unwrap();
+            assert_wire(&mut peer, &display_frame(DisplayAction::Allow)).await;
+            manager.remove_session(&id).await.unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn view_return_resumes_an_automatically_suppressed_session() {
+            let (manager, id, mut peer) = suppressed_session().await;
+            manager
+                .get_cmd_sender(&id)
+                .await
+                .unwrap()
+                .send(SessionCommand::ViewReturned)
+                .await
+                .unwrap();
+            settle_actor().await;
+            assert_eq!(
+                manager
+                    .get_session_info(&id)
+                    .await
+                    .unwrap()
+                    .idle_preview_state,
+                IdlePreviewState::Live
+            );
+            assert_wire(
+                &mut peer,
+                &[
+                    display_frame(DisplayAction::Suppress),
+                    display_frame(DisplayAction::Allow),
+                ]
+                .concat(),
+            )
+            .await;
+            manager.remove_session(&id).await.unwrap();
         }
 
         #[tokio::test(start_paused = true)]
@@ -5849,6 +6316,9 @@ mod tests {
     /// in-memory framed seam (`ConnectionOutcome::RealSessionLocal`) — no
     /// network, no mocks of the decode path.
     mod real_session_egfx {
+        mod manual_pause_traffic {
+            include!("session/manual_pause_traffic.rs");
+        }
         use super::*;
         use crate::rdp::client::ConnectionOutcome;
         use ironrdp_core::{WriteBuf, encode_buf};

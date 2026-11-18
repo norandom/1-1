@@ -98,7 +98,7 @@ function SessionContent() {
       // re-arm this listener or turn idle previews into synthetic activity.
       const state = useSessionStore.getState().sessions.get(sessionId)?.idlePreviewState;
       if (state === 'live' || state === 'suppressed' || state === 'preview') {
-        void tauri.resumeDisplay(sessionId).catch((error) => console.warn('Resume display failed', error));
+        void tauri.sessionViewReturned(sessionId).catch((error) => console.warn('Session view return failed', error));
       }
     });
   }, [sessionId, status]);
