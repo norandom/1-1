@@ -238,7 +238,7 @@ async fn same_socket_saved_credential_stops_before_desktop() {
             listener
         });
         assert_eq!(
-            probe_saved_host(&host, PASSWORD, Some(&pin)).await,
+            collect_evidence(&host, PASSWORD, Some(&pin)).await,
             Ok(expected)
         );
         assert_one_connection(responder.await.unwrap());
@@ -262,8 +262,8 @@ async fn unknown_or_changed_identity_receives_no_authentication() {
             listener
         });
         assert_eq!(
-            probe_saved_host(&host, PASSWORD, changed.then_some(&wrong)).await,
-            Err(ProbeError::UntrustedPeer)
+            collect_evidence(&host, PASSWORD, changed.then_some(&wrong)).await,
+            Err(ProbeReason::UntrustedPeer)
         );
         assert_one_connection(responder.await.unwrap());
     }
@@ -278,8 +278,8 @@ async fn tls_only_selection_ends_without_upgrade_or_retry() {
         listener
     });
     assert_eq!(
-        probe_saved_host(&host, PASSWORD, Some(&pin)).await,
-        Err(ProbeError::Negotiation)
+        collect_evidence(&host, PASSWORD, Some(&pin)).await,
+        Err(ProbeReason::Negotiation)
     );
     assert_one_connection(responder.await.unwrap());
 }
@@ -294,7 +294,7 @@ async fn unsupported_frame_size_is_rejected_from_its_header() {
         .unwrap();
     assert_eq!(
         read_ts_request(&mut header.as_slice()).await,
-        Err(ProbeError::MalformedResponse)
+        Err(ProbeReason::MalformedResponse)
     );
 }
 
@@ -313,11 +313,11 @@ async fn unexpected_response_closes_while_the_peer_is_still_open() {
     });
     let result = tokio::time::timeout(
         Duration::from_secs(3),
-        probe_saved_host(&host, PASSWORD, Some(&pin)),
+        collect_evidence(&host, PASSWORD, Some(&pin)),
     )
     .await
     .expect("invalid framing must finish without waiting for EOF");
-    assert_eq!(result, Err(ProbeError::MalformedResponse));
+    assert_eq!(result, Err(ProbeReason::MalformedResponse));
     let listener = tokio::time::timeout(Duration::from_secs(3), responder)
         .await
         .expect("the peer must observe the probe closing its socket")
@@ -336,7 +336,7 @@ async fn cancelling_pending_authentication_drops_the_only_socket() {
         assert_closed(&mut stream).await;
         listener
     });
-    let probe = tokio::spawn(async move { probe_saved_host(&host, PASSWORD, Some(&pin)).await });
+    let probe = tokio::spawn(async move { collect_evidence(&host, PASSWORD, Some(&pin)).await });
     tokio::time::timeout(Duration::from_secs(5), ready)
         .await
         .unwrap()
@@ -344,4 +344,157 @@ async fn cancelling_pending_authentication_drops_the_only_socket() {
     probe.abort();
     assert!(probe.await.unwrap_err().is_cancelled());
     assert_one_connection(responder.await.unwrap());
+}
+
+#[test]
+fn result_requires_attributable_server_evidence() {
+    use CredentialOutcome::{Accepted, Rejected, UnableToVerify};
+
+    assert_eq!(classify(Ok(Evidence::EarlyAuthorizationGranted)), Accepted);
+    assert_eq!(
+        classify(Ok(Evidence::EarlyAuthorizationDenied)),
+        UnableToVerify(ProbeReason::AuthorizationDenied)
+    );
+    assert_eq!(
+        classify(Ok(Evidence::NoServerConfirmation)),
+        UnableToVerify(ProbeReason::NoServerConfirmation)
+    );
+    for code in [NStatusCode::LOGON_FAILURE, NStatusCode::WRONG_PASSWORD] {
+        for (credential_proof_sent, expected) in [
+            (true, Rejected),
+            (false, UnableToVerify(ProbeReason::NoServerConfirmation)),
+        ] {
+            assert_eq!(
+                classify(Ok(Evidence::ServerStatus {
+                    code,
+                    credential_proof_sent
+                })),
+                expected
+            );
+        }
+    }
+    for (code, reason) in [
+        (NStatusCode::ACCOUNT_RESTRICTION, ProbeReason::ServerStatus),
+        (
+            NStatusCode::SMARTCARD_LOGON_REQUIRED,
+            ProbeReason::InteractiveSignInRequired,
+        ),
+        (NStatusCode(0xc0000022), ProbeReason::ServerStatus), // STATUS_ACCESS_DENIED
+        (NStatusCode(0xffffffff), ProbeReason::ServerStatus),
+    ] {
+        assert_eq!(
+            classify(Ok(Evidence::ServerStatus {
+                code,
+                credential_proof_sent: true
+            })),
+            UnableToVerify(reason)
+        );
+    }
+    for reason in [
+        ProbeReason::UntrustedPeer,
+        ProbeReason::MalformedResponse,
+        ProbeReason::TransportClosed,
+        ProbeReason::Authentication,
+        ProbeReason::UnsupportedAuthentication,
+        ProbeReason::Negotiation,
+        ProbeReason::MissingIdentity,
+        ProbeReason::MissingCredential,
+        ProbeReason::Unreachable,
+    ] {
+        assert_eq!(classify(Err(reason)), UnableToVerify(reason));
+    }
+}
+#[tokio::test]
+async fn credential_results_are_safe_for_verbose_diagnostics_and_saved_documents() {
+    use crate::store::library::migrate_v1;
+    use std::sync::Mutex;
+    use tauri_plugin_log::fern::{Dispatch, Output};
+
+    // Installing a process logger would otherwise affect unrelated Rust tests.
+    const CHILD: &str = "DRIFT_TEST_CREDENTIAL_DIAGNOSTICS_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let name = "rdp::credential_probe::tests::credential_results_are_safe_for_verbose_diagnostics_and_saved_documents";
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+        return;
+    }
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let captured = lines.clone();
+    Dispatch::new()
+        .level(log::LevelFilter::Trace)
+        .filter(allow_diagnostic)
+        .chain(Output::call(move |record| {
+            captured
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", record.target(), record.args()));
+        }))
+        .apply()
+        .unwrap();
+    log::trace!(target: "probe_test", "verbose control");
+    const TOKEN: &str = "fixture-only-token";
+    log::debug!(target: "ironrdp_connector::credssp", "{TOKEN}");
+    log::trace!(target: "sspi::ntlm::messages", "{:?}", TOKEN.as_bytes());
+
+    for (reply, expected) in [
+        (
+            Reply::Authorization(EarlyUserAuthResult::Success),
+            serde_json::json!({"outcome": "accepted"}),
+        ),
+        (
+            Reply::Status { after_proof: true },
+            serde_json::json!({"outcome": "rejected"}),
+        ),
+        (
+            Reply::NoConfirmation,
+            serde_json::json!({"outcome": "unableToVerify", "reason": "noServerConfirmation"}),
+        ),
+    ] {
+        let (listener, host, pin) = fixture().await;
+        let document = migrate_v1(vec![host]);
+        let before = serde_json::to_string(&document).unwrap();
+        let server = tokio::spawn(async move { authentication_server(&listener, reply).await });
+        let result = probe_saved_host(&document.connections[0], PASSWORD, Some(&pin)).await;
+        server.await.unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap(), expected);
+        let output = serde_json::to_string(&document).unwrap();
+        assert_eq!(output, before);
+        assert!(
+            !output.contains(PASSWORD) && !output.contains(TOKEN) && !output.contains("outcome")
+        );
+    }
+    let diagnostics = lines.lock().unwrap().join("\n");
+    assert!(diagnostics.contains("probe_test verbose control"));
+    assert!(diagnostics.contains("ironrdp_connector::connection"));
+    assert!(!diagnostics.contains(PASSWORD));
+    let utf16: Vec<_> = PASSWORD.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    assert!(!diagnostics.contains(&format!("{utf16:?}")));
+    assert!(!diagnostics.contains(&format!("{utf16:02x?}")));
+    assert!(!diagnostics.contains(TOKEN));
+    assert!(!diagnostics.contains(&format!("{:?}", TOKEN.as_bytes())));
+    assert!(!diagnostics.contains("TsRequest {"));
+    assert!(!diagnostics.contains("NTLMSSP"));
+}
+
+#[tokio::test]
+async fn failed_tls_negotiation_does_not_offer_identity_review() {
+    let (listener, host, pin) = fixture().await;
+    let server = tokio::spawn(async move {
+        let socket = negotiate(&listener, SecurityProtocol::HYBRID_EX).await;
+        drop(socket);
+    });
+    assert_eq!(
+        probe_saved_host(&host, PASSWORD, Some(&pin)).await,
+        CredentialOutcome::UnableToVerify(ProbeReason::Negotiation)
+    );
+    server.await.unwrap();
 }

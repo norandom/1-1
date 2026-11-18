@@ -33,9 +33,7 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
-                // CredSSP and its security provider can trace whole authentication tokens.
-                .level_for("ironrdp_connector::credssp", log::LevelFilter::Off)
-                .level_for("sspi", log::LevelFilter::Off)
+                .filter(rdp::credential_probe::allow_diagnostic)
                 .level_for("wgpu_core", log::LevelFilter::Warn)
                 .level_for("wgpu_hal", log::LevelFilter::Warn)
                 .level_for("naga", log::LevelFilter::Warn)

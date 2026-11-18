@@ -40,7 +40,7 @@ The independent Kiro task-plan review passed on 18 November 2026. The review cov
   - _Boundary: Credential probe driver_
   - _Depends: rdp-folder-sharing task 1_
   - _Requirements: 1.1, 1.5, 1.7, 1.9_
-- [ ] 2.2 Classify the server's credential evidence and redact diagnostics
+- [x] 2.2 Classify the server's credential evidence and redact diagnostics
   - Classify a valid HYBRID_EX early success as accepted. Only a decoded server TSRequest with an allowlisted credential-specific failure counts as rejected. Generic AccessDenied, plain HYBRID client completion, interactive-only sign-in, malformed replies and transport loss remain inconclusive.
   - Allowlist returned reasons and suppress sensitive protocol traces in verbose mode. Use fragmented server messages and a sentinel credential to verify the outcome and prove UI payloads, diagnostics and exported connection data omit secrets and token dumps.
   - _Boundary: Credential probe driver_
