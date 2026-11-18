@@ -8,6 +8,7 @@
 
 use tauri::State;
 
+use crate::commands::credential_check::CredentialChecks;
 use crate::commands::deletion::{DeletionReport, delete_connection_coordinated};
 use crate::rdp::session::SessionManager;
 use crate::store::connections::{ConnectionConfig, ConnectionInput};
@@ -58,7 +59,10 @@ pub async fn create_connection(
     config: ConnectionInput,
     store: State<'_, LibraryStore>,
     cred_store: State<'_, CredentialStore>,
+    checks: State<'_, CredentialChecks>,
 ) -> Result<ConnectionConfig, String> {
+    // The store assigns the new ID. Publish its initial credential with it.
+    let _publish = checks.library_gate.write().await;
     let password = config.password.clone();
     let conn = store.create_connection(config).map_err(to_message)?;
 
@@ -76,20 +80,35 @@ pub async fn update_connection(
     config: ConnectionInput,
     store: State<'_, LibraryStore>,
     cred_store: State<'_, CredentialStore>,
+    checks: State<'_, CredentialChecks>,
 ) -> Result<ConnectionConfig, String> {
-    let password = config.password.clone();
-    let updated = store
-        .update_connection(&id, config)
-        .map_err(to_message)?
-        .ok_or_else(|| format!("Connection '{}' not found", id))?;
+    update_saved_connection(&id, config, &store, &cred_store, &checks).await
+}
 
-    // Regression for baseline defect B3-2: a submitted password used to be
-    // silently dropped; it now reaches the keyring AFTER the store
-    // transaction committed (mirroring create; unchanged passwords arrive
-    // as absent/empty and leave the entry alone).
-    store_password_if_provided(&cred_store, &id, password.as_deref())?;
+pub(super) async fn update_saved_connection(
+    id: &str,
+    config: ConnectionInput,
+    store: &LibraryStore,
+    cred_store: &CredentialStore,
+    checks: &CredentialChecks,
+) -> Result<ConnectionConfig, String> {
+    checks
+        .edit(id, async {
+            let password = config.password.clone();
+            let updated = store
+                .update_connection(id, config)
+                .map_err(to_message)?
+                .ok_or_else(|| format!("Connection '{}' not found", id))?;
 
-    Ok(updated)
+            // Regression for baseline defect B3-2: a submitted password used to be
+            // silently dropped; it now reaches the keyring AFTER the store
+            // transaction committed (mirroring create; unchanged passwords arrive
+            // as absent/empty and leave the entry alone).
+            store_password_if_provided(cred_store, id, password.as_deref())?;
+
+            Ok(updated)
+        })
+        .await
 }
 
 /// Req 1.5/6.2/10.17/10.18 (task 7.3): delete a connection through the
@@ -106,8 +125,14 @@ pub async fn delete_connection(
     store: State<'_, LibraryStore>,
     cred_store: State<'_, CredentialStore>,
     session_mgr: State<'_, SessionManager>,
+    checks: State<'_, CredentialChecks>,
 ) -> Result<DeletionReport, String> {
-    let report = delete_connection_coordinated(&id, &store, &cred_store, &session_mgr).await?;
+    let report = checks
+        .edit(
+            &id,
+            delete_connection_coordinated(&id, &store, &cred_store, &session_mgr),
+        )
+        .await?;
     log::info!(
         "Deleted connection {}: {} connection(s), {} session(s) stopped, {} orphaned \
          credential(s)",

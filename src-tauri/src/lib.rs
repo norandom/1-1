@@ -28,6 +28,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(commands::updater::UpdateState::default())
+        .manage(commands::credential_check::CredentialChecks::default())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(commands::native_clipboard::NativeClipboardState::default())
         .plugin(
@@ -179,6 +180,7 @@ pub fn run() {
             commands::connection::delete_connection,
             commands::connection::duplicate_connection,
             commands::peer_identity::review_server_identity,
+            commands::credential_check::test_saved_credentials,
             commands::peer_identity::confirm_server_identity,
             commands::peer_identity::cancel_server_identity,
             commands::connection::import_rdp_file,

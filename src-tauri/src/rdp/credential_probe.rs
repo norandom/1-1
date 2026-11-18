@@ -30,6 +30,11 @@ enum Evidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum ProbeReason {
+    Timeout,
+    UnknownHost,
+    HostChanged,
+    StoreUnavailable,
+    KeyringUnavailable,
     Unreachable,
     Negotiation,
     UntrustedPeer,
@@ -90,7 +95,6 @@ pub(crate) fn allow_diagnostic(metadata: &log::Metadata<'_>) -> bool {
 
 /// The command supplies one saved revision and its resolved keyring value.
 /// Cancellation drops this future and its socket, including during a read.
-#[allow(dead_code, reason = "called by the subsequent saved-host command task")]
 pub(crate) async fn probe_saved_host(
     host: &ConnectionConfig,
     password: &str,
