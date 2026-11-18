@@ -5,14 +5,16 @@ use super::*;
 
 #[test]
 fn suggested_names_are_portable() {
+    // Folder names under a parent built with the host's own separator, so
+    // the case also runs in the Linux CI build.
     for (folder, expected) in [
-        (r"D:\work", "work"),
-        (r"D:\My Projects", "MyProje"),
-        (r"D:\ünï", "n"),
-        (r"D:\ÄÖÜ", "share"),
-        (r"D:\build-1_x", "build-1"),
+        ("work", "work"),
+        ("My Projects", "MyProje"),
+        ("ünï", "n"),
+        ("ÄÖÜ", "share"),
+        ("build-1_x", "build-1"),
     ] {
-        let name = suggested_share_name(std::path::Path::new(folder));
+        let name = suggested_share_name(&std::path::Path::new("parent").join(folder));
         assert_eq!(name, expected, "{folder}");
         assert!(is_portable_share_name(&name));
     }
