@@ -984,9 +984,13 @@ impl SessionActor {
                 scroll_delta,
                 ..
             } => {
+                // Pointer motion never ends a manual pause. A click or scroll
+                // does once the grace after Pause has passed; the input itself
+                // is forwarded either way.
                 !manual
-                    || matches!(event_type.as_str(), "down" | "up")
-                    || (event_type == "scroll" && *scroll_delta != 0)
+                    || (self.idle_preview.mouse_wake_allowed(now)
+                        && (matches!(event_type.as_str(), "down" | "up")
+                            || (event_type == "scroll" && *scroll_delta != 0)))
             }
             SessionCommand::ViewReturned | SessionCommand::Resize { .. } => !manual,
             _ => false,
@@ -5647,6 +5651,18 @@ mod tests {
                         }
                         "resume" => manager.set_display_paused(&id, false).await.unwrap(),
                         _ => {
+                            if !preview {
+                                // Just after Pause, a click or scroll reaches the
+                                // host but leaves the display paused.
+                                let (early, early_event) = mouse_input(trigger);
+                                sender.send(early).await.unwrap();
+                                settle_actor().await;
+                                assert_wire(&mut peer, &input_frame(&[early_event])).await;
+                                let info = manager.get_session_info(&id).await.unwrap();
+                                assert!(info.display_paused, "{trigger} woke within the grace");
+                                advance(crate::rdp::idle_preview::MANUAL_MOUSE_GRACE).await;
+                                settle_actor().await;
+                            }
                             let (cmd, event) = mouse_input(trigger);
                             sender.send(cmd).await.unwrap();
                             expected.extend(input_frame(&[event]));

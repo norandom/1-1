@@ -13,6 +13,9 @@ const SUPPRESSION_GRACE: Duration = Duration::from_secs(2);
 // the grace period plus three consecutive two-second intervals with paints.
 const OBSERVATION_INTERVAL: Duration = Duration::from_secs(2);
 const REFUSAL_INTERVALS: u8 = 3;
+/// After Pause, a click or scroll does not wake the display for this long: the
+/// operator is usually returning the pointer from the control they just used.
+pub const MANUAL_MOUSE_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +75,7 @@ impl SuppressedPaints {
 }
 
 struct ManualPause {
+    since: Instant,
     next_preview: Instant,
     redraw_pending: bool,
 }
@@ -103,6 +107,7 @@ impl IdlePreview {
             Some(self.suppress_until(now, now + PREVIEW_PERIOD))
         };
         self.manual = Some(ManualPause {
+            since: now,
             next_preview: self.next_transition,
             redraw_pending: false,
         });
@@ -111,6 +116,13 @@ impl IdlePreview {
 
     pub fn is_manually_paused(&self) -> bool {
         self.manual.is_some()
+    }
+
+    /// Whether a deliberate mouse event may end a manual pause yet.
+    pub fn mouse_wake_allowed(&self, now: Instant) -> bool {
+        self.manual
+            .as_ref()
+            .is_none_or(|manual| now >= manual.since + MANUAL_MOUSE_GRACE)
     }
 
     pub fn pause_unavailable_reason(&self) -> Option<&'static str> {
@@ -388,6 +400,19 @@ mod tests {
         assert_eq!(p.on_timer(start + IDLE_DELAY), Some(Suppress));
         assert_eq!(p.state(), Suppressed);
         p
+    }
+
+    #[test]
+    fn mouse_cannot_end_a_manual_pause_during_its_grace() {
+        let start = Instant::now();
+        let mut p = IdlePreview::new(false, true, start);
+        assert!(p.mouse_wake_allowed(start), "no pause, nothing to protect");
+        assert_eq!(p.pause(start), Some(Suppress));
+        assert!(!p.mouse_wake_allowed(start + Duration::from_millis(4999)));
+        assert!(p.mouse_wake_allowed(start + MANUAL_MOUSE_GRACE));
+        // A repeated Pause does not restart the grace of the existing pause.
+        assert_eq!(p.pause(start + Duration::from_secs(3)), None);
+        assert!(p.mouse_wake_allowed(start + MANUAL_MOUSE_GRACE));
     }
 
     #[test]

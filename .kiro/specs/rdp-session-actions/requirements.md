@@ -31,7 +31,7 @@ Operators need an immediate pause for unattended output and a predictable return
 2. While manually paused, 1-1 shall retain the last received desktop image and request a bounded preview window from the server approximately once every 60 seconds. The pause shall persist on quiet screens until resumed or disconnected.
 3. While manually paused, 1-1 shall continue processing session traffic, including clipboard transfers and clipboard Resync, on the same connection.
 4. While manually paused, 1-1 shall show **Resume live** and an accessible status with the last desktop update’s age when known, within the existing status bar.
-5. When the user chooses **Resume live** or sends a remote keystroke, click, scroll, or paste, 1-1 shall request live updates immediately and forward any triggering remote input once, in order.
+5. When the user chooses **Resume live** or sends a remote keystroke, click, scroll, or paste, 1-1 shall request live updates immediately and forward any triggering remote input once, in order. For five seconds after the user chooses Pause, a click or scroll is forwarded without ending the pause (user decision 2026-11-18).
 6. While manually paused, 1-1 shall keep the pause across pointer movement alone, tab or window focus changes, and status-bar reveal or hide. If a resize requires a redraw, 1-1 shall honor the new desktop size and continue minute previews after the redraw.
 7. If the host cannot pause graphics or withdraws that capability, 1-1 shall show that manual pause is unavailable and keep the display live.
 8. When a paused session disconnects, 1-1 shall clear its manual override. On reconnect, the saved automatic preference shall apply as for a new session.
