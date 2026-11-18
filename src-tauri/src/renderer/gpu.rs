@@ -65,6 +65,12 @@ impl GpuRenderer {
             )
             .await
             .map_err(|e| format!("Failed to create GPU device: {}", e))?;
+        // wgpu's default handler panics, and Surface::configure reports its
+        // errors here from the main thread's resize handler. A rejected
+        // configuration must not end the app; the next resize or frame retries.
+        device.on_uncaptured_error(Box::new(|error| {
+            log::error!("[GPU] {error}");
+        }));
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
@@ -199,9 +205,14 @@ impl GpuRenderer {
 
     pub fn resize(&self, width: u32, height: u32) {
         if width > 0 && height > 0 {
+            // Waits for an in-flight frame: configuring while the render
+            // thread holds an acquired texture fails and leaves the surface
+            // unconfigured, which panics the next acquire. An oversized
+            // configuration would fail the same way.
+            let max = self.device.limits().max_texture_dimension_2d;
             let mut config = self.surface_config.lock().unwrap();
-            config.width = width;
-            config.height = height;
+            config.width = width.min(max);
+            config.height = height.min(max);
             self.surface.configure(&self.device, &config);
         }
     }
@@ -281,7 +292,10 @@ impl GpuRenderer {
             );
         }
 
-        // Render fullscreen quad
+        // Render fullscreen quad. Window resizes reconfigure this surface on
+        // the main thread, and wgpu rejects a configure while a frame is
+        // acquired, so hold the configuration lock from acquire to present.
+        let surface_guard = self.surface_config.lock().unwrap();
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&Default::default());
         let mut encoder = self
@@ -316,6 +330,7 @@ impl GpuRenderer {
         let pre_submit = frame_start.elapsed();
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        drop(surface_guard);
         let total = frame_start.elapsed();
 
         // FPS counter — log every 5 seconds

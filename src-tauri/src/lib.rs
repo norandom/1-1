@@ -25,6 +25,21 @@ pub fn run() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
+    // A GUI build has no visible stderr, so record panics in the app log
+    // before the default hook runs. Without this an unwinding main-thread
+    // panic ends the app with no trace.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        log::error!(
+            target: "panic",
+            "thread '{}' panicked: {info}\n{}",
+            thread.name().unwrap_or("<unnamed>"),
+            std::backtrace::Backtrace::force_capture()
+        );
+        default_hook(info);
+    }));
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(commands::updater::UpdateState::default())
@@ -39,6 +54,10 @@ pub fn run() {
                 .level_for("wgpu_hal", log::LevelFilter::Warn)
                 .level_for("naga", log::LevelFilter::Warn)
                 .level_for("tao", log::LevelFilter::Warn)
+                // The 40 KB KeepOne default discards the previous run's
+                // lines, including the last ones before a crash.
+                .max_file_size(2_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
                 .build(),
         )
         .setup(|app| {
