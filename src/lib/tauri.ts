@@ -3,6 +3,7 @@ import type { ViewportSize } from './viewport-size';
 import type { Channel } from '@tauri-apps/api/core';
 import type {
   CascadedIds,
+  CheckedCredential,
   ConnectionConfig,
   ConnectionInput,
   ConnectionSummary,
@@ -21,10 +22,19 @@ import type {
 } from '../types';
 import { normalizeConnection } from './host-profile';
 import { normalizeSessionInfo } from './session-info';
+import { invalidateCredentialCheck, invalidateLibraryCredentialChecks } from '../stores/credentialCheckStore';
 import type { FrameMessage, FrameReceipt } from './frame-protocol';
 import { useSessionStore } from '../stores/sessionStore';
 
 // ── Connection Management ───────────────────────────────────────────
+
+// Webview invocations can overlap. Discard old evidence immediately, then retire
+// any check that raced the save before Rust published its effective revision.
+async function changingCheckedProfile<T>(invalidate: () => void, change: () => Promise<T>): Promise<T> {
+  invalidate();
+  try { return await change(); }
+  finally { invalidate(); }
+}
 
 export async function listConnections(): Promise<ConnectionConfig[]> {
   try {
@@ -55,7 +65,9 @@ export async function updateConnection(
   id: string,
   config: Partial<ConnectionConfig>
 ): Promise<ConnectionConfig> {
-  return normalizeConnection(await invoke<ConnectionConfig>('update_connection', { id, config }));
+  const updated = await changingCheckedProfile(() => invalidateCredentialCheck(id),
+    () => invoke<ConnectionConfig>('update_connection', { id, config }));
+  return normalizeConnection(updated);
 }
 
 export async function deleteConnection(id: string): Promise<DeletionReport> {
@@ -63,7 +75,7 @@ export async function deleteConnection(id: string): Promise<DeletionReport> {
   // stops the connection's session (bounded) before persisting and
   // cleans the credential best-effort only after; the report carries
   // the exact counts incl. stopped sessions and orphaned credentials.
-  return await invoke<DeletionReport>('delete_connection', { id });
+  return changingCheckedProfile(() => invalidateCredentialCheck(id), () => invoke<DeletionReport>('delete_connection', { id }));
 }
 
 /// Req 10.19: duplicate a connection (non-secret settings, same folder,
@@ -74,6 +86,10 @@ export async function duplicateConnection(id: string): Promise<ConnectionConfig>
 
 export function reviewServerIdentity(id: string): Promise<ServerIdentityReview> {
   return invoke('review_server_identity', { id });
+}
+
+export function testSavedCredentials(connectionId: string): Promise<CheckedCredential | null> {
+  return invoke('test_saved_credentials', { connectionId });
 }
 
 export function confirmServerIdentity(selection: string): Promise<void> {
@@ -321,7 +337,10 @@ export async function deleteFolder(id: string): Promise<CascadedIds> {
 // transaction and cleans credentials only after it; the report carries
 // the exact counts, the stopped sessions and any orphaned credentials.
 export async function deleteLibrary(id: string): Promise<DeletionReport> {
-  return await invoke<DeletionReport>('delete_library', { id });
+  const report = await changingCheckedProfile(() => invalidateLibraryCredentialChecks(id),
+    () => invoke<DeletionReport>('delete_library', { id }));
+  for (const deleted of report.cascaded.deletedConnectionIds) invalidateCredentialCheck(deleted);
+  return report;
 }
 
 export async function moveNode(
@@ -346,7 +365,7 @@ export async function getLibraryStatus(): Promise<LibraryStoreStatus> {
 }
 
 export async function reloadLibraryStore(): Promise<LibraryStoreStatus> {
-  return await invoke<LibraryStoreStatus>('reload_library_store');
+  return changingCheckedProfile(invalidateLibraryCredentialChecks, () => invoke<LibraryStoreStatus>('reload_library_store'));
 }
 
 export async function clipboardLocalAcquire(sessionId: string, epoch: string): Promise<string> { return invoke('clipboard_local_acquire', { sessionId, epoch }); }

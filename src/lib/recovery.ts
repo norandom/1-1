@@ -53,7 +53,7 @@ export const ALL_MUTATION_ACTIONS: readonly MutationAction[] = [
   'import-connections',
 ];
 
-/** Context-menu actions that mutate the store — everything but connect. */
+/** Context-menu actions that mutate the store or persist a trust decision. */
 export const MUTATING_MENU_ACTIONS: readonly ContextMenuAction[] = [
   'review-server-identity',
   'edit',

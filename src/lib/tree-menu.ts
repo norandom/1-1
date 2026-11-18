@@ -12,6 +12,7 @@ import type { NodeId, NodeKind } from '../types';
 /** Every context action the tree can dispatch, by menu item label. */
 export type ContextMenuAction =
   | 'connect'
+  | 'test-credentials'
   | 'review-server-identity'
   | 'edit'
   | 'duplicate'
@@ -23,7 +24,7 @@ export type ContextMenuAction =
 
 /** Pinned 10.7 item sets + `Move…` for movable kinds (10.14). */
 export const CONTEXT_MENU_ITEMS: Record<NodeKind, readonly string[]> = {
-  connection: ['Connect', 'Review server identity', 'Edit', 'Duplicate', 'Move…', 'Delete'],
+  connection: ['Connect', 'Test credentials', 'Review server identity', 'Edit', 'Duplicate', 'Move…', 'Delete'],
   folder: ['New Connection', 'New Folder', 'Rename', 'Move…', 'Delete'],
   library: ['New Connection', 'New Folder', 'Rename', 'Delete'],
 };
@@ -35,6 +36,7 @@ export function contextMenuItems(kind: NodeKind): string[] {
 
 const ITEM_ACTIONS: Record<string, ContextMenuAction> = {
   'Connect': 'connect',
+  'Test credentials': 'test-credentials',
   'Review server identity': 'review-server-identity',
   'Edit': 'edit',
   'Duplicate': 'duplicate',

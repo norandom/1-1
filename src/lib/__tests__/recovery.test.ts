@@ -80,6 +80,7 @@ describe('mutation gating decision (which actions are blocked per status)', () =
 describe('context-menu gating (reads and Connect stay available)', () => {
   const EVERY_MENU_ACTION: ContextMenuAction[] = [
     'connect',
+    'test-credentials',
     'review-server-identity',
     'edit',
     'duplicate',
@@ -90,11 +91,11 @@ describe('context-menu gating (reads and Connect stay available)', () => {
     'rename',
   ];
 
-  it('writeBlocked blocks every mutating menu action but never Connect', () => {
+  it('keeps Connect and Test credentials available in read-only recovery', () => {
     expect([...blockedMenuActions(BLOCKED)].sort()).toEqual([...MUTATING_MENU_ACTIONS].sort());
     expect(blockedMenuActions(BLOCKED)).not.toContain('connect');
     for (const action of EVERY_MENU_ACTION) {
-      expect(isMenuActionBlocked(BLOCKED, action)).toBe(action !== 'connect');
+      expect(isMenuActionBlocked(BLOCKED, action)).toBe(action !== 'connect' && action !== 'test-credentials');
     }
   });
 

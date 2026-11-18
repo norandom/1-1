@@ -5,6 +5,16 @@ export interface ServerIdentityReview {
   observedFingerprint: string;
 }
 
+export type CredentialCheckReason = 'timeout' | 'unknownHost' | 'hostChanged' | 'storeUnavailable'
+  | 'keyringUnavailable' | 'unreachable' | 'negotiation' | 'untrustedPeer' | 'missingIdentity'
+  | 'missingCredential' | 'authorizationDenied' | 'noServerConfirmation' | 'serverStatus'
+  | 'interactiveSignInRequired' | 'authentication' | 'unsupportedAuthentication' | 'malformedResponse' | 'transportClosed';
+
+export type CheckedCredential = { connectionId: string; revision: string } & (
+  | { outcome: 'accepted' | 'rejected' }
+  | { outcome: 'unableToVerify'; reason: CredentialCheckReason }
+);
+
 export interface HostProfile {
   idlePreview: boolean;
   clipboardDirection: 'off' | 'bidirectional' | 'localToRemote' | 'remoteToLocal';
