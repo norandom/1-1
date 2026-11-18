@@ -49,6 +49,7 @@ Task 1 delivers the server identity check shared with session actions. Task 2 pr
   - _Boundary: Windows filesystem handles_
   - _Depends: 2_
   - _Requirements: 2.1, 2.2, 2.3, 2.4_
+  - 2026-11-18, part 1: `rdp/folder_share.rs` `BoundRoot` guards the root and every ancestor with read/traverse handles that deny delete sharing, so the native backend's reopen by NT path keeps reaching the granted directory. It verifies the volume/file ID under the guards and fails closed on links, replacement, missing folders and concurrent renames. Remaining: guard each remote handle's target and in-folder ancestors until its last I/O, and multiply linked files.
 - [ ] 4.2 Enforce read-only and ordinary workstation permissions
   - Allow list/read in read-only mode. Deny mutating open dispositions, writes, truncation, delete-on-close, rename, streams, metadata/security changes and mutating or unknown control operations.
   - In both modes, reject privilege-enabling requests before delegation. Enforce the workstation user's ACLs and surface a denied operation to its caller.
