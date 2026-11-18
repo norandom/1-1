@@ -42,7 +42,13 @@ describe('idle preview', () => {
     detachB();
   });
 
-  it('labels only paused connected views and dates them from a decoded update', () => {
+  it.each(['suppressed', 'preview'] as const)('keeps manual %s sessions out of the automatic resume control', (idlePreviewState) => {
+    const session = { status: 'connected', idlePreviewState, displayPaused: true } as SessionInfo;
+    expect(idleDisplayLabel(session)).toBeNull();
+    expect(idleDisplayLabel({ ...session, displayPaused: false })).toBeTruthy();
+  });
+
+  it('labels automatically paused connected views and dates them from a decoded update', () => {
     const now = Date.parse('2026-11-17T12:00:00Z');
     const info = { status: 'connected', idlePreviewState: 'suppressed' } as SessionInfo;
     expect(idleDisplayLabel(info, now)).toBe('Idle preview');

@@ -11,7 +11,7 @@ export function displayUpdateAge(updatedAt: string | null | undefined, now = Dat
 }
 
 export function idleDisplayLabel(session: SessionInfo, now = Date.now()): string | null {
-  if (session.status !== 'connected') return null;
+  if (session.status !== 'connected' || session.displayPaused) return null;
   if (session.idlePreviewState === 'preview') return 'Updating idle preview';
   if (session.idlePreviewState !== 'suppressed') return null;
   const age = displayUpdateAge(session.idlePreviewUpdatedAt, now);
