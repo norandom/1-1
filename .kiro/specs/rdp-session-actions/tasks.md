@@ -33,7 +33,7 @@ The independent Kiro task-plan review passed on 18 November 2026. The review cov
   - _Requirements: 2.1, 2.4, 2.5, 2.6, 2.7, 2.9_
 
 - [ ] 2. Test the credential saved for one host
-- [ ] 2.1 (P) Stop one authenticated probe before desktop establishment
+- [x] 2.1 (P) Stop one authenticated probe before desktop establishment
   - Open a single connection to the saved endpoint and consume the verified identity on that same TLS socket. Drive the pinned NLA sequence with the saved identity only. Return typed evidence from received server messages and close the socket before reporting.
   - Use a counting protocol fixture. A changed or unknown identity shows no credential transmission. Completion and cancellation show no desktop negotiation, reconnect, alternate credential, channel registration or change to an existing desktop.
   - This driver can run alongside the pause work once its external verifier is ready. Folder-sharing task 1 owns identity review and pin persistence.

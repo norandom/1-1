@@ -200,6 +200,15 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     endpoint: &Endpoint,
 ) -> io::Result<SignedTls<S>> {
+    handshake_with_key_log(stream, endpoint, Some(rustls::KeyLogFile::new())).await
+}
+
+/// Credential checks always pass None, even when SSLKEYLOGFILE is configured.
+pub(super) async fn handshake_with_key_log<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    endpoint: &Endpoint,
+    key_log: Option<rustls::KeyLogFile>,
+) -> io::Result<SignedTls<S>> {
     let provider = Arc::new(ring::default_provider());
     let verifier = SignatureVerifier(provider.signature_verification_algorithms);
     let mut config = ClientConfig::builder_with_provider(provider)
@@ -208,7 +217,9 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
-    config.key_log = Arc::new(rustls::KeyLogFile::new());
+    if let Some(key_log) = key_log {
+        config.key_log = Arc::new(key_log);
+    }
     config.resumption = rustls::client::Resumption::disabled();
     let mut stream = TlsConnector::from(Arc::new(config))
         .connect(endpoint.name.clone(), stream)
