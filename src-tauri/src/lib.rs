@@ -75,6 +75,9 @@ pub fn run() {
                 data_dir.join("connections.json"),
                 data_dir.join("libraries.json"),
             );
+            app.manage(rdp::peer_identity::pins::PinStore::new(
+                data_dir.join("server-pins.json"),
+            ));
             let settings_store = SettingsStore::new(data_dir);
             let session_manager = SessionManager::new();
             // Task 5.3 (Req 12.7): test-support builds may redirect
@@ -174,6 +177,9 @@ pub fn run() {
             commands::connection::update_connection,
             commands::connection::delete_connection,
             commands::connection::duplicate_connection,
+            commands::peer_identity::review_server_identity,
+            commands::peer_identity::confirm_server_identity,
+            commands::peer_identity::cancel_server_identity,
             commands::connection::import_rdp_file,
             commands::connection::test_connection,
             commands::connection::get_connection_password,

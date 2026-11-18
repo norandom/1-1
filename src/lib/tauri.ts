@@ -14,6 +14,7 @@ import type {
   NodeKind,
   SessionInfo,
   SessionInfoWire,
+  ServerIdentityReview,
   AppSettings,
   KeyEvent,
   MouseEvent as RdpMouseEvent,
@@ -68,6 +69,18 @@ export async function deleteConnection(id: string): Promise<DeletionReport> {
 /// fresh id + deterministic copy name; never a copied credential).
 export async function duplicateConnection(id: string): Promise<ConnectionConfig> {
   return normalizeConnection(await invoke<ConnectionConfig>('duplicate_connection', { id }));
+}
+
+export function reviewServerIdentity(id: string): Promise<ServerIdentityReview> {
+  return invoke('review_server_identity', { id });
+}
+
+export function confirmServerIdentity(selection: string): Promise<void> {
+  return invoke('confirm_server_identity', { selection });
+}
+
+export function cancelServerIdentity(selection: string): Promise<void> {
+  return invoke('cancel_server_identity', { selection });
 }
 
 export async function testConnection(host: string, port: number = 3389): Promise<boolean> {

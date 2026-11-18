@@ -17,9 +17,10 @@ const lib = (id: string): NodeId => ({ kind: 'library', id });
 // ── Req 10.7 item sets (+ the 10.14 keyboard Move entry) ─────────────
 
 describe('contextMenuItems (Req 10.7, pinned sets)', () => {
-  it('offers Connect, Edit, Duplicate, Move…, Delete for connections', () => {
+  it('offers server identity review on a saved connection', () => {
     expect(contextMenuItems('connection')).toEqual([
       'Connect',
+      'Review server identity',
       'Edit',
       'Duplicate',
       'Move…',
@@ -67,6 +68,7 @@ describe('contextMenuItems (Req 10.7, pinned sets)', () => {
 describe('menuActionFor', () => {
   it('maps every pinned item label to its action', () => {
     expect(menuActionFor('Connect')).toBe('connect');
+    expect(menuActionFor('Review server identity')).toBe('review-server-identity');
     expect(menuActionFor('Edit')).toBe('edit');
     expect(menuActionFor('Duplicate')).toBe('duplicate');
     expect(menuActionFor('Move…')).toBe('move');

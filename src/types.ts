@@ -1,3 +1,10 @@
+export interface ServerIdentityReview {
+  selection: string;
+  endpoint: string;
+  previousFingerprint: string | null;
+  observedFingerprint: string;
+}
+
 export interface HostProfile {
   idlePreview: boolean;
   clipboardDirection: 'off' | 'bidirectional' | 'localToRemote' | 'remoteToLocal';

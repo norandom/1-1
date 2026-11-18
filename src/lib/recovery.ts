@@ -55,6 +55,7 @@ export const ALL_MUTATION_ACTIONS: readonly MutationAction[] = [
 
 /** Context-menu actions that mutate the store — everything but connect. */
 export const MUTATING_MENU_ACTIONS: readonly ContextMenuAction[] = [
+  'review-server-identity',
   'edit',
   'duplicate',
   'move',

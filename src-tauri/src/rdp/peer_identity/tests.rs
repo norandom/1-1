@@ -165,35 +165,9 @@ async fn confirmed_pin_requires_same_host_port_and_signed_key_on_each_socket() {
 
 #[tokio::test]
 async fn discovery_negotiates_without_identity_then_closes_without_application_data() {
-    use ironrdp_pdu::nego::{
-        ConnectionConfirm, ConnectionRequest, ResponseFlags, SecurityProtocol,
-    };
-    use ironrdp_pdu::x224::X224;
-
     let (client_io, server_io) = duplex(65536);
     let destination = endpoint("desktop.example.test", 3389);
-    let responder = async {
-        let mut server_framed = TokioFramed::new(server_io);
-        let (_, request) = server_framed.read_pdu().await.unwrap();
-        let X224(req) = ironrdp_core::decode::<X224<ConnectionRequest>>(&request).unwrap();
-        assert_eq!(req.nego_data, None);
-        let (mut stream, leftover) = server_framed.into_inner();
-        assert!(leftover.is_empty());
-        let response = X224(ConnectionConfirm::Response {
-            flags: ResponseFlags::empty(),
-            protocol: SecurityProtocol::HYBRID,
-        });
-        stream
-            .write_all(&ironrdp_core::encode_vec(&response).unwrap())
-            .await
-            .unwrap();
-        let mut encrypted = server(&version::TLS13, SELF_SIGNED, OTHER_KEY)
-            .accept(stream)
-            .await
-            .unwrap();
-        let mut buffer = [0u8; 1];
-        assert_eq!(encrypted.read(&mut buffer).await.unwrap(), 0);
-    };
+    let responder = respond_to_review(server_io);
     let (discovered, ()) = tokio::join!(discover_on_stream(client_io, &destination), responder);
     let candidate: ObservedPeer = discovered.unwrap();
     assert_eq!(candidate.endpoint, destination);
@@ -201,4 +175,86 @@ async fn discovery_negotiates_without_identity_then_closes_without_application_d
         .await
         .unwrap();
     assert!(next.verify_chain(&fixture_roots()).is_err());
+}
+
+async fn respond_to_review<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(server_io: S) {
+    use ironrdp_pdu::nego::ResponseFlags;
+    let mut server_framed = TokioFramed::new(server_io);
+    let (_, request) = server_framed.read_pdu().await.unwrap();
+    let X224(req) = ironrdp_core::decode::<X224<ConnectionRequest>>(&request).unwrap();
+    assert_eq!(req.nego_data, None);
+    let (mut stream, leftover) = server_framed.into_inner();
+    assert!(leftover.is_empty());
+    let response = X224(ConnectionConfirm::Response {
+        flags: ResponseFlags::empty(),
+        protocol: SecurityProtocol::HYBRID,
+    });
+    stream
+        .write_all(&ironrdp_core::encode_vec(&response).unwrap())
+        .await
+        .unwrap();
+    let mut encrypted = server(&version::TLS13, SELF_SIGNED, OTHER_KEY)
+        .accept(stream)
+        .await
+        .unwrap();
+    let mut buffer = [0u8; 1];
+    assert_eq!(encrypted.read(&mut buffer).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn review_confirms_self_signed_key_for_a_fresh_socket_and_rejects_rotation() {
+    use super::pins::PinStore;
+    use crate::store::library::LibraryStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let library = LibraryStore::open(dir.path().join("connections.json"));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connection = library
+        .create_connection(
+            serde_json::from_value(serde_json::json!({
+                "name": "Synthetic host", "host": "127.0.0.1", "port": port,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let path = dir.path().join("server-pins.json");
+    let pins = PinStore::new(path.clone());
+    let (review, ()) = tokio::join!(pins.review(&library, &connection.id), async {
+        respond_to_review(listener.accept().await.unwrap().0).await
+    });
+    let review = review.unwrap();
+    assert_eq!(review.endpoint, format!("127.0.0.1:{port}"));
+    assert!(review.previous_fingerprint.is_none());
+    let destination = endpoint("127.0.0.1", port);
+    assert!(pins.lookup(&destination).unwrap().is_none());
+    pins.confirm(&library, review.selection).unwrap();
+    assert!(pins.confirm(&library, review.selection).is_err());
+    let reopened = PinStore::new(path);
+    let pin = reopened.lookup(&destination).unwrap().unwrap();
+    let next = fixture(&destination, SELF_SIGNED, OTHER_KEY, &version::TLS13)
+        .await
+        .unwrap();
+    next.verify(Some(&pin)).await.unwrap();
+    let rotated = fixture(&destination, SERVER, SERVER_KEY, &version::TLS13)
+        .await
+        .unwrap();
+    assert!(rotated.verify(Some(&pin)).await.is_err());
+    assert!(
+        reopened
+            .lookup(&endpoint("another.test", port))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reopened
+            .lookup(&endpoint("127.0.0.1", port - 1))
+            .unwrap()
+            .is_none()
+    );
+    let profile = std::fs::read_to_string(dir.path().join("connections.json")).unwrap();
+    assert!(!profile.contains(&review.observed_fingerprint));
+    assert!(!profile.contains("spki"));
 }

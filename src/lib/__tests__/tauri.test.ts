@@ -5,6 +5,9 @@ import type { CascadedIds, ConnectionSummary, DeletionReport, Folder, Library, L
 
 import {
   connect,
+  reviewServerIdentity,
+  confirmServerIdentity,
+  cancelServerIdentity,
   createFolder,
   createConnection,
   updateConnection,
@@ -31,6 +34,19 @@ const invokeMock = vi.mocked(invoke);
 
 beforeEach(() => {
   invokeMock.mockReset();
+});
+
+it('reviews only a saved ID and submits only the native selection to confirm or cancel', async () => {
+  const review = { selection: 'opaque', endpoint: '[::1]:3390', previousFingerprint: null, observedFingerprint: 'AA' };
+  invokeMock.mockResolvedValueOnce(review);
+  expect(await reviewServerIdentity('profile')).toEqual(review);
+  await confirmServerIdentity(review.selection);
+  await cancelServerIdentity(review.selection);
+  expect(invokeMock.mock.calls).toEqual([
+    ['review_server_identity', { id: 'profile' }],
+    ['confirm_server_identity', { selection: 'opaque' }],
+    ['cancel_server_identity', { selection: 'opaque' }],
+  ]);
 });
 
 it('connect passes optional initial physical dimensions without altering legacy callers', async () => {

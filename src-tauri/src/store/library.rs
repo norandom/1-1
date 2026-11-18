@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use uuid::Uuid;
 
 /// Discriminator of the v2 `connections.json` document (design "Logical
@@ -815,9 +815,27 @@ fn commit_v2(path: &Path, document: &LibraryDocument) -> Result<(), MigrationErr
         serde_json::to_string_pretty(document).map_err(|e| MigrationError::SerializeFailed {
             cause: e.to_string(),
         })?;
-    write_atomic(path, json.as_bytes()).map_err(|e| MigrationError::CommitFailed {
+    write_library(path, json.as_bytes()).map_err(|e| MigrationError::CommitFailed {
         cause: e.to_string(),
     })
+}
+
+// The library itself is replaced by rename. Use a stable, per-file lock for
+// the short interval in which a second instance could replace that revision.
+fn lock_library_file(path: &Path) -> io::Result<std::fs::File> {
+    let lock = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_added_extension("lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn write_library(path: &Path, data: &[u8]) -> io::Result<()> {
+    let _lock = lock_library_file(path)?;
+    write_atomic(path, data)
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,6 +1137,8 @@ struct StoreInner {
     /// `None` for single-file stores ([`LibraryStore::open`]).
     transitional_path: Option<PathBuf>,
     state: StoreState,
+    // Tokens exist only while a native review holds its snapshot.
+    reviewed_hosts: HashMap<String, Weak<ConnectionConfig>>,
     /// Test-only commit-failure injection (root-proof, OS-independent —
     /// CI run 43587595668 lesson: permission-based injections cannot fail
     /// inside the root-run Linux container). Checked in `commit_publish`
@@ -1249,6 +1269,7 @@ impl LibraryStore {
                 path,
                 transitional_path,
                 state,
+                reviewed_hosts: HashMap::new(),
                 #[cfg(test)]
                 fail_next_commit: false,
                 #[cfg(test)]
@@ -1311,6 +1332,7 @@ impl LibraryStore {
     /// (Req 10.12: "until valid data is restored and reloaded").
     pub fn reload(&self) -> Result<LoadOutcome, MigrationError> {
         let mut inner = self.inner.lock().expect("library store lock poisoned");
+        inner.reviewed_hosts.clear();
         match Self::load_for(&inner.path, &inner.transitional_path) {
             Ok(outcome) => {
                 inner.state = StoreState::Ready(outcome.document());
@@ -1713,6 +1735,76 @@ impl LibraryStore {
         })
     }
 
+    pub(crate) fn select_host_for_review(&self, id: &str) -> io::Result<Arc<ConnectionConfig>> {
+        let mut inner = self.inner.lock().expect("library store lock poisoned");
+        if let Some(current) = inner.reviewed_hosts.get(id).and_then(Weak::upgrade) {
+            return Ok(current);
+        }
+        let StoreState::Ready(doc) = &inner.state else {
+            return Err(io::Error::other("The saved-host library is in recovery."));
+        };
+        let host = doc
+            .connections
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| io::Error::other("The saved host no longer exists."))?;
+        let snapshot = Arc::new(host.clone());
+        inner
+            .reviewed_hosts
+            .retain(|_, host| host.strong_count() != 0);
+        inner
+            .reviewed_hosts
+            .insert(id.to_owned(), Arc::downgrade(&snapshot));
+        Ok(snapshot)
+    }
+
+    /// Check the selection against both the local revision and the committed
+    /// library. Keep both locks until the trust-file action has returned.
+    pub(crate) fn with_reviewed_host<T>(
+        &self,
+        host: &Arc<ConnectionConfig>,
+        action: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        let inner = self.inner.lock().expect("library store lock poisoned");
+        if !inner
+            .reviewed_hosts
+            .get(&host.id)
+            .is_some_and(|current| current.ptr_eq(&Arc::downgrade(host)))
+        {
+            return Err(io::Error::other(
+                "The saved host changed. Review its identity again.",
+            ));
+        }
+        let _lock = lock_library_file(&inner.path)
+            .map_err(|_| io::Error::other("Could not verify the saved host. Review again."))?;
+        let mut options = std::fs::File::options();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Exclude external rewrites or replacement as well as cooperating writers.
+            options.share_mode(1); // FILE_SHARE_READ
+        }
+        let file = options.open(&inner.path).map_err(|_| {
+            io::Error::other("Could not read the saved host. Reload the library and review again.")
+        })?;
+        let document: LibraryDocument = serde_json::from_reader(io::BufReader::new(&file))
+            .map_err(|_| {
+                io::Error::other(
+                    "The saved library is invalid. Reload it before reviewing this host.",
+                )
+            })?;
+        document.validate().map_err(|_| {
+            io::Error::other("The saved library is invalid. Reload it before reviewing this host.")
+        })?;
+        if document.connections.iter().find(|c| c.id == host.id) != Some(host.as_ref()) {
+            return Err(io::Error::other(
+                "The saved host changed. Reload the library and review its identity again.",
+            ));
+        }
+        action()
+    }
+
     /// Every connection, name-sorted (v1 `list` contract).
     pub fn list_connections(&self) -> Result<Vec<ConnectionConfig>, LibraryStoreError> {
         self.read(|document| {
@@ -1820,10 +1912,15 @@ impl LibraryStore {
                 cause: "injected for tests (root-proof, OS-independent)".into(),
             });
         }
-        write_atomic(&inner.path, json.as_bytes()).map_err(|e| MigrationError::CommitFailed {
+        write_library(&inner.path, json.as_bytes()).map_err(|e| MigrationError::CommitFailed {
             cause: e.to_string(),
         })?;
         // Publish only after the commit succeeded.
+        inner.reviewed_hosts.retain(|id, revision| {
+            revision.upgrade().is_some_and(|snapshot| {
+                document.connections.iter().find(|c| &c.id == id) == Some(snapshot.as_ref())
+            })
+        });
         inner.state = StoreState::Ready(document);
         Ok(())
     }

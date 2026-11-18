@@ -1,5 +1,7 @@
 //! Same-connection TLS proof for the desktop, credential tests and folder grants.
 
+pub(crate) mod pins;
+
 use std::{io, net::Ipv6Addr, sync::Arc, time::Duration};
 
 use ironrdp_pdu::nego::{ConnectionConfirm, ConnectionRequest, RequestFlags, SecurityProtocol};
@@ -68,10 +70,6 @@ pub(crate) struct ConfirmedPin(ObservedPeer);
 
 impl ConfirmedPin {
     /// Used by the native confirmation/pin store, after operator authorization.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "task 1.2 persists confirmed pins")
-    )]
     pub(crate) fn from_operator_confirmation(peer: ObservedPeer) -> Self {
         Self(peer)
     }
@@ -256,10 +254,6 @@ pub(super) fn take_upgrade_stream<S>(framed: TokioFramed<S>) -> io::Result<S> {
 
 /// Review obtains a candidate only. The signature is checked, then this
 /// connection closes without credentials, static channels or application data.
-#[allow(
-    dead_code,
-    reason = "native review action consumes this entry point in task 1.2"
-)]
 pub(crate) async fn discover(target: &ConnectionTarget<'_>) -> io::Result<ObservedPeer> {
     tokio::time::timeout(Duration::from_secs(15), async {
         let stream = tokio::net::TcpStream::connect(target.socket_target()).await?;

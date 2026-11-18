@@ -56,6 +56,7 @@ import {
   predictLibraryDeletion,
 } from '../../lib/tree-confirm';
 import { ConnectionForm } from '../connections/ConnectionForm';
+import { ServerIdentityDialog } from '../connections/ServerIdentityDialog';
 // Task 8.5 (Req 10.6): the ONE shared connect action (design.md L379).
 import { useConnectAction } from '../../hooks/useConnectAction';
 import {
@@ -412,6 +413,7 @@ export function ConnectionTree() {
   };
 
   const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
+  const [identityNode, setIdentityNode] = useState<NodeId | null>(null);
   const [showNewConnection, setShowNewConnection] = useState(false);
   const [renameNode, setRenameNode] = useState<NodeId | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -433,6 +435,9 @@ export function ConnectionTree() {
     switch (action) {
       case 'connect':
         connectNode(node);
+        break;
+      case 'review-server-identity':
+        setIdentityNode(node);
         break;
       case 'edit': {
         const conn = connections.find((c) => c.id === node.id);
@@ -705,6 +710,15 @@ export function ConnectionTree() {
           )}
         </div>
       </DndContext>
+
+      {identityNode && (
+        <ServerIdentityDialog
+          key={identityNode.id}
+          id={identityNode.id}
+          name={nodeName(identityNode)}
+          onClose={() => { setIdentityNode(null); focusNode(identityNode); }}
+        />
+      )}
 
       {/* Deletion confirmation (10.18: exact counts) */}
       <Dialog

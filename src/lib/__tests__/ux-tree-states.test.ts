@@ -384,7 +384,7 @@ describe('TREE_KEYBOARD_SCENARIOS: concrete transitions on the fixture tree', ()
       if (s.key !== 'Shift+F10') continue;
       const expected =
         s.from.kind === 'connection'
-          ? ['Connect', 'Edit', 'Duplicate', 'Move…', 'Delete']
+          ? ['Connect', 'Review server identity', 'Edit', 'Duplicate', 'Move…', 'Delete']
           : s.from.kind === 'folder'
             ? ['New Connection', 'New Folder', 'Rename', 'Move…', 'Delete']
             : ['New Connection', 'New Folder', 'Rename', 'Delete'];

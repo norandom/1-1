@@ -80,6 +80,7 @@ describe('mutation gating decision (which actions are blocked per status)', () =
 describe('context-menu gating (reads and Connect stay available)', () => {
   const EVERY_MENU_ACTION: ContextMenuAction[] = [
     'connect',
+    'review-server-identity',
     'edit',
     'duplicate',
     'move',
