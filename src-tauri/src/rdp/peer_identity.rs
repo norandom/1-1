@@ -60,6 +60,23 @@ impl<'a> ConnectionTarget<'a> {
     }
 }
 
+/// The endpoint-pin and folder-grant key: `host:port`, IPv6 in brackets.
+pub(crate) fn endpoint_key(endpoint: &Endpoint) -> String {
+    let host = endpoint.name.to_str();
+    if host.contains(':') {
+        format!("[{host}]:{}", endpoint.port)
+    } else {
+        format!("{host}:{}", endpoint.port)
+    }
+}
+
+/// The key of a saved host's address, or `None` when it is not a valid target.
+pub(crate) fn host_endpoint_key(host: &str, port: u16) -> Option<String> {
+    ConnectionTarget::new(host, port)
+        .ok()
+        .map(|target| endpoint_key(&target.endpoint))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ObservedPeer {
     pub(crate) endpoint: Endpoint,

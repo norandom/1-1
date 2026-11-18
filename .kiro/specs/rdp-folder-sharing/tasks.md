@@ -25,12 +25,13 @@ Task 1 delivers the server identity check shared with session actions. Task 2 pr
   - _Requirements: 2.1, 2.2, 3.1, 3.2_
 
 - [ ] 3. Keep a single explicit folder grant per saved host
-- [ ] 3.1 Persist grants and invalidate them with profile mutations
+- [x] 3.1 Persist grants and invalidate them with profile mutations
   - Bind a grant to the profile ID, endpoint, server key, volume/directory identity, share name and mode. Serialize revocation with retargeting, import and single/cascaded deletion.
   - Test restart, failed save/revoke, changing an address away and back, display-name edits, duplicates and imports. Missing or corrupt data leaves sharing off. A stale grant never reactivates.
   - _Boundary: Folder grant store and saved profile mutation integration_
   - _Depends: 1.2_
   - _Requirements: 1.1, 1.2, 1.3, 1.4_
+  - 2026-11-18: `store/share_grants.rs` keeps grants in `share-grants.json`. The library revokes them inside its transactions before a retarget or (cascaded) deletion commits, and reconciles them at startup and on reload. Independent review found no blocker. Carried into 3.2: confirmation must check the host and save the grant inside the library mutation lock.
 - [ ] 3.2 Integrate the native folder picker and grant controls
   - Issue opaque selections for local drive-letter subdirectories and reject volume roots. Show host/port, key, folder, portable name and mode together. Start at read-only and offer explicit read/write.
   - Register read, select, confirm and revoke commands. Reject expired selections or endpoint changes at confirmation. Cancel, failed writes and repeated revoke show the committed state.

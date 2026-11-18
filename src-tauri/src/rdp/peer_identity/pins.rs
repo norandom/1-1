@@ -1,4 +1,4 @@
-use super::{ConfirmedPin, ConnectionTarget, Endpoint, ObservedPeer, discover};
+use super::{ConfirmedPin, ConnectionTarget, Endpoint, ObservedPeer, discover, endpoint_key};
 use crate::store::{
     atomic_write::write_atomic, connections::ConnectionConfig, library::LibraryStore,
 };
@@ -44,15 +44,6 @@ struct Draft {
 pub(crate) struct PinStore {
     path: PathBuf,
     drafts: Mutex<HashMap<Uuid, Draft>>,
-}
-
-fn endpoint_key(endpoint: &Endpoint) -> String {
-    let host = endpoint.name.to_str();
-    if host.contains(':') {
-        format!("[{host}]:{}", endpoint.port)
-    } else {
-        format!("{host}:{}", endpoint.port)
-    }
 }
 
 fn fingerprint(hash: &[u8; 32]) -> String {

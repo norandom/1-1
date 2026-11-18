@@ -99,6 +99,13 @@ pub fn run() {
             app.manage(rdp::peer_identity::pins::PinStore::new(
                 data_dir.join("server-pins.json"),
             ));
+            // rdp-folder-sharing 3.1: grants live outside the exported library
+            // and are revoked inside its edit and deletion transactions.
+            let share_grants = Arc::new(store::share_grants::ShareGrantStore::new(
+                data_dir.join("share-grants.json"),
+            ));
+            library_store.attach_share_grants(Arc::clone(&share_grants));
+            app.manage(share_grants);
             let settings_store = SettingsStore::new(data_dir);
             let session_manager = SessionManager::new();
             // Task 5.3 (Req 12.7): test-support builds may redirect

@@ -21,14 +21,16 @@
 //! Credentials never live in this model: keyring entries are keyed by
 //! connection id only (design "Data Models"), so no secret material here.
 
+use crate::rdp::peer_identity::host_endpoint_key;
 use crate::store::atomic_write::write_atomic;
 use crate::store::connections::{ConnectionConfig, ConnectionInput};
+use crate::store::share_grants::ShareGrantStore;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use uuid::Uuid;
 
 /// Discriminator of the v2 `connections.json` document (design "Logical
@@ -1171,6 +1173,9 @@ struct StoreInner {
 /// [`LibraryStore::reload`] lifts the block.
 pub struct LibraryStore {
     inner: Mutex<StoreInner>,
+    /// Folder grants revoked inside this store's mutation transactions
+    /// (rdp-folder-sharing 3.1). Absent in stores that never share.
+    share_grants: OnceLock<Arc<ShareGrantStore>>,
 }
 
 impl LibraryStore {
@@ -1275,6 +1280,7 @@ impl LibraryStore {
                 #[cfg(test)]
                 library_delete_joins: Vec::new(),
             }),
+            share_grants: OnceLock::new(),
         }
     }
 
@@ -1335,7 +1341,9 @@ impl LibraryStore {
         inner.reviewed_hosts.clear();
         match Self::load_for(&inner.path, &inner.transitional_path) {
             Ok(outcome) => {
-                inner.state = StoreState::Ready(outcome.document());
+                let document = outcome.document();
+                self.reconcile_share_grants(&document);
+                inner.state = StoreState::Ready(document);
                 Ok(outcome)
             }
             Err(cause) => {
@@ -1531,6 +1539,7 @@ impl LibraryStore {
             #[cfg(test)]
             next.connections.extend(joined);
             let cascaded = apply_library_deletion(&mut next, id)?;
+            self.revoke_share_grants(cascaded.deleted_connection_ids.iter().map(String::as_str))?;
             Ok((next, cascaded))
         })
     }
@@ -1642,6 +1651,13 @@ impl LibraryStore {
             let Some(existing) = next.connections.iter_mut().find(|c| c.id == id) else {
                 return Ok((next, None));
             };
+            // A new destination needs fresh folder consent. Revoke durably
+            // before the edit commits; a later failed commit then leaves the
+            // grant withdrawn rather than silently reactivating it.
+            let before = host_endpoint_key(&existing.host, existing.port);
+            if before.is_none() || before != host_endpoint_key(&input.host, input.port) {
+                self.revoke_share_grants([id])?;
+            }
             existing.name = input.name;
             existing.host = input.host;
             existing.port = input.port;
@@ -1666,6 +1682,13 @@ impl LibraryStore {
     /// library. Best-effort keyring deletion stays at the command layer.
     pub fn delete_connection(&self, id: &str) -> Result<bool, LibraryStoreError> {
         self.mutate(|mut next| {
+            if next
+                .connections
+                .iter()
+                .any(|connection| connection.id == id)
+            {
+                self.revoke_share_grants([id])?;
+            }
             let before = next.connections.len();
             next.connections.retain(|connection| connection.id != id);
             let removed = before != next.connections.len();
@@ -1861,12 +1884,69 @@ impl LibraryStore {
         }
     }
 
+    /// Attach the folder grant store whose grants this library's edits and
+    /// deletions revoke. The first attachment wins. Grants for hosts that
+    /// were removed or retargeted while the app was closed are withdrawn now.
+    pub fn attach_share_grants(&self, grants: Arc<ShareGrantStore>) {
+        if self.share_grants.set(grants).is_err() {
+            return;
+        }
+        let inner = self.inner.lock().expect("library store lock poisoned");
+        if let StoreState::Ready(document) = &inner.state {
+            self.reconcile_share_grants(document);
+        }
+    }
+
+    /// Durably revoke folder grants, inside a mutation before its commit.
+    fn revoke_share_grants<'a>(
+        &self,
+        profile_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), LibraryStoreError> {
+        let Some(grants) = self.share_grants.get() else {
+            return Ok(());
+        };
+        grants
+            .revoke(profile_ids)
+            .map_err(|error| LibraryStoreError::PersistFailed {
+                cause: format!("could not withdraw the folder share first: {error}"),
+            })
+    }
+
+    /// After a reload replaced the library from disk, revoke grants whose
+    /// host is gone or now points elsewhere. Unmatched grants are inert at
+    /// connect anyway; revoking them keeps a later change back from
+    /// reactivating one.
+    fn reconcile_share_grants(&self, document: &LibraryDocument) {
+        let Some(grants) = self.share_grants.get() else {
+            return;
+        };
+        let Ok(all) = grants.all() else {
+            return; // Unreadable or malformed grants already leave sharing off.
+        };
+        let stale: Vec<&str> = all
+            .iter()
+            .filter(|grant| {
+                document
+                    .connections
+                    .iter()
+                    .find(|c| c.id == grant.profile_id)
+                    .and_then(|c| host_endpoint_key(&c.host, c.port))
+                    .is_none_or(|endpoint| endpoint != grant.endpoint)
+            })
+            .map(|grant| grant.profile_id.as_str())
+            .collect();
+        if let Err(error) = grants.revoke(stale) {
+            log::error!("Could not withdraw folder shares after a library reload: {error}");
+        }
+    }
+
     /// One serialized transaction (design "Storage transactions and
     /// recovery"): clone the current snapshot, apply `change`, then
     /// validate/persist/publish the result while holding the SAME lock, so
     /// concurrent commands can never interleave or lose updates. On any
     /// error — blank name, invariant violation, persist failure — the
-    /// previous in-memory snapshot and on-disk file are retained.
+    /// previous in-memory snapshot and on-disk file are retained. A folder
+    /// grant revoked by `change` stays revoked: consent is withdrawn first.
     fn mutate<T>(
         &self,
         change: impl FnOnce(LibraryDocument) -> Result<(LibraryDocument, T), LibraryStoreError>,

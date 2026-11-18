@@ -19,3 +19,6 @@ pub mod credentials;
 /// CRUD/import/duplication behind `commands::connection`.
 pub mod library;
 pub mod settings;
+/// rdp-folder-sharing 3.1: one explicit folder grant per saved host, kept
+/// outside the exported library and revoked inside library mutations.
+pub mod share_grants;
