@@ -5,6 +5,34 @@ export interface ServerIdentityReview {
   observedFingerprint: string;
 }
 
+/** Folder access mode for a saved host's share (rdp-folder-sharing 3.2). */
+export type ShareMode = 'readOnly' | 'readWrite';
+
+export interface FolderShareGrant {
+  endpoint: string;
+  fingerprint: string;
+  folder: string;
+  shareName: string;
+  mode: ShareMode;
+}
+
+/** The committed folder share of one saved host. */
+export interface FolderShareState {
+  supported: boolean;
+  grant: FolderShareGrant | null;
+  /** Why sharing is off although a grant may exist. */
+  error: string | null;
+}
+
+/** A chosen folder awaiting confirmation, bound to the host and trusted key. */
+export interface FolderShareDraft {
+  selection: string;
+  endpoint: string;
+  fingerprint: string;
+  folder: string;
+  suggestedShareName: string;
+}
+
 export type CredentialCheckReason = 'timeout' | 'unknownHost' | 'hostChanged' | 'storeUnavailable'
   | 'keyringUnavailable' | 'unreachable' | 'negotiation' | 'untrustedPeer' | 'missingIdentity'
   | 'missingCredential' | 'authorizationDenied' | 'noServerConfirmation' | 'serverStatus'

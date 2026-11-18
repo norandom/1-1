@@ -56,6 +56,7 @@ export const ALL_MUTATION_ACTIONS: readonly MutationAction[] = [
 /** Context-menu actions that mutate the store or persist a trust decision. */
 export const MUTATING_MENU_ACTIONS: readonly ContextMenuAction[] = [
   'review-server-identity',
+  'share-folder',
   'edit',
   'duplicate',
   'move',

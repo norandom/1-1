@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { HostProfileFields } from './HostProfileFields';
+import { FolderShareSummary } from './FolderShareSummary';
 import { normalizeHostProfile } from '../../lib/host-profile';
 
 interface Props {
@@ -220,6 +221,8 @@ export function ConnectionForm({ connection, onClose }: Props) {
           </div>
 
           <HostProfileFields profile={hostProfile} fontSmoothing={fontSmoothing} onChange={(profile, smoothing) => { setHostProfile(profile); setFontSmoothing(smoothing); }} />
+
+          {connection && <FolderShareSummary id={connection.id} name={connection.name} />}
 
           {/* Resolution */}
           <div className="grid gap-2">

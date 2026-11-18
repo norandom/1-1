@@ -2,6 +2,7 @@ pub mod clipboard;
 pub mod connection;
 pub(crate) mod credential_check;
 pub mod deletion;
+pub(crate) mod folder_share;
 pub mod library;
 pub mod native_clipboard;
 pub mod peer_identity;

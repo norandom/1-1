@@ -168,13 +168,44 @@ async fn discovery_negotiates_without_identity_then_closes_without_application_d
     let (client_io, server_io) = duplex(65536);
     let destination = endpoint("desktop.example.test", 3389);
     let responder = respond_to_review(server_io);
-    let (discovered, ()) = tokio::join!(discover_on_stream(client_io, &destination), responder);
+    let (discovered, ()) =
+        tokio::join!(discover_on_stream(client_io, &destination, None), responder);
     let candidate: ObservedPeer = discovered.unwrap();
     assert_eq!(candidate.endpoint, destination);
     let next = fixture(&destination, SELF_SIGNED, OTHER_KEY, &version::TLS13)
         .await
         .unwrap();
     assert!(next.verify_chain(&fixture_roots()).is_err());
+}
+
+#[tokio::test]
+async fn trusted_discovery_needs_a_valid_chain_or_the_confirmed_pin() {
+    async fn observe(
+        destination: &Endpoint,
+        cert: &'static [u8],
+        key: &'static [u8],
+    ) -> ConfirmedPin {
+        let tls = fixture(destination, cert, key, &version::TLS13)
+            .await
+            .unwrap();
+        ConfirmedPin::from_operator_confirmation(tls.observed)
+    }
+    let destination = endpoint("desktop.example.test", 3389);
+    let pinned = observe(&destination, SELF_SIGNED, OTHER_KEY).await;
+    let rotated = observe(&destination, SERVER, SERVER_KEY).await;
+    for (pin, expected) in [
+        (None, Err(io::ErrorKind::Other)),
+        (Some(&pinned), Ok(())),
+        (Some(&rotated), Err(io::ErrorKind::PermissionDenied)),
+    ] {
+        let (client_io, server_io) = duplex(65536);
+        let (result, ()) = tokio::join!(
+            discover_on_stream(client_io, &destination, Some(pin)),
+            respond_to_review(server_io)
+        );
+        // The self-signed responder is trusted only through its own pin.
+        assert_eq!(result.map(|_| ()).map_err(|e| e.kind()), expected);
+    }
 }
 
 async fn respond_to_review<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(server_io: S) {

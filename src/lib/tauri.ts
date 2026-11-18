@@ -16,6 +16,9 @@ import type {
   SessionInfo,
   SessionInfoWire,
   ServerIdentityReview,
+  FolderShareDraft,
+  FolderShareState,
+  ShareMode,
   AppSettings,
   KeyEvent,
   MouseEvent as RdpMouseEvent,
@@ -98,6 +101,27 @@ export function confirmServerIdentity(selection: string): Promise<void> {
 
 export function cancelServerIdentity(selection: string): Promise<void> {
   return invoke('cancel_server_identity', { selection });
+}
+
+export function getFolderShare(profileId: string): Promise<FolderShareState> {
+  return invoke('get_folder_share', { profileId });
+}
+
+/** Proves the server key, then opens the native picker. Resolves to null when cancelled. */
+export function selectShareFolder(profileId: string): Promise<FolderShareDraft | null> {
+  return invoke('select_share_folder', { profileId });
+}
+
+export function confirmFolderShare(selection: string, shareName: string, mode: ShareMode): Promise<FolderShareState> {
+  return invoke('confirm_folder_share', { selection, shareName, mode });
+}
+
+export function cancelFolderShare(selection: string): Promise<void> {
+  return invoke('cancel_folder_share', { selection });
+}
+
+export function revokeFolderShare(profileId: string): Promise<FolderShareState> {
+  return invoke('revoke_folder_share', { profileId });
 }
 
 export async function testConnection(host: string, port: number = 3389): Promise<boolean> {

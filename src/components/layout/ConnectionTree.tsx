@@ -59,6 +59,7 @@ import {
 } from '../../lib/tree-confirm';
 import { ConnectionForm } from '../connections/ConnectionForm';
 import { ServerIdentityDialog } from '../connections/ServerIdentityDialog';
+import { FolderShareDialog } from '../connections/FolderShareDialog';
 import { CredentialTestMenuItem } from '../connections/CredentialTestMenuItem';
 // Task 8.5 (Req 10.6): the ONE shared connect action (design.md L379).
 import { useConnectAction } from '../../hooks/useConnectAction';
@@ -438,6 +439,7 @@ export function ConnectionTree() {
 
   const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
   const [identityNode, setIdentityNode] = useState<NodeId | null>(null);
+  const [shareNode, setShareNode] = useState<NodeId | null>(null);
   const [showNewConnection, setShowNewConnection] = useState(false);
   const [renameNode, setRenameNode] = useState<NodeId | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -465,6 +467,9 @@ export function ConnectionTree() {
         break;
       case 'review-server-identity':
         setIdentityNode(node);
+        break;
+      case 'share-folder':
+        setShareNode(node);
         break;
       case 'edit': {
         const conn = connections.find((c) => c.id === node.id);
@@ -741,6 +746,14 @@ export function ConnectionTree() {
         </div>
       </DndContext>
 
+      {shareNode && (
+        <FolderShareDialog
+          key={shareNode.id}
+          id={shareNode.id}
+          name={nodeName(shareNode)}
+          onClose={() => { setShareNode(null); focusNode(shareNode); }}
+        />
+      )}
       {identityNode && (
         <ServerIdentityDialog
           key={identityNode.id}

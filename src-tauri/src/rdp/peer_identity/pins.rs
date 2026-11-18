@@ -1,4 +1,6 @@
-use super::{ConfirmedPin, ConnectionTarget, Endpoint, ObservedPeer, discover, endpoint_key};
+use super::{
+    ConfirmedPin, ConnectionTarget, Endpoint, ObservedPeer, discover, endpoint_key, fingerprint,
+};
 use crate::store::{
     atomic_write::write_atomic, connections::ConnectionConfig, library::LibraryStore,
 };
@@ -44,11 +46,6 @@ struct Draft {
 pub(crate) struct PinStore {
     path: PathBuf,
     drafts: Mutex<HashMap<Uuid, Draft>>,
-}
-
-fn fingerprint(hash: &[u8; 32]) -> String {
-    use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
-    format!("SHA256:{}", STANDARD_NO_PAD.encode(hash))
 }
 
 impl PinStore {

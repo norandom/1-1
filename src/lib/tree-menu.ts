@@ -15,6 +15,7 @@ export type ContextMenuAction =
   | 'disconnect'
   | 'test-credentials'
   | 'review-server-identity'
+  | 'share-folder'
   | 'edit'
   | 'duplicate'
   | 'move'
@@ -25,7 +26,7 @@ export type ContextMenuAction =
 
 /** Pinned 10.7 item sets + `Move…` for movable kinds (10.14). */
 export const CONTEXT_MENU_ITEMS: Record<NodeKind, readonly string[]> = {
-  connection: ['Connect', 'Test credentials', 'Review server identity', 'Edit', 'Duplicate', 'Move…', 'Delete'],
+  connection: ['Connect', 'Test credentials', 'Review server identity', 'Share folder…', 'Edit', 'Duplicate', 'Move…', 'Delete'],
   folder: ['New Connection', 'New Folder', 'Rename', 'Move…', 'Delete'],
   library: ['New Connection', 'New Folder', 'Rename', 'Delete'],
 };
@@ -51,6 +52,7 @@ const ITEM_ACTIONS: Record<string, ContextMenuAction> = {
   'Disconnect': 'disconnect',
   'Test credentials': 'test-credentials',
   'Review server identity': 'review-server-identity',
+  'Share folder…': 'share-folder',
   'Edit': 'edit',
   'Duplicate': 'duplicate',
   'Move…': 'move',

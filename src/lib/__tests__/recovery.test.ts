@@ -82,6 +82,7 @@ describe('context-menu gating (reads and Connect stay available)', () => {
     'connect',
     'test-credentials',
     'review-server-identity',
+    'share-folder',
     'edit',
     'duplicate',
     'move',

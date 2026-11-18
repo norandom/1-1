@@ -47,6 +47,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(commands::updater::UpdateState::default())
         .manage(commands::credential_check::CredentialChecks::default())
+        .manage(commands::folder_share::FolderShareDrafts::default())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(commands::native_clipboard::NativeClipboardState::default())
         .plugin(
@@ -221,6 +222,11 @@ pub fn run() {
             commands::credential_check::test_saved_credentials,
             commands::peer_identity::confirm_server_identity,
             commands::peer_identity::cancel_server_identity,
+            commands::folder_share::get_folder_share,
+            commands::folder_share::select_share_folder,
+            commands::folder_share::confirm_folder_share,
+            commands::folder_share::cancel_folder_share,
+            commands::folder_share::revoke_folder_share,
             commands::connection::import_rdp_file,
             commands::connection::test_connection,
             commands::connection::get_connection_password,

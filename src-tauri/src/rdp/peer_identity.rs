@@ -70,6 +70,12 @@ pub(crate) fn endpoint_key(endpoint: &Endpoint) -> String {
     }
 }
 
+/// The displayed form of a server key: `SHA256:` and unpadded base64.
+pub(crate) fn fingerprint(hash: &[u8; 32]) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
+    format!("SHA256:{}", STANDARD_NO_PAD.encode(hash))
+}
+
 /// The key of a saved host's address, or `None` when it is not a valid target.
 pub(crate) fn host_endpoint_key(host: &str, port: u16) -> Option<String> {
     ConnectionTarget::new(host, port)
@@ -283,9 +289,26 @@ pub(super) fn take_upgrade_stream<S>(framed: TokioFramed<S>) -> io::Result<S> {
 /// Review obtains a candidate only. The signature is checked, then this
 /// connection closes without credentials, static channels or application data.
 pub(crate) async fn discover(target: &ConnectionTarget<'_>) -> io::Result<ObservedPeer> {
+    discover_with(target, None).await
+}
+
+/// Like [`discover`], but the key must already be trusted: a valid chain
+/// for the endpoint's name, or the operator-confirmed pin. A folder grant is
+/// offered only for a trusted key; confirming a pin alone grants nothing.
+pub(crate) async fn discover_trusted(
+    target: &ConnectionTarget<'_>,
+    pin: Option<&ConfirmedPin>,
+) -> io::Result<ObservedPeer> {
+    discover_with(target, Some(pin)).await
+}
+
+async fn discover_with(
+    target: &ConnectionTarget<'_>,
+    trust: Option<Option<&ConfirmedPin>>,
+) -> io::Result<ObservedPeer> {
     tokio::time::timeout(Duration::from_secs(15), async {
         let stream = tokio::net::TcpStream::connect(target.socket_target()).await?;
-        discover_on_stream(stream, &target.endpoint).await
+        discover_on_stream(stream, &target.endpoint, trust).await
     })
     .await
     .map_err(|_| {
@@ -299,6 +322,7 @@ pub(crate) async fn discover(target: &ConnectionTarget<'_>) -> io::Result<Observ
 async fn discover_on_stream<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(
     mut stream: S,
     endpoint: &Endpoint,
+    trust: Option<Option<&ConfirmedPin>>,
 ) -> io::Result<ObservedPeer> {
     let request = X224(ConnectionRequest {
         nego_data: None,
@@ -322,7 +346,12 @@ async fn discover_on_stream<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(
         _ => return Err(io::Error::other("server did not select TLS")),
     }
     let mut tls = handshake(take_upgrade_stream(framed)?, endpoint).await?;
+    let trusted = match trust {
+        None => Ok(()),
+        Some(pin) => tls.verify(pin).await.map(|_| ()),
+    };
     tls.stream.shutdown().await?;
+    trusted?;
     Ok(tls.observed)
 }
 

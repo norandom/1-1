@@ -24,7 +24,7 @@ Task 1 delivers the server identity check shared with session actions. Task 2 pr
   - _Boundary: Windows drive dependencies and fixture_
   - _Requirements: 2.1, 2.2, 3.1, 3.2_
 
-- [ ] 3. Keep a single explicit folder grant per saved host
+- [x] 3. Keep a single explicit folder grant per saved host
 - [x] 3.1 Persist grants and invalidate them with profile mutations
   - Bind a grant to the profile ID, endpoint, server key, volume/directory identity, share name and mode. Serialize revocation with retargeting, import and single/cascaded deletion.
   - Test restart, failed save/revoke, changing an address away and back, display-name edits, duplicates and imports. Missing or corrupt data leaves sharing off. A stale grant never reactivates.
@@ -32,13 +32,14 @@ Task 1 delivers the server identity check shared with session actions. Task 2 pr
   - _Depends: 1.2_
   - _Requirements: 1.1, 1.2, 1.3, 1.4_
   - 2026-11-18: `store/share_grants.rs` keeps grants in `share-grants.json`. The library revokes them inside its transactions before a retarget or (cascaded) deletion commits, and reconciles them at startup and on reload. Independent review found no blocker. Carried into 3.2: confirmation must check the host and save the grant inside the library mutation lock.
-- [ ] 3.2 Integrate the native folder picker and grant controls
+- [x] 3.2 Integrate the native folder picker and grant controls
   - Issue opaque selections for local drive-letter subdirectories and reject volume roots. Show host/port, key, folder, portable name and mode together. Start at read-only and offer explicit read/write.
   - Register read, select, confirm and revoke commands. Reject expired selections or endpoint changes at confirmation. Cancel, failed writes and repeated revoke show the committed state.
   - In the saved-host editor, saving shows “next connection.” An active grant displays how to end access immediately by disconnecting. Confirming a new host key alone leaves the folder withheld.
   - _Boundary: Host editor and folder grant command integration_
   - _Depends: 2, 3.1_
   - _Requirements: 1.1, 1.2, 1.3, 1.4_
+  - 2026-11-18: `commands/folder_share.rs` adds get/select/confirm/cancel/revoke. A folder is offered only after a fresh connection proves a trusted key (chain or confirmed pin). The chosen directory must resolve to itself (no link, junction or substituted drive on the way), sit on a local NTFS/ReFS drive letter and keep its volume/file ID until confirmation, which saves under the library lock. The UI is **Share folder…** in the saved-host menu and a summary in the host editor; it states that sessions do not offer the folder yet. Independent review: no blockers; both should-fixes resolved. Left for later: a rotated server key still shows the grant as saved (effective status is 5.3), and the trust check is not repeated if the picker stays open for a long time (5.2 re-verifies the session key).
 
 - [ ] 4. Confine Windows filesystem requests to the granted directory
 - [ ] 4.1 (P) Bind the selected root and retain descendant handles
