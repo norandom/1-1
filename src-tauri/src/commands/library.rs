@@ -18,6 +18,7 @@
 
 use tauri::State;
 
+use super::credential_check::CredentialChecks;
 use crate::commands::deletion::{DeletionReport, delete_library_coordinated};
 use crate::rdp::session::SessionManager;
 use crate::store::credentials::CredentialStore;
@@ -108,7 +109,9 @@ pub async fn move_node(
     target_kind: String,
     target_id: String,
     store: State<'_, LibraryStore>,
+    checks: State<'_, CredentialChecks>,
 ) -> Result<(), String> {
+    let _placement = checks.library_gate.read().await;
     let node = parse_node(&kind, &id)?;
     let target = parse_node(&target_kind, &target_id)?;
     store.move_node(node, target).map_err(to_message)?;
@@ -157,8 +160,18 @@ pub async fn delete_library(
     store: State<'_, LibraryStore>,
     cred_store: State<'_, CredentialStore>,
     session_mgr: State<'_, SessionManager>,
+    checks: State<'_, CredentialChecks>,
 ) -> Result<DeletionReport, String> {
-    let report = delete_library_coordinated(&id, &store, &cred_store, &session_mgr).await?;
+    // A connection cannot be moved into the cascade or start a check between
+    // this preview and deletion. Existing checks in other libraries continue.
+    let _cascade = checks.library_gate.write().await;
+    let ids = store.library_connection_ids(&id).map_err(to_message)?;
+    let report = checks
+        .publish_library(
+            Some(&ids),
+            delete_library_coordinated(&id, &store, &cred_store, &session_mgr),
+        )
+        .await?;
     log::info!(
         "Deleted library {}: removed {} folder(s) and {} connection(s), stopped {} session(s), \
          {} orphaned credential(s)",
@@ -199,9 +212,17 @@ pub async fn get_library_status(store: State<'_, LibraryStore>) -> Result<StoreS
 /// Re-run the load/migration from disk (the only path out of write-blocked
 /// recovery, Req 10.12) and report the resulting store mode.
 #[tauri::command]
-pub async fn reload_library_store(store: State<'_, LibraryStore>) -> Result<StoreStatus, String> {
-    store.reload().map_err(|e| e.to_string())?;
-    Ok(store.status())
+pub async fn reload_library_store(
+    store: State<'_, LibraryStore>,
+    checks: State<'_, CredentialChecks>,
+) -> Result<StoreStatus, String> {
+    let _replace = checks.library_gate.write().await;
+    checks
+        .publish_library(None, async {
+            store.reload().map_err(|e| e.to_string())?;
+            Ok(store.status())
+        })
+        .await
 }
 
 #[cfg(test)]

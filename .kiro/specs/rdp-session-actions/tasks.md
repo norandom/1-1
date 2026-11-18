@@ -45,7 +45,7 @@ The independent Kiro task-plan review passed on 18 November 2026. The review cov
   - Allowlist returned reasons and suppress sensitive protocol traces in verbose mode. Use fragmented server messages and a sentinel credential to verify the outcome and prove UI payloads, diagnostics and exported connection data omit secrets and token dumps.
   - _Boundary: Credential probe driver_
   - _Requirements: 1.3, 1.4, 1.5, 1.9_
-- [ ] 2.3 Integrate the probe with saved-host edits, keyring and deadline
+- [x] 2.3 Integrate the probe with saved-host edits, keyring and deadline
   - Accept only a saved host ID. Start one 30-second deadline before store or keyring lookup, coalesce repeated requests per host revision and release locks before network I/O.
   - Invalidate on endpoint, user, domain, saved secret, deletion and replacement/import changes. Cancel the old exchange, ignore late blocking lookups and reload effective values after a partial save. Only publish the result of the still-current revision.
   - Race duplicate requests and profile edits with delayed keyring and protocol fixtures. Observe one attempt for the unchanged revision, bounded completion on timeout, closure of an open socket and zero late writes or stale results.
