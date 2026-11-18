@@ -29,6 +29,8 @@
   "nextest": {
     "version": "0.9.150",
     "linuxTarball": "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-unknown-linux-gnu.tar.gz",
+    "windowsZip": "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-pc-windows-msvc.zip",
+    "windowsZipSha256": "6fd8f9ba48c946a79a5bcdd35bf4f922447b149f7ca6c3ff7f39e12f32ef78db",
     "note": "cargo-nextest is CI/developer tooling, never an application dependency. Pinned prebuilt release tarball (the get.nexte.st convenience URL resolves to an unpinned floating release, which this repository forbids). Same pin as nextest-version.required in src-tauri/.config/nextest.toml and $DriftNextestMinVersion in scripts/Invoke-CI.ps1."
   },
   "tauriLinuxAptPackages": [

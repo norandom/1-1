@@ -962,8 +962,11 @@ try {
     } 'CT14l the Windows job invokes the canonical native tier commands (preflight, frontend, rust) — one command per tier (Req 13.4)'
     Assert-That {
         $ctWinBlock -match ('rustup toolchain install ' + [regex]::Escape($ctPins.rust.toolchain)) -and
-        $ctWinBlock -match ('cargo install cargo-nextest --locked --version ' + [regex]::Escape($ctPins.nextest.version))
-    } 'CT14m the Windows toolchain and cargo-nextest installs match the ci-versions.json pins'
+        $ctWinBlock -match [regex]::Escape('$pins.nextest.windowsZip') -and
+        $ctWinBlock -match [regex]::Escape('$pins.nextest.windowsZipSha256') -and
+        $ctPins.nextest.windowsZip -match [regex]::Escape("cargo-nextest-$($ctPins.nextest.version)-x86_64-pc-windows-msvc.zip") -and
+        $ctPins.nextest.windowsZipSha256 -match '^[0-9a-f]{64}$'
+    } 'CT14m the Windows toolchain matches the pin and cargo-nextest is the pinned prebuilt release, checksum verified'
     Assert-That {
         $ctWinBlock -match 'npx tauri build' -and
         $ctWinBlock -match [regex]::Escape('bundle/nsis/*.exe') -and
@@ -971,14 +974,17 @@ try {
     } 'CT14n the Windows job builds and publishes the NSIS installer; a missing installer fails the job (Req 8.4, no fake pass)'
     Assert-That { $ctWinBlock -match [regex]::Escape('D:\BuildArtifacts\drift-rdp') } 'CT14o the Windows job publishes the tiers scoped failure reports under D:\BuildArtifacts\drift-rdp (Req 12.7)'
 
-    # j) native macOS exception: bundle jobs for BOTH architectures.
+    # j) native macOS exception: Apple Silicon on every run, Intel on a manual
+    #    dispatch (user decision 2026-11-18).
     $ctMacBlock = [regex]::Match($ctWf, '(?ms)^  macos-bundle:.*?(?=^  [a-z][a-z0-9-]*:|\z)').Value
+    $ctMacMatrix = [regex]::Match($ctMacBlock, "fromJSON\(github\.event_name == 'workflow_dispatch' && '(?<dispatch>[^']+)' \|\| '(?<push>[^']+)'\)")
     Assert-That {
-        $ctMacBlock -match [regex]::Escape('os: macos-15') -and
-        $ctMacBlock -match [regex]::Escape('target: aarch64-apple-darwin') -and
-        $ctMacBlock -match [regex]::Escape('os: macos-15-intel') -and
-        $ctMacBlock -match [regex]::Escape('target: x86_64-apple-darwin')
-    } 'CT14p the macOS bundle matrix preserves BOTH architectures (aarch64 + x86_64, Req 7.2)'
+        $ctMacMatrix.Success -and
+        $ctMacMatrix.Groups['dispatch'].Value -match [regex]::Escape('"os":"macos-15","target":"aarch64-apple-darwin"') -and
+        $ctMacMatrix.Groups['dispatch'].Value -match [regex]::Escape('"os":"macos-15-intel","target":"x86_64-apple-darwin"') -and
+        $ctMacMatrix.Groups['push'].Value -match [regex]::Escape('"os":"macos-15","target":"aarch64-apple-darwin"') -and
+        $ctMacMatrix.Groups['push'].Value -notmatch 'x86_64'
+    } 'CT14p the macOS bundle builds aarch64 on every run and adds x86_64 on a manual dispatch'
     Assert-That {
         $ctMacBlock -match 'fail-fast:\s*false' -and
         $ctMacBlock -match 'npx tauri build --target \$\{\{ matrix\.target \}\}'
