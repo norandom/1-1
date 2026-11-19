@@ -144,6 +144,28 @@ mod windows_policy {
                     .contains(CreateOptions::FILE_DELETE_ON_CLOSE))
     }
 
+    /// RDPDR paths use backslashes, but xrdp sends some requests (its reads,
+    /// for one) with forward slashes, such as `/report.pdf`. The native backend
+    /// would refuse those as rooted paths. A Windows file name cannot contain
+    /// `/`, so it can only be a separator; `..` is still refused afterwards.
+    pub(super) fn normalize_separators(req: &mut ServerDriveIoRequest) {
+        let fix = |path: &mut String| {
+            if path.contains('/') {
+                *path = path.replace('/', "\\");
+            }
+        };
+        match req {
+            ServerDriveIoRequest::ServerCreateDriveRequest(create) => fix(&mut create.path),
+            ServerDriveIoRequest::ServerDriveQueryDirectoryRequest(query) => fix(&mut query.path),
+            ServerDriveIoRequest::ServerDriveSetInformationRequest(set) => {
+                if let FileInformationClass::Rename(rename) = &mut set.set_buffer {
+                    fix(&mut rename.file_name);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// A change is safe only for a new entry or one with a single name.
     fn may_change(root: &Path, remote_path: &str) -> bool {
         matches!(link_count(root, remote_path), Ok(None | Some(0 | 1)))
@@ -300,8 +322,9 @@ mod windows_policy {
 
         fn handle_drive_io_request(
             &mut self,
-            req: ServerDriveIoRequest,
+            mut req: ServerDriveIoRequest,
         ) -> PduResult<Vec<SvcMessage>> {
+            normalize_separators(&mut req);
             if let Some(refusal) = privilege_refusal(&req)? {
                 return Ok(vec![refusal]);
             }

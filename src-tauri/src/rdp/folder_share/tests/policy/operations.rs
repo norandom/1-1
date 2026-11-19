@@ -314,3 +314,30 @@ fn local_programs_and_permissions_are_reported_to_the_remote() {
     permissions.set_readonly(false);
     fs::set_permissions(&locked, permissions).unwrap();
 }
+
+#[test]
+fn forward_slash_paths_from_xrdp_reach_the_same_files() {
+    let mut drive = drive_with(false, true);
+    fs::create_dir(drive.root.join("docs")).unwrap();
+    fs::write(drive.root.join(r"docs\report.pdf"), b"pdf bytes").unwrap();
+
+    // xrdp opens files for reading with a leading forward slash.
+    let file = drive.open("/docs/report.pdf", DesiredAccess::GENERIC_READ);
+    assert_eq!(drive.read(file, 0, 64).data(), b"pdf bytes");
+    assert_eq!(drive.close(file), SUCCESS);
+
+    let moving = drive.open("/docs/report.pdf", DesiredAccess::DELETE);
+    assert_eq!(drive.rename_to(moving, "/docs/renamed.pdf", false), SUCCESS);
+    drive.close(moving);
+    assert!(drive.root.join(r"docs\renamed.pdf").is_file());
+    assert!(drive.listed(r"\docs", "renamed.pdf"));
+
+    // A forward slash is still no way out of the share.
+    let escape = drive.create(
+        "/../outside.txt",
+        rw(),
+        CreateDisposition::FILE_CREATE,
+        CreateOptions::empty(),
+    );
+    assert_ne!(escape.status, SUCCESS);
+}

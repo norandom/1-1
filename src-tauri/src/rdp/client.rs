@@ -472,6 +472,17 @@ pub(crate) async fn attempt_rdp_connection_with_share(
         connection_result.desktop_size.width,
         connection_result.desktop_size.height
     );
+    // Which static channels the server joined, by MCS channel ID.
+    log::info!(
+        "Static channels: drive {:?}, clipboard {:?}, I/O {}",
+        connection_result
+            .static_channels
+            .get_channel_id_by_type::<ironrdp_rdpdr::Rdpdr>(),
+        connection_result
+            .static_channels
+            .get_channel_id_by_type::<ironrdp_cliprdr::CliprdrClient>(),
+        connection_result.io_channel_id
+    );
 
     ConnectionOutcome::RealSession {
         connection_result: Box::new(connection_result),

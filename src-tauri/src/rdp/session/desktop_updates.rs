@@ -108,6 +108,20 @@ impl DesktopUpdate {
     }
 }
 
+/// Log the first data on each static channel, so the app log shows which
+/// channels the server actually uses (folder sharing diagnosis).
+fn first_on_channel(channel_id: u16, bytes: usize) {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<u16>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if seen.insert(channel_id) {
+        log::info!("First data on static channel {channel_id} ({bytes} bytes)");
+    }
+}
+
 fn process_x224(
     stage: &mut ActiveStage,
     image: &mut DecodedImage,
@@ -118,6 +132,11 @@ fn process_x224(
     use ironrdp_pdu::rdp::headers::{ShareControlPduType, ShareDataPduType};
     use ironrdp_pdu::x224::X224;
     let mut desktop = DesktopUpdate::default();
+    if let Ok(ctx) = decode_send_data_indication(payload)
+        && ctx.channel_id != io_channel_id
+    {
+        first_on_channel(ctx.channel_id, ctx.user_data.len());
+    }
     let Some(ctx) = decode_send_data_indication(payload)
         .ok()
         .filter(|ctx| ctx.channel_id == io_channel_id)
