@@ -43,7 +43,7 @@ import {
   treeItemLabel,
 } from '../../lib/tree-a11y';
 import { contextMenuItems, isSessionActive, menuActionFor } from '../../lib/tree-menu';
-import { sessionRouteIdFromPath } from '../../lib/session-route';
+import { sessionForConnection, sessionRoute, sessionRouteIdFromPath } from '../../lib/session-route';
 import { isMenuActionBlocked, RECOVERY_BLOCKED_MESSAGE } from '../../lib/recovery';
 import { dragEventToMove, moveDestinations, moveTreeNodes } from '../../lib/tree-move';
 import type { MoveOutcome, MoveTrigger } from '../../lib/tree-move';
@@ -735,6 +735,11 @@ export function ConnectionTree() {
                   setFocusedKey(key);
                   // Single-click library/folder → its dashboard (10.5).
                   if (node.kind !== 'connection') showDashboard();
+                  // A host with an open tab: show that tab. Clicking never connects.
+                  else {
+                    const open = sessionForConnection(useSessionStore.getState().sessions.values(), node.id);
+                    if (open && sessionRouteIdFromPath(window.location.pathname) !== open.id) navigate(sessionRoute(open.id));
+                  }
                 }}
                 onConnect={connectNode}
                 onOpenMenu={openMenu}
