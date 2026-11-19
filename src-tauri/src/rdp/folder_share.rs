@@ -11,6 +11,8 @@
 //! mismatch, link or unavailable folder fails closed and the drive is not
 //! offered.
 
+pub(crate) mod worker;
+
 #[cfg(windows)]
 pub(crate) use windows_policy::ShareBackend;
 #[cfg(windows)]
