@@ -48,6 +48,20 @@ fn initial_config(
     Ok(config)
 }
 
+/// The password a session dials with: one entered at connect, otherwise the
+/// keychain's, and only for a host that saves its password.
+fn session_password(
+    entered: Option<String>,
+    host_saves: bool,
+    keychain: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    match entered.filter(|password| !password.is_empty()) {
+        Some(password) => Ok(Some(password)),
+        None if host_saves => keychain(),
+        None => Ok(None),
+    }
+}
+
 #[tauri::command]
 pub async fn pause_display(
     session_id: String,
@@ -102,6 +116,9 @@ pub async fn connect(
     connection_id: String,
     frame_channel: Channel<InvokeResponseBody>,
     initial_size: Option<InitialSize>,
+    // Entered at connect for a host that does not save its password, or has
+    // none saved; held by the session only.
+    password: Option<String>,
     // Task 5.3 (Req 12.2/12.10): optional command-level mock flag. Absent
     // or `false` is a normal real connection request.
     mock: Option<bool>,
@@ -139,8 +156,9 @@ pub async fn connect(
         config.host_profile.resize_mode
     );
 
-    // Look up the password from the credential store
-    let password = match cred_store.get_password(&connection_id) {
+    let password = match session_password(password, config.host_profile.save_password, || {
+        cred_store.get_password(&connection_id)
+    }) {
         Ok(pw) => pw,
         Err(e) => {
             log::warn!(
@@ -260,6 +278,32 @@ mod viewport_tests {
             saved
         );
         assert!(serde_json::from_str::<InitialSize>(r#"{"width":-1,"height":600}"#).is_err());
+    }
+
+    #[test]
+    fn an_entered_password_wins_and_the_keychain_serves_only_hosts_that_save() {
+        let keychain = || Ok(Some("saved".to_string()));
+        let entered = Some("typed".to_string());
+        assert_eq!(
+            session_password(entered.clone(), true, keychain),
+            Ok(Some("typed".into()))
+        );
+        assert_eq!(
+            session_password(entered, false, keychain),
+            Ok(Some("typed".into()))
+        );
+        assert_eq!(
+            session_password(None, true, keychain),
+            Ok(Some("saved".into()))
+        );
+        assert_eq!(
+            session_password(Some(String::new()), true, keychain),
+            Ok(Some("saved".into()))
+        );
+        let untouched = || -> Result<Option<String>, String> {
+            panic!("keychain read for a host that does not save")
+        };
+        assert_eq!(session_password(None, false, untouched), Ok(None));
     }
 
     #[test]

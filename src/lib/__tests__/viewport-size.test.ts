@@ -30,6 +30,13 @@ describe('display scaling', () => {
     expect(sessionPixelRatio('lowResolution', 2)).toBe(1);
     expect(sessionPixelRatio('automatic', 2)).toBe(2);
   });
+  it('uses the chosen percentage for Custom, whatever the display density', () => {
+    expect(remoteViewport(1440, 900, 'custom', 2, 150)).toEqual({ width: 2880, height: 1800, scale: 150 });
+    expect(remoteViewport(1280, 720, 'custom', 1, 125)).toEqual({ width: 1280, height: 720, scale: 125 });
+    expect(desktopScale('custom', 2, 900)).toBe(500);
+    expect(desktopScale('custom', 2, NaN)).toBe(100);
+    expect(desktopScale('off', 2, 200)).toBe(100);
+  });
   it('rounds fractional densities and stays within RDP limits', () => {
     expect(desktopScale('automatic', 5 / 3)).toBe(167);
     expect(desktopScale('automatic', 0.8)).toBe(100);

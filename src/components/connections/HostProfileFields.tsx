@@ -1,6 +1,6 @@
 import type { HostProfile } from '../../types';
 import { IDLE_PREVIEW_HELP, IDLE_PREVIEW_LABEL } from '../../lib/idle-preview';
-import { SCALING_HELP, SCALING_OPTIONS, CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
+import { SCALE_PERCENT_OPTIONS, SCALING_HELP, SCALING_OPTIONS, CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
 import { Switch } from '@/components/ui/switch';
 
 interface Props {
@@ -29,6 +29,11 @@ export function HostProfileFields({ profile, fontSmoothing, onChange }: Props) {
           {SCALING_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
         </select>
       </label>
+      {profile.scaling === 'custom' && <label className="flex items-center justify-between gap-3 text-sm">Scale
+        <select className={selectClass} aria-describedby="scaling-help" value={profile.scalePercent} onChange={(e) => onChange({ ...profile, scalePercent: Number(e.target.value) }, fontSmoothing)}>
+          {SCALE_PERCENT_OPTIONS.map((percent) => <option key={percent} value={percent}>{percent}%</option>)}
+        </select>
+      </label>}
       <p id="scaling-help" className="text-xs text-muted-foreground">{SCALING_HELP}</p>
       <p className="text-xs text-muted-foreground">Display size and automatic resizing apply immediately after saving. Fixed mode uses the saved resolution on the next connection.</p>
     </fieldset>

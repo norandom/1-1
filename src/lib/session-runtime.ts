@@ -6,6 +6,7 @@ import { compositeFrameRects, type CompositingSurface } from './canvas-composito
 import { parseFramePacket, toFrameBytes, type FrameMessage, type FrameDeliveryMessage } from './frame-protocol';
 import { normalizeSessionInfo } from './session-info';
 import * as tauri from './tauri';
+import { connectPassword } from './connect-password';
 import type { ViewportSize } from './viewport-size';
 
 export type FrameListener = (frame: Uint8Array, consumed?: () => void) => void;
@@ -149,7 +150,12 @@ async function startSession(connectionId: string, existing?: SessionInfo, initia
         console.error('Failed to consume session frame:', error);
       }
     });
-    id = await tauri.connect(connectionId, runtime.channel, initialSize);
+    // Asking happens inside the attempt: a second Connect waits on the same
+    // prompt, and closing the tab meanwhile cancels it. No await without one.
+    const asking = connectPassword(connectionId);
+    const password = asking && await asking;
+    if (runtime.disposed) throw new Error('Session closed while connecting');
+    id = await tauri.connect(connectionId, runtime.channel, initialSize, password);
     if (runtime.disposed) {
       await tauri.disconnect(id);
       throw new Error('Session closed while connecting');

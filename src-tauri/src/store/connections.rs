@@ -110,6 +110,8 @@ pub enum DisplayScaling {
     Automatic,
     /// Physical pixels at 100%: the most desktop space, small text on HiDPI.
     Off,
+    /// Physical pixels at a chosen scale (`HostProfile::scale_percent`).
+    Custom,
     /// One remote pixel per logical local pixel at 100%, enlarged locally.
     LowResolution,
 }
@@ -133,6 +135,11 @@ pub struct HostProfile {
     pub network_hint: NetworkHint,
     pub bottom_bar: BottomBar,
     pub scaling: DisplayScaling,
+    /// The scale in percent for `DisplayScaling::Custom`.
+    pub scale_percent: u32,
+    /// Keep this host's password in the system keychain. When off, 1-1 asks
+    /// for it at connect and holds it only for that session.
+    pub save_password: bool,
     /// The desktop scale factor (100–500%) requested for the running session,
     /// measured by the window at connect and resize. Runtime only, never saved.
     #[serde(skip)]
@@ -157,6 +164,8 @@ impl Default for HostProfile {
             network_hint: NetworkHint::Lan,
             bottom_bar: BottomBar::Always,
             scaling: DisplayScaling::Automatic,
+            scale_percent: 100,
+            save_password: true,
             desktop_scale: None,
         }
     }

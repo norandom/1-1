@@ -21,6 +21,7 @@ import { RecoveryBanner } from './components/layout/RecoveryBanner';
 import { SettingsPage } from './components/settings/SettingsPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastContainer } from './components/Toast';
+import { ConnectPasswordDialog } from './components/connections/ConnectPasswordDialog';
 import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { useTheme } from './hooks/useTheme';
 import { useKeyboard } from './hooks/useKeyboard';
@@ -116,6 +117,7 @@ export default function App() {
 
         {/* Toast Notifications */}
         <ToastContainer />
+        <ConnectPasswordDialog />
 
         {/* Quick Connect Modal */}
         <QuickConnect />

@@ -189,7 +189,14 @@ export function ConnectionForm({ connection, onClose }: Props) {
           {/* Password */}
           <div className="grid gap-2">
             <Label htmlFor="password">Password</Label>
-            <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Enter password" />
+            {hostProfile.savePassword
+              ? <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={isEdit ? 'Leave empty to keep the saved password' : 'Enter password'} />
+              : <p id="password" className="text-xs text-muted-foreground">1-1 asks for the password when you connect and keeps it only for that session.</p>}
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={hostProfile.savePassword} onChange={(e) => setHostProfile({ ...hostProfile, savePassword: e.target.checked })} />
+              Save password in the system keychain
+            </label>
+            {isEdit && !hostProfile.savePassword && normalizeHostProfile(connection?.hostProfile).savePassword && <p className="text-xs text-muted-foreground">Saving removes the stored password from the keychain.</p>}
           </div>
 
           <Separator />

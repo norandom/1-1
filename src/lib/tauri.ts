@@ -142,8 +142,8 @@ export async function measureLatency(host: string, port: number): Promise<number
 
 // ── Session Management ──────────────────────────────────────────────
 
-export async function connect(connectionId: string, frameChannel: Channel<FrameMessage>, initialSize?: ViewportSize): Promise<string> {
-  return await invoke<string>('connect', { connectionId, frameChannel, ...(initialSize ? { initialSize } : {}) });
+export async function connect(connectionId: string, frameChannel: Channel<FrameMessage>, initialSize?: ViewportSize, password?: string): Promise<string> {
+  return await invoke<string>('connect', { connectionId, frameChannel, ...(initialSize ? { initialSize } : {}), ...(password ? { password } : {}) });
 }
 
 export async function frameConsumed(sessionId: string, receipt: FrameReceipt, refresh = false): Promise<void> {
@@ -246,6 +246,11 @@ export async function getFrame(sessionId: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** Whether the keychain holds a password for this host; the password itself stays in the backend. */
+export async function hasSavedPassword(id: string): Promise<boolean> {
+  return await invoke<boolean>('has_saved_password', { id });
 }
 
 export async function getConnectionPassword(id: string): Promise<string | null> {

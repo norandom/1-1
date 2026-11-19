@@ -10,6 +10,8 @@ export const DEFAULT_HOST_PROFILE: Readonly<HostProfile> = Object.freeze({
   colorDepth: '32', bulkCompression: 'off',
   bottomBar: 'always',
   scaling: 'automatic',
+  scalePercent: 100,
+  savePassword: true,
 });
 
 /** Defaults missing legacy fields without losing explicit false preferences. */
@@ -31,6 +33,8 @@ export function normalizeHostProfile(profile?: Partial<HostProfile> | null): Hos
     networkHint: profile?.networkHint ?? DEFAULT_HOST_PROFILE.networkHint,
     bottomBar: profile?.bottomBar ?? DEFAULT_HOST_PROFILE.bottomBar,
     scaling: profile?.scaling ?? DEFAULT_HOST_PROFILE.scaling,
+    scalePercent: profile?.scalePercent ?? DEFAULT_HOST_PROFILE.scalePercent,
+    savePassword: profile?.savePassword ?? DEFAULT_HOST_PROFILE.savePassword,
   };
 }
 

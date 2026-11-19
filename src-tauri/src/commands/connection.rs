@@ -23,15 +23,20 @@ fn to_message(error: LibraryStoreError) -> String {
 
 /// Store a submitted password in the OS credential store (Req 1.2), never
 /// in the connection file: absent/empty passwords leave the keyring alone.
+/// A host that does not save its password keeps none: a stored one is
+/// removed and a submitted one is not written.
 fn store_password_if_provided(
     cred_store: &CredentialStore,
-    id: &str,
+    connection: &ConnectionConfig,
     password: Option<&str>,
 ) -> Result<(), String> {
+    if !connection.host_profile.save_password {
+        return cred_store.delete_password(&connection.id);
+    }
     if let Some(pw) = password
         && !pw.is_empty()
     {
-        cred_store.store_password(id, pw)?;
+        cred_store.store_password(&connection.id, pw)?;
     }
     Ok(())
 }
@@ -68,7 +73,7 @@ pub async fn create_connection(
 
     // Store password in the OS credential store if provided (Req 1.2);
     // the store file never contains it.
-    store_password_if_provided(&cred_store, &conn.id, password.as_deref())?;
+    store_password_if_provided(&cred_store, &conn, password.as_deref())?;
 
     log::info!("Created connection: {} ({})", conn.name, conn.id);
     Ok(conn)
@@ -104,7 +109,7 @@ pub(super) async fn update_saved_connection(
             // silently dropped; it now reaches the keyring AFTER the store
             // transaction committed (mirroring create; unchanged passwords arrive
             // as absent/empty and leave the entry alone).
-            store_password_if_provided(cred_store, id, password.as_deref())?;
+            store_password_if_provided(cred_store, &updated, password.as_deref())?;
 
             Ok(updated)
         })
@@ -212,6 +217,18 @@ pub async fn test_connection(host: String, port: u16) -> Result<bool, String> {
 #[tauri::command]
 pub async fn measure_latency(host: String, port: u16) -> Result<Option<u64>, String> {
     crate::utils::network::measure_tcp_latency(&host, port, 5000).await
+}
+
+/// Whether the keychain holds a password for this host, without reading it
+/// out to the window.
+#[tauri::command]
+pub async fn has_saved_password(
+    id: String,
+    cred_store: State<'_, CredentialStore>,
+) -> Result<bool, String> {
+    cred_store
+        .get_password(&id)
+        .map(|password| password.is_some())
 }
 
 #[tauri::command]

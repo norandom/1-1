@@ -109,12 +109,13 @@ function SessionContent() {
     if (sessionId === null || profile.resizeMode === 'fixed') return;
     const viewport = viewportRef.current;
     const initialSize = viewport
-      ? remoteViewport(viewport.offsetWidth, viewport.offsetHeight, profile.scaling, window.devicePixelRatio)
+      ? remoteViewport(viewport.offsetWidth, viewport.offsetHeight, profile.scaling, window.devicePixelRatio, profile.scalePercent)
       : undefined;
     const scheduler = createTrailingResizeScheduler((width, height) => {
       // The scale follows the saved setting and this display at emit time.
       const current = useConnectionStore.getState().connections.find((c) => c.id === resolvedConnectionId);
-      const scale = desktopScale(normalizeHostProfile(current?.hostProfile).scaling, window.devicePixelRatio);
+      const saved = normalizeHostProfile(current?.hostProfile);
+      const scale = desktopScale(saved.scaling, window.devicePixelRatio, saved.scalePercent);
       tauri.resizeSession(sessionId, width, height, scale).catch(() => {});
     }, undefined, () => {
       // Recheck the committed preference at emit time as well as effect cleanup.
@@ -126,7 +127,7 @@ function SessionContent() {
       scheduler.cancel();
       if (resizeSchedulerRef.current === scheduler) resizeSchedulerRef.current = null;
     };
-  }, [sessionId, resolvedConnectionId, profile.resizeMode, profile.scaling]);
+  }, [sessionId, resolvedConnectionId, profile.resizeMode, profile.scaling, profile.scalePercent]);
 
   // The existing session for a transitional route's connection, if any
   // — the input the pure swap/guard decisions below consume.
@@ -180,7 +181,8 @@ function SessionContent() {
     const viewport = viewportRef.current;
     if (!viewport) return undefined;
     // A fixed resolution ignores the measured size but still uses the scale.
-    return remoteViewport(viewport.offsetWidth, viewport.offsetHeight, normalizeHostProfile(saved?.hostProfile).scaling, window.devicePixelRatio);
+    const host = normalizeHostProfile(saved?.hostProfile);
+    return remoteViewport(viewport.offsetWidth, viewport.offsetHeight, host.scaling, window.devicePixelRatio, host.scalePercent);
   }, []);
   useEffect(() => {
     connectRef.current = connect;

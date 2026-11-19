@@ -230,6 +230,7 @@ pub fn run() {
             commands::connection::import_rdp_file,
             commands::connection::test_connection,
             commands::connection::get_connection_password,
+            commands::connection::has_saved_password,
             commands::connection::measure_latency,
             commands::connection::import_ssh_config,
             // Clipboard commands

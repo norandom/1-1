@@ -17,14 +17,17 @@ export function sessionPixelRatio(scaling: DisplayScaling, dpr: number): number 
   return scaling === 'lowResolution' ? 1 : dpr;
 }
 
-/** Desktop scale factor in percent: this display's density for Automatic, otherwise 100%. */
-export function desktopScale(scaling: DisplayScaling, dpr: number): number {
+const clampScale = (percent: number) => Math.min(500, Math.max(100, Math.round(percent)));
+
+/** Desktop scale factor in percent: this display's density for Automatic, the chosen one for Custom, otherwise 100%. */
+export function desktopScale(scaling: DisplayScaling, dpr: number, percent = 100): number {
+  if (scaling === 'custom') return Number.isFinite(percent) ? clampScale(percent) : 100;
   if (scaling !== 'automatic' || !Number.isFinite(dpr) || dpr <= 0) return 100;
-  return Math.min(500, Math.max(100, Math.round(dpr * 100)));
+  return clampScale(dpr * 100);
 }
 
 /** The remote size and scale for a CSS viewport under a host's scaling setting. */
-export function remoteViewport(width: number, height: number, scaling: DisplayScaling, dpr: number): ViewportSize | undefined {
+export function remoteViewport(width: number, height: number, scaling: DisplayScaling, dpr: number, percent = 100): ViewportSize | undefined {
   const size = physicalViewport(width, height, sessionPixelRatio(scaling, dpr));
-  return size && { ...size, scale: desktopScale(scaling, dpr) };
+  return size && { ...size, scale: desktopScale(scaling, dpr, percent) };
 }
