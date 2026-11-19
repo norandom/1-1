@@ -336,6 +336,8 @@ struct SessionActor {
     shared_frame: Option<Arc<SharedFrame>>,
     /// The current connection's shared folders' status (task 5.3).
     share_status: Vec<crate::rdp::folder_share::status::ShareStatusCell>,
+    /// Where a busy share spends the session loop's time, logged each second.
+    share_perf: SharePerf,
 }
 
 impl SessionActor {
@@ -390,6 +392,7 @@ impl SessionActor {
             connect,
             shared_frame,
             share_status: Default::default(),
+            share_perf: SharePerf::default(),
         }
     }
 
@@ -1081,6 +1084,7 @@ impl SessionActor {
         writer: &mut ironrdp_tokio::Framed<SW>,
     ) -> Result<(), DisconnectReason> {
         use ironrdp_tokio::FramedWrite as _;
+        let started = std::time::Instant::now();
         let Some(rdpdr) =
             stage.get_svc_processor_mut::<crate::rdp::folder_share::channel::DriveChannel>()
         else {
@@ -1107,10 +1111,13 @@ impl SessionActor {
                 return Ok(());
             }
         };
+        let encoded = started.elapsed();
         if let Err(error) = writer.write_all(&frame).await {
             self.last_error = Some(format!("Folder share write failed: {error}"));
             return Err(DisconnectReason::ConnectionLost);
         }
+        self.share_perf
+            .sent(frame.len(), encoded, started.elapsed() - encoded);
         Ok(())
     }
 
@@ -1251,7 +1258,11 @@ impl SessionActor {
 
                     // `received_at: None` preserves the pre-0.13 behavior: the
                     // timestamp only feeds upstream's new bandwidth auto-detect.
-                    let (outputs, desktop) = match desktop_updates::process(&mut active_stage, &mut image, action, &payload, activation_factory.io_channel_id()) {
+                    let process_started = std::time::Instant::now();
+                    let processed = desktop_updates::process(&mut active_stage, &mut image, action, &payload, activation_factory.io_channel_id());
+                    self.share_perf.received(process_started.elapsed());
+                    self.share_perf.report(&self.id, &mut active_stage);
+                    let (outputs, desktop) = match processed {
                         Ok(outputs) => outputs,
                         Err(e) => {
                             log::warn!("Session {} process error: {}", self.id, e);
@@ -2246,6 +2257,87 @@ fn reset_software_pointer(
     frame.extend(update);
     stage.process(image, ironrdp_pdu::Action::FastPath, &frame, None)?;
     Ok(())
+}
+
+/// Session-loop timings while a share is busy, for one log line per second.
+#[derive(Default)]
+struct SharePerf {
+    since: Option<std::time::Instant>,
+    batches: u32,
+    bytes: usize,
+    encode: std::time::Duration,
+    encode_max: std::time::Duration,
+    write: std::time::Duration,
+    write_max: std::time::Duration,
+    pdus: u32,
+    process: std::time::Duration,
+    process_max: std::time::Duration,
+}
+
+impl SharePerf {
+    fn received(&mut self, took: std::time::Duration) {
+        self.pdus += 1;
+        self.process += took;
+        self.process_max = self.process_max.max(took);
+    }
+
+    fn sent(&mut self, bytes: usize, encode: std::time::Duration, write: std::time::Duration) {
+        self.since.get_or_insert_with(std::time::Instant::now);
+        self.batches += 1;
+        self.bytes += bytes;
+        self.encode += encode;
+        self.encode_max = self.encode_max.max(encode);
+        self.write += write;
+        self.write_max = self.write_max.max(write);
+    }
+
+    /// One line per second while file replies are going out.
+    fn report(&mut self, session: &str, stage: &mut ironrdp_session::ActiveStage) {
+        let Some(since) = self.since else {
+            *self = Self::default();
+            return;
+        };
+        if since.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        #[cfg(any(windows, test))]
+        let worker = stage
+            .get_svc_processor::<crate::rdp::folder_share::channel::DriveChannel>()
+            .and_then(|channel| {
+                channel
+                    .0
+                    .downcast_backend::<crate::rdp::folder_share::worker::WorkerBackend>()
+            })
+            .map(|worker| worker.take_perf())
+            .unwrap_or_default();
+        #[cfg(any(windows, test))]
+        log::info!(
+            "Session {session} folder share, last {:.1}s: {} replies, wait avg {:.1} ms max {:.1} ms, disk {:.0} ms max {:.1} ms; loop sent {} batches {} KiB, encode {:.0} ms max {:.1} ms, write {:.0} ms max {:.1} ms; received {} PDUs in {:.0} ms max {:.1} ms",
+            since.elapsed().as_secs_f64(),
+            worker.replies,
+            if worker.replies == 0 {
+                0.0
+            } else {
+                ms(worker.latency_total) / f64::from(worker.replies)
+            },
+            ms(worker.latency_max),
+            ms(worker.disk_total),
+            ms(worker.disk_max),
+            self.batches,
+            self.bytes / 1024,
+            ms(self.encode),
+            ms(self.encode_max),
+            ms(self.write),
+            ms(self.write_max),
+            self.pdus,
+            ms(self.process),
+            ms(self.process_max),
+        );
+        #[cfg(not(any(windows, test)))]
+        let _ = (session, stage, ms);
+        *self = Self::default();
+    }
 }
 
 /// The ready signal of this connection's shared folder worker, if any.

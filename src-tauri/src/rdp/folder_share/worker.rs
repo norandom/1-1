@@ -78,6 +78,19 @@ type Key = (u32, u32);
 struct Ticket {
     major_function: u32,
     bytes: usize,
+    admitted: std::time::Instant,
+}
+
+/// Timings since the last report, for finding where a slow share spends time.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WorkerPerf {
+    pub(crate) replies: u32,
+    /// Admission to the reply leaving through `poll_deferred_messages`.
+    pub(crate) latency_total: Duration,
+    pub(crate) latency_max: Duration,
+    /// Time inside the real backend (disk work).
+    pub(crate) disk_total: Duration,
+    pub(crate) disk_max: Duration,
 }
 
 /// Counters for status and tests.
@@ -94,6 +107,7 @@ pub(crate) struct WorkerStats {
 struct Ledger {
     outstanding: HashMap<Key, Ticket>,
     stats: WorkerStats,
+    perf: WorkerPerf,
 }
 
 impl Ledger {
@@ -102,6 +116,10 @@ impl Ledger {
         if let Some(ticket) = ticket {
             self.stats.queued_bytes -= ticket.bytes;
             self.stats.completed += 1;
+            let waited = ticket.admitted.elapsed();
+            self.perf.replies += 1;
+            self.perf.latency_total += waited;
+            self.perf.latency_max = self.perf.latency_max.max(waited);
         }
         self.stats.outstanding = self.outstanding.len();
         ticket
@@ -174,14 +192,25 @@ impl WorkerBackend {
             wake();
         });
         let worker_wake = Arc::clone(&wake);
+        let ledger: Arc<Mutex<Ledger>> = Arc::default();
+        let worker_ledger = Arc::clone(&ledger);
         let worker = thread::Builder::new()
             .name("1-1 folder share".into())
-            .spawn(move || run(backend, keep_alive, inbox, outbox, worker_wake))
+            .spawn(move || {
+                run(
+                    backend,
+                    keep_alive,
+                    inbox,
+                    outbox,
+                    worker_wake,
+                    worker_ledger,
+                )
+            })
             .expect("start the folder share worker");
         Self {
             jobs: Some(jobs),
             replies,
-            ledger: Arc::default(),
+            ledger,
             limits,
             wake,
             ready,
@@ -210,6 +239,11 @@ impl WorkerBackend {
         self.ledger().stats
     }
 
+    /// The timings since the last call.
+    pub(crate) fn take_perf(&self) -> WorkerPerf {
+        std::mem::take(&mut self.ledger().perf)
+    }
+
     fn ledger(&self) -> MutexGuard<'_, Ledger> {
         self.ledger
             .lock()
@@ -233,6 +267,7 @@ impl WorkerBackend {
         let ticket = Ticket {
             major_function: u32::from(io.major_function),
             bytes,
+            admitted: std::time::Instant::now(),
         };
         ledger.outstanding.insert(key, ticket);
         ledger.stats.queued_bytes += bytes;
@@ -316,7 +351,14 @@ fn run(
     inbox: mpsc::Receiver<Job>,
     outbox: mpsc::Sender<Done>,
     wake: Wake,
+    ledger: Arc<Mutex<Ledger>>,
 ) {
+    let timed = |started: std::time::Instant| {
+        let took = started.elapsed();
+        let mut ledger = ledger.lock().unwrap_or_else(|p| p.into_inner());
+        ledger.perf.disk_total += took;
+        ledger.perf.disk_max = ledger.perf.disk_max.max(took);
+    };
     // Reading each reply's header here keeps that work off the session loop.
     let deliver = |messages: Vec<SvcMessage>| -> bool {
         for message in messages {
@@ -345,10 +387,12 @@ fn run(
                 Job::Io(request) => {
                     // Built before the request moves: the reply if the backend fails.
                     let fallback = error_reply(&request, NtStatus::UNSUCCESSFUL);
+                    let started = std::time::Instant::now();
                     let messages = backend.handle_drive_io_request(request).or_else(|error| {
                         log::warn!("Folder share request failed: {error}");
                         fallback.map(|message| vec![message])
                     });
+                    timed(started);
                     delivered = true;
                     deliver(messages.unwrap_or_default())
                 }
@@ -463,6 +507,22 @@ impl RdpdrBackend for WorkerBackend {
 
     fn handle_drive_io_request(&mut self, req: ServerDriveIoRequest) -> PduResult<Vec<SvcMessage>> {
         let io = io_request(&req).clone();
+        if std::env::var_os("ONE_ONE_SHARE_TRACE").is_some() {
+            let path = match &req {
+                ServerDriveIoRequest::ServerCreateDriveRequest(create) => create.path.as_str(),
+                ServerDriveIoRequest::ServerDriveQueryDirectoryRequest(query) => {
+                    query.path.as_str()
+                }
+                _ => "",
+            };
+            log::info!(
+                "Share request ({}, {}) op {:#x} file {} {path:?}",
+                io.device_id,
+                io.completion_id,
+                u32::from(io.major_function),
+                io.file_id
+            );
+        }
         let bytes = match &req {
             ServerDriveIoRequest::DeviceWriteRequest(write) => write.write_data.len(),
             _ => 0,
@@ -516,6 +576,16 @@ impl RdpdrBackend for WorkerBackend {
             };
             bytes += done.size;
             let ticket = done.key.and_then(|key| self.ledger().settle(key));
+            if std::env::var_os("ONE_ONE_SHARE_TRACE").is_some() {
+                log::info!(
+                    "Share reply {:?} op {:?} status {:#010x} {} bytes after {:?}",
+                    done.key,
+                    ticket.map(|t| t.major_function),
+                    done.status.unwrap_or(u32::MAX),
+                    done.size,
+                    ticket.map(|t| t.admitted.elapsed()),
+                );
+            }
             if let (Some(status), Some((device_id, _))) = (done.status, done.key)
                 && let Some(cell) = self.status(device_id)
             {
