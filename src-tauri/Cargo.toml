@@ -24,15 +24,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 test-support = []
 
 [build-dependencies]
-tauri-build = { version = "2.5.6", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.10.3", features = ["tray-icon"] }
+tauri = { version = "2.12.5", features = ["tray-icon"] }
 tauri-plugin-log = "2"
-tauri-plugin-updater = "=2.9.0"
+tauri-plugin-updater = "=2.14.1"
 tauri-plugin-clipboard-manager = "=2.3.0"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
