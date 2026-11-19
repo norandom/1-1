@@ -24,6 +24,32 @@ impl std::fmt::Debug for ClipboardPayload {
         })
     }
 }
+/// RDP clipboard text uses CRLF line endings (`CF_UNICODETEXT`). Every bare
+/// LF becomes CRLF on the way to the remote; existing CRLF pairs stay intact.
+pub fn to_remote_line_endings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.matches('\n').count());
+    let mut previous = None;
+    for c in text.chars() {
+        if c == '\n' && previous != Some('\r') {
+            out.push('\r');
+        }
+        out.push(c);
+        previous = Some(c);
+    }
+    out
+}
+
+/// Remote clipboard text arrives with CRLF. Linux and macOS programs expect
+/// LF, so CRLF pairs become LF there (a stray `\r` otherwise shows up when
+/// pasting, notably on Wayland). Windows keeps CRLF, its own convention.
+pub fn to_local_line_endings(text: String) -> String {
+    if cfg!(windows) {
+        text
+    } else {
+        text.replace("\r\n", "\n")
+    }
+}
+
 fn dimensions(width: u32, height: u32) -> Result<(), String> {
     if width == 0
         || height == 0
@@ -176,6 +202,36 @@ impl ClipboardPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn text_sent_to_the_remote_uses_crlf_without_doubling() {
+        assert_eq!(to_remote_line_endings("a\nb\n"), "a\r\nb\r\n");
+        assert_eq!(
+            to_remote_line_endings("a\r\nb"),
+            "a\r\nb",
+            "existing CRLF stays single"
+        );
+        assert_eq!(to_remote_line_endings("a\r\n\nb"), "a\r\n\r\nb");
+        assert_eq!(to_remote_line_endings("\n"), "\r\n");
+        assert_eq!(to_remote_line_endings("no newline"), "no newline");
+        assert_eq!(to_remote_line_endings("ünï\ncode"), "ünï\r\ncode");
+    }
+
+    #[test]
+    fn remote_text_follows_the_local_platform_convention() {
+        let received = "line 1\r\nline 2\r\n".to_string();
+        let expected = if cfg!(windows) {
+            "line 1\r\nline 2\r\n"
+        } else {
+            "line 1\nline 2\n"
+        };
+        assert_eq!(to_local_line_endings(received), expected);
+        // A lone CR is content, not a line ending, on every platform.
+        assert_eq!(
+            to_local_line_endings("progress\r100%".into()),
+            "progress\r100%"
+        );
+    }
+
     #[test]
     fn clipboard_image_roundtrip_and_limits() {
         let rgba = [255, 0, 0, 255, 0, 255, 0, 255];

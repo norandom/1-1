@@ -1,4 +1,4 @@
-use super::clipboard_payload::ClipboardPayload;
+use super::clipboard_payload::{ClipboardPayload, to_local_line_endings, to_remote_line_endings};
 use std::{collections::VecDeque, env};
 const PNG_FORMAT: ClipboardFormatId = ClipboardFormatId(0xC001);
 
@@ -299,10 +299,11 @@ impl CliprdrBackend for SessionClipboardBackend {
         } else {
             match (request.format, &self.local_payload) {
                 (ClipboardFormatId::CF_UNICODETEXT, Some(ClipboardPayload::Text(text))) => {
-                    FormatDataResponse::new_unicode_string(text).into_owned()
+                    FormatDataResponse::new_unicode_string(&to_remote_line_endings(text))
+                        .into_owned()
                 }
                 (ClipboardFormatId::CF_TEXT, Some(ClipboardPayload::Text(text))) => {
-                    FormatDataResponse::new_string(text).into_owned()
+                    FormatDataResponse::new_string(&to_remote_line_endings(text)).into_owned()
                 }
                 (format, Some(payload @ ClipboardPayload::Image { .. })) => {
                     let bytes = if format == PNG_FORMAT {
@@ -357,13 +358,13 @@ impl CliprdrBackend for SessionClipboardBackend {
                 {
                     response
                         .to_unicode_string()
-                        .map(ClipboardPayload::Text)
+                        .map(|text| ClipboardPayload::Text(to_local_line_endings(text)))
                         .map_err(|_| "Remote clipboard text is invalid.".into())
                 }
                 ClipboardFormatId::CF_TEXT if response.data().len() <= MAX_CLIPBOARD_TEXT_BYTES => {
                     response
                         .to_string()
-                        .map(ClipboardPayload::Text)
+                        .map(|text| ClipboardPayload::Text(to_local_line_endings(text)))
                         .map_err(|_| "Remote clipboard text is invalid.".into())
                 }
                 _ => Err("Unsupported remote clipboard format or text size limit exceeded.".into()),
@@ -759,6 +760,48 @@ mod tests {
             }
             other => panic!("expected format data, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn local_text_reaches_the_remote_with_crlf_line_endings() {
+        let mut backend = SessionClipboardBackend::new();
+        backend.set_local_text("one\ntwo\r\nthree\n".to_string());
+        backend.take_pending_messages();
+        backend.on_format_data_request(FormatDataRequest {
+            format: ClipboardFormatId::CF_UNICODETEXT,
+        });
+        backend.on_format_data_request(FormatDataRequest {
+            format: ClipboardFormatId::CF_TEXT,
+        });
+        let messages = backend.take_pending_messages();
+        let ClipboardMessage::SendFormatData(unicode) = &messages[0] else {
+            panic!("expected format data");
+        };
+        assert_eq!(
+            unicode.to_unicode_string().expect("unicode text"),
+            "one\r\ntwo\r\nthree\r\n"
+        );
+        let ClipboardMessage::SendFormatData(ansi) = &messages[1] else {
+            panic!("expected format data");
+        };
+        assert_eq!(
+            ansi.to_string().expect("ansi text"),
+            "one\r\ntwo\r\nthree\r\n"
+        );
+    }
+
+    #[test]
+    fn remote_text_arrives_in_the_local_line_ending_convention() {
+        let mut backend = SessionClipboardBackend::new();
+        backend.on_remote_copy(&[unicode_text_format()]);
+        backend.take_pending_messages();
+        backend.on_format_data_response(FormatDataResponse::new_unicode_string("a\r\nb\r\n"));
+        let expected = if cfg!(windows) {
+            "a\r\nb\r\n"
+        } else {
+            "a\nb\n"
+        };
+        assert_eq!(backend.take_remote_text_update().as_deref(), Some(expected));
     }
 
     #[test]
