@@ -78,4 +78,4 @@ Record the acceptance results in the spec (`validation.md`): hosts, copies both 
 - **A hung remote Explorer can leave the remote drive redirector stuck.** Signing out or restarting the remote machine clears it; it looked like a client bug for an hour.
 - **Dependencies:** new or updated crates and npm packages must be at least two weeks old. Check the release date before pinning.
 - **Releases:** follow the steps in [handover.md](handover.md). Download release artifacts into a folder other than `releases/v<version>` on the Windows workstation, because the local preview script stages its frontend there.
-- **CI:** pushes that touch only Markdown, `docs/` or `.kiro/` skip the CI workflow. CodeQL's default setup runs on every push unless the commit message contains `[skip ci]`.
+- **CI:** pushes that touch only Markdown, `docs/` or `.kiro/` skip the CI workflow. CodeQL's default setup runs on every push to `master`, including these, and `[skip ci]` does not stop it; cancel the run, or move CodeQL to an advanced setup with `paths-ignore`.
