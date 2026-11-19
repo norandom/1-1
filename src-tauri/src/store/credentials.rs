@@ -8,6 +8,22 @@ const SERVICE_NAME: &str = "com.rdpclient.app";
 #[cfg(feature = "test-support")]
 const TEST_SERVICE_PREFIX: &str = "com.rdpclient.app.test.";
 
+/// On Linux, passwords live in the desktop's Secret Service, which KWallet and
+/// GNOME Keyring both provide. When it is missing or locked, say so.
+fn describe(error: &keyring::Error) -> String {
+    let unavailable = matches!(
+        error,
+        keyring::Error::NoStorageAccess(_) | keyring::Error::PlatformFailure(_)
+    );
+    if cfg!(target_os = "linux") && unavailable {
+        format!(
+            "{error}. 1-1 keeps passwords in the desktop's Secret Service: make sure KWallet or GNOME Keyring is running and unlocked, then try again."
+        )
+    } else {
+        error.to_string()
+    }
+}
+
 pub struct CredentialStore {
     service: String,
 }
@@ -27,7 +43,7 @@ impl CredentialStore {
     pub fn store_password(&self, connection_id: &str, password: &str) -> Result<(), String> {
         self.entry(connection_id)?
             .set_password(password)
-            .map_err(|e| format!("Failed to store password in keychain: {}", e))?;
+            .map_err(|e| format!("Failed to store password in keychain: {}", describe(&e)))?;
         Ok(())
     }
 
@@ -35,7 +51,10 @@ impl CredentialStore {
         match self.entry(connection_id)?.get_password() {
             Ok(password) => Ok(Some(password)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(format!("Failed to retrieve password from keychain: {}", e)),
+            Err(e) => Err(format!(
+                "Failed to retrieve password from keychain: {}",
+                describe(&e)
+            )),
         }
     }
 
@@ -43,7 +62,10 @@ impl CredentialStore {
         match self.entry(connection_id)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()), // Already gone, that's fine
-            Err(e) => Err(format!("Failed to delete password from keychain: {}", e)),
+            Err(e) => Err(format!(
+                "Failed to delete password from keychain: {}",
+                describe(&e)
+            )),
         }
     }
 
@@ -506,6 +528,15 @@ pub(crate) mod tests {
 
     // ---- Task 5.3: harness-owned credential namespace (Req 12.7).
     //
+    #[test]
+    fn a_missing_secret_service_names_kwallet_and_gnome_keyring_on_linux() {
+        let unavailable = describe(&keyring::Error::NoStorageAccess("no provider".into()));
+        let hinted = unavailable.contains("KWallet or GNOME Keyring");
+        assert_eq!(hinted, cfg!(target_os = "linux"), "{unavailable}");
+        // Other errors never carry the hint.
+        assert!(!describe(&keyring::Error::NoEntry).contains("KWallet"));
+    }
+
     // The E2E harness must isolate credential entries from user data and
     // clean up only its own resources. Test-support builds can name a
     // CredentialStore with a namespace that can never equal the production

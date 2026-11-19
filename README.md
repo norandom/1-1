@@ -86,7 +86,7 @@ Most of my work in this fork went into ClearCodec. I made it the preferred codec
 **Rendering and security**
 
 - GPU-rendered frames via wgpu (Metal on macOS, Vulkan on Linux), zero-copy SharedFrame between session and renderer, software Canvas fallback, 0% CPU when idle
-- Passwords stored in the OS keychain (macOS Keychain, Linux Secret Service); no plaintext credential storage
+- Passwords stored in the OS keychain (Windows Credential Manager, macOS Keychain, and on Linux the Secret Service from KWallet or GNOME Keyring); no plaintext credential storage
 - Connection configs as local JSON: no cloud, no telemetry
 - Ships as a single `.app`, `.AppImage`, or small NSIS installer
 
