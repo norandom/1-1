@@ -116,6 +116,30 @@ pub enum DisplayScaling {
     LowResolution,
 }
 
+/// How shared-folder file data shares the connection with input and frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferPace {
+    /// Small slices: the pointer and typing stay smooth; copies are slower.
+    #[default]
+    Responsive,
+    /// Medium slices.
+    Balanced,
+    /// Whole replies: the fastest copies; the session can stutter meanwhile.
+    Fastest,
+}
+
+impl TransferPace {
+    /// File bytes written to the server per session-loop turn.
+    pub fn slice_bytes(self) -> usize {
+        match self {
+            Self::Responsive => 16 * 1024,
+            Self::Balanced => 64 * 1024,
+            Self::Fastest => usize::MAX,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HostProfile {
@@ -140,6 +164,7 @@ pub struct HostProfile {
     /// Keep this host's password in the system keychain. When off, 1-1 asks
     /// for it at connect and holds it only for that session.
     pub save_password: bool,
+    pub transfer_pace: TransferPace,
     /// The desktop scale factor (100–500%) requested for the running session,
     /// measured by the window at connect and resize. Runtime only, never saved.
     #[serde(skip)]
@@ -166,6 +191,7 @@ impl Default for HostProfile {
             scaling: DisplayScaling::Automatic,
             scale_percent: 100,
             save_password: true,
+            transfer_pace: TransferPace::Responsive,
             desktop_scale: None,
         }
     }

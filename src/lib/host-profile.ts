@@ -12,6 +12,7 @@ export const DEFAULT_HOST_PROFILE: Readonly<HostProfile> = Object.freeze({
   scaling: 'automatic',
   scalePercent: 100,
   savePassword: true,
+  transferPace: 'responsive',
 });
 
 /** Defaults missing legacy fields without losing explicit false preferences. */
@@ -35,6 +36,7 @@ export function normalizeHostProfile(profile?: Partial<HostProfile> | null): Hos
     scaling: profile?.scaling ?? DEFAULT_HOST_PROFILE.scaling,
     scalePercent: profile?.scalePercent ?? DEFAULT_HOST_PROFILE.scalePercent,
     savePassword: profile?.savePassword ?? DEFAULT_HOST_PROFILE.savePassword,
+    transferPace: profile?.transferPace ?? DEFAULT_HOST_PROFILE.transferPace,
   };
 }
 

@@ -1,6 +1,6 @@
 import type { HostProfile } from '../../types';
 import { IDLE_PREVIEW_HELP, IDLE_PREVIEW_LABEL } from '../../lib/idle-preview';
-import { SCALE_PERCENT_OPTIONS, SCALING_HELP, SCALING_OPTIONS, CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
+import { TRANSFER_PACE_HELP, TRANSFER_PACE_OPTIONS, SCALE_PERCENT_OPTIONS, SCALING_HELP, SCALING_OPTIONS, CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
 import { Switch } from '@/components/ui/switch';
 
 interface Props {
@@ -66,6 +66,15 @@ export function HostProfileFields({ profile, fontSmoothing, onChange }: Props) {
         </select>
       </label>
       <p id="clipboard-direction-help" className="text-xs text-muted-foreground">{CLIPBOARD_HELP}</p>
+    </fieldset>
+    <fieldset className="grid gap-2">
+      <legend className="mb-2 text-sm font-medium">Shared folders</legend>
+      <label className="flex items-center justify-between gap-3 text-sm">File transfers
+        <select className={selectClass} aria-describedby="transfer-pace-help" value={profile.transferPace} onChange={(e) => onChange({ ...profile, transferPace: e.target.value as HostProfile['transferPace'] }, fontSmoothing)}>
+          {TRANSFER_PACE_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+        </select>
+      </label>
+      <p id="transfer-pace-help" className="text-xs text-muted-foreground">{TRANSFER_PACE_HELP}</p>
     </fieldset>
     <details className="rounded border p-3">
       <summary className="cursor-pointer text-sm font-medium">Visual effects and connection</summary>

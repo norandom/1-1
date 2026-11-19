@@ -67,6 +67,8 @@ export interface HostProfile {
   scalePercent: number;
   /** Keep the password in the system keychain; otherwise it is asked at connect. */
   savePassword: boolean;
+  /** How shared-folder file data shares the connection with input and frames. */
+  transferPace: 'responsive' | 'balanced' | 'fastest';
 }
 
 // Task 6.6 (Req 10.1/10.19): `libraryId`/`folderId`/`mock` mirror the v2

@@ -24,6 +24,10 @@ export const SCALING_OPTIONS: readonly [HostProfile['scaling'], string][] = [
 ];
 export const SCALE_PERCENT_OPTIONS: readonly number[] = [100, 125, 150, 175, 200, 225, 250, 300];
 export const SCALING_HELP = 'Automatic scales the remote desktop to this display, so text keeps its size on Retina and HiDPI screens. Custom uses the percentage you choose. Off keeps 100%, with the most space and small text on those screens. Low resolution sends fewer pixels and enlarges them locally. Applies when the remote resizes with the window, otherwise on the next connection.';
+export const TRANSFER_PACE_OPTIONS: readonly [HostProfile['transferPace'], string][] = [
+  ['responsive', 'Keep the session responsive (default)'], ['balanced', 'Balanced'], ['fastest', 'Fastest copies'],
+];
+export const TRANSFER_PACE_HELP = 'How files copied from a shared folder share the connection with your input and the screen. Responsive sends file data in small pieces, so the pointer and typing stay smooth and copies take longer. Fastest sends each piece whole; the session can stutter during a copy. Applies on the next connection.';
 export const EXPERIENCE_HELP = 'Visual effects and connection hints apply on the next connection. Server policy can override these requests.';
 export const COMPOSITION_HELP = 'Desktop composition is a legacy, server-dependent effect requiring 32-bit color.';
 export const NETWORK_HELP = 'Connection type is a performance hint, not a bandwidth limit or automatic detection.';

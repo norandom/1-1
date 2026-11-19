@@ -156,6 +156,49 @@ pub(crate) fn real_connect_with_shares(shares: ShareSource) -> ConnectFn {
 }
 
 #[cfg(test)]
+mod share_slice_tests {
+    use super::share_slice_end;
+
+    fn packet(length: u16) -> Vec<u8> {
+        let mut bytes = vec![3, 0];
+        bytes.extend(length.to_be_bytes());
+        bytes.resize(usize::from(length), 0xAB);
+        bytes
+    }
+
+    #[test]
+    fn slices_end_on_packet_boundaries_and_always_advance() {
+        let frame: Vec<u8> = [packet(1000), packet(1000), packet(1000)].concat();
+        assert_eq!(share_slice_end(&frame, 2500), 2000, "two whole packets fit");
+        assert_eq!(share_slice_end(&frame, 2000), 2000);
+        assert_eq!(share_slice_end(&frame, 10), 1000, "at least one packet");
+        assert_eq!(share_slice_end(&frame, 1 << 20), 3000);
+        // Slicing the whole frame visits every byte exactly once.
+        let mut rest = &frame[..];
+        let mut cuts = Vec::new();
+        while !rest.is_empty() {
+            let end = share_slice_end(rest, 1500);
+            cuts.push(end);
+            rest = &rest[end..];
+        }
+        assert_eq!(cuts, [1000, 1000, 1000]);
+    }
+
+    #[test]
+    fn anything_that_is_not_whole_packets_is_written_as_it_is() {
+        assert_eq!(share_slice_end(&[9, 9, 9, 9, 9, 9], 2), 6, "not TPKT");
+        let mut truncated = packet(1000);
+        truncated.truncate(600);
+        assert_eq!(share_slice_end(&truncated, 100), 600);
+        let mut bad_length = packet(1000);
+        bad_length[3] = 2;
+        bad_length[2] = 0;
+        assert_eq!(share_slice_end(&bad_length, 100), 1000);
+        assert_eq!(share_slice_end(&[], 100), 0);
+    }
+}
+
+#[cfg(test)]
 mod share_source_tests {
     use super::*;
     use std::sync::Mutex;
@@ -338,6 +381,8 @@ struct SessionActor {
     share_status: Vec<crate::rdp::folder_share::status::ShareStatusCell>,
     /// Where a busy share spends the session loop's time, logged each second.
     share_perf: SharePerf,
+    /// Encoded file replies not written yet; sent a slice per loop turn.
+    share_backlog: VecDeque<u8>,
 }
 
 impl SessionActor {
@@ -393,6 +438,7 @@ impl SessionActor {
             shared_frame,
             share_status: Default::default(),
             share_perf: SharePerf::default(),
+            share_backlog: VecDeque::new(),
         }
     }
 
@@ -1085,6 +1131,21 @@ impl SessionActor {
     ) -> Result<(), DisconnectReason> {
         use ironrdp_tokio::FramedWrite as _;
         let started = std::time::Instant::now();
+        // The host's File transfers setting: at 1.6 MB/s upstream a 16 KiB slice
+        // takes about 10 ms, against 650 ms for a whole 1 MiB read reply.
+        let slice_bytes = self.config.host_profile.transfer_pace.slice_bytes();
+        // File data waiting from an earlier turn goes first, one slice per turn.
+        if !self.share_backlog.is_empty() {
+            let end = share_slice_end(self.share_backlog.make_contiguous(), slice_bytes);
+            let slice: Vec<u8> = self.share_backlog.drain(..end).collect();
+            if let Err(error) = writer.write_all(&slice).await {
+                self.last_error = Some(format!("Folder share write failed: {error}"));
+                return Err(DisconnectReason::ConnectionLost);
+            }
+            self.share_perf
+                .sent(slice.len(), std::time::Duration::ZERO, started.elapsed());
+            return Ok(());
+        }
         let Some(rdpdr) =
             stage.get_svc_processor_mut::<crate::rdp::folder_share::channel::DriveChannel>()
         else {
@@ -1112,12 +1173,16 @@ impl SessionActor {
             }
         };
         let encoded = started.elapsed();
-        if let Err(error) = writer.write_all(&frame).await {
+        // Write the first slice now and keep the rest for later turns, so a
+        // large reply never holds input and frames behind one long write.
+        let end = share_slice_end(&frame, slice_bytes);
+        if let Err(error) = writer.write_all(&frame[..end]).await {
             self.last_error = Some(format!("Folder share write failed: {error}"));
             return Err(DisconnectReason::ConnectionLost);
         }
+        self.share_backlog.extend(&frame[end..]);
         self.share_perf
-            .sent(frame.len(), encoded, started.elapsed() - encoded);
+            .sent(end, encoded, started.elapsed() - encoded);
         Ok(())
     }
 
@@ -1193,6 +1258,7 @@ impl SessionActor {
         let _ = self.clipboard_tx.send(None);
         // The shared folder's completions, when this connection offers one.
         let share_ready = share_ready(&mut active_stage);
+        self.share_backlog.clear();
 
         'session: loop {
             if let Some(result) = encode_pending_resize(
@@ -1213,6 +1279,7 @@ impl SessionActor {
                     }
                 }
             }
+            let share_backlogged = !self.share_backlog.is_empty();
             tokio::select! {
                 _ = async {
                     if let Some(deadline) = self.idle_preview.manual_redraw_deadline() {
@@ -1234,6 +1301,9 @@ impl SessionActor {
                 // File replies wait their turn with input and frames: one bounded
                 // batch per wake, and the worker wakes the loop again for more.
                 _ = async {
+                    if share_backlogged {
+                        return;
+                    }
                     match &share_ready {
                         Some(ready) => ready.notified().await,
                         None => std::future::pending().await,
@@ -2257,6 +2327,24 @@ fn reset_software_pointer(
     frame.extend(update);
     stage.process(image, ironrdp_pdu::Action::FastPath, &frame, None)?;
     Ok(())
+}
+
+/// Where to cut `frame` so that the first part is whole TPKT packets of at
+/// most `max` bytes (at least one packet). Input written between two slices
+/// then never lands inside a packet. Anything that is not TPKT stays whole.
+fn share_slice_end(bytes: &[u8], max: usize) -> usize {
+    let mut end = 0;
+    while end + 4 <= bytes.len() {
+        let length = usize::from(u16::from_be_bytes([bytes[end + 2], bytes[end + 3]]));
+        if bytes[end] != 3 || length < 4 || end + length > bytes.len() {
+            return bytes.len();
+        }
+        if end > 0 && end + length > max {
+            return end;
+        }
+        end += length;
+    }
+    if end == 0 { bytes.len() } else { end }
 }
 
 /// Session-loop timings while a share is busy, for one log line per second.

@@ -30,6 +30,7 @@ const PROFILE: Record<keyof HostProfile, Kind> = {
   scaling: ['automatic', 'off', 'custom', 'lowResolution'],
   scalePercent: 'int',
   savePassword: 'bool',
+  transferPace: ['responsive', 'balanced', 'fastest'],
 };
 
 const kebab = (key: string) => key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
