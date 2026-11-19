@@ -5,6 +5,7 @@ import { ChevronsLeft, Library as LibraryIcon } from 'lucide-react';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useLibraryStore } from '../../stores/libraryStore';
+import { updateWaiting, useUpdateStore } from '../../stores/updateStore';
 import { statusesFromSessions } from '../../lib/tree-a11y';
 import {
   buildRailEntries,
@@ -70,7 +71,13 @@ function CollapseRightIcon({ size = 18 }: { size?: number }) {
   );
 }
 
+/** Marks the Settings button while an update waits to be installed. */
+function UpdateDot() {
+  return <span aria-hidden className="absolute right-2 top-2 h-2 w-2 rounded-full bg-[var(--color-accent)]" />;
+}
+
 export function Sidebar() {
+  const updateReady = useUpdateStore(updateWaiting);
   const location = useLocation();
   const navigate = useNavigate();
   const collapsed = useSettingsStore((s) => s.settings.sidebarCollapsed);
@@ -247,11 +254,12 @@ export function Sidebar() {
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
-                aria-label="Settings"
-                className="h-11 w-11 rounded-xl"
+                aria-label={updateReady ? 'Settings, update available' : 'Settings'}
+                className="relative h-11 w-11 rounded-xl"
                 onClick={() => navigate('/settings')}
               >
                 <SettingsIcon size={20} />
+                {updateReady && <UpdateDot />}
               </Button>
             </TooltipTrigger>
             <TooltipContent side="right" sideOffset={8}>
@@ -276,6 +284,7 @@ export function Sidebar() {
           >
             <SettingsIcon size={18} />
             <span className="text-[13px] font-semibold">Settings</span>
+            {updateReady && <span className="ml-auto text-[11px] font-medium text-[var(--color-accent)]">Update available</span>}
           </Button>
         )}
         <div className={cn('flex gap-1', collapsed ? 'flex-col' : 'flex-row')}>

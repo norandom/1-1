@@ -33,19 +33,74 @@
 
 ## Install
 
-Download the newest installer from [Releases](https://github.com/norandom/1-1/releases), on the `preview-channel` prerelease:
+Download the newest version from [Releases](https://github.com/norandom/1-1/releases). Each version is a prerelease named `v0.1.0-alpha.N`; the `preview-channel` release only holds the update feed.
 
-- **Windows:** per-user NSIS installer, no admin rights needed. Builds for x64 and ARM64. The installer downloads the WebView2 Evergreen bootstrapper at install time, so the first install needs an internet connection. On an offline machine, install the [WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) first.
-- **macOS:** `.dmg`, Apple Silicon.
-- **Linux:** `.AppImage` or `.deb`.
+### Windows (x64)
 
-After installation, 1-1 checks the preview update feed once per launch and from Settings. Installing an update is always your explicit choice, and it is blocked while a session is active, so it never interrupts remote work.
+1. Download `1-1_<version>_x64-setup.exe`.
+2. Run it. It installs for your user only, without admin rights. Windows SmartScreen may say "Windows protected your PC": choose **More info**, then **Run anyway** (see [Unsigned builds](#unsigned-builds-warnings-donations)).
+3. The installer fetches the WebView2 runtime if it is missing, so the first install needs an internet connection. On an offline machine, install the [WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) first.
+
+Passwords go to Windows Credential Manager.
+
+### macOS (Apple silicon)
+
+1. Download `1-1_<version>_aarch64.dmg`, open it and drag **1-1** to **Applications**.
+2. The app is not notarized, so macOS blocks the first launch. Open it once anyway: either try to open it, then go to **System Settings > Privacy & Security** and choose **Open Anyway**, or run:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/1-1.app
+   ```
+
+Passwords go to the macOS Keychain.
+
+### Linux (x64)
+
+Pick one:
+
+- **`.deb`** (Debian, Ubuntu and derivatives):
+
+  ```bash
+  sudo apt install ./1-1_<version>_amd64.deb
+  ```
+
+- **AppImage** (any distribution):
+
+  ```bash
+  chmod +x 1-1_<version>_amd64.AppImage
+  ./1-1_<version>_amd64.AppImage
+  ```
+
+Passwords go to the desktop's Secret Service, so a keyring must be running and unlocked: **KWallet** on KDE Plasma or **GNOME Keyring** on GNOME and most other desktops. Without one, 1-1 cannot save passwords; you can still turn off **Save password in the system keychain** for a host and enter the password at each connect.
+
+### Verify a download
+
+`SHA256SUMS.txt` in each release lists every file's SHA-256 hash:
+
+```bash
+sha256sum -c SHA256SUMS.txt --ignore-missing                     # Linux
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing                 # macOS
+```
+
+```powershell
+Get-FileHash .\1-1_<version>_x64-setup.exe -Algorithm SHA256     # Windows: compare with SHA256SUMS.txt
+```
+
+### Updates
+
+1-1 checks for updates at each launch. When one is available, a notice appears and the sidebar's **Settings** button shows it; install it from **Settings > Updates**. Installing is always your choice, and it is blocked while a session is connected, so it never interrupts remote work. Each update is verified against the signing key built into the app before it installs.
+
+| Installed from | Updates |
+|---|---|
+| Windows installer | In the app |
+| macOS `.dmg` | In the app (from alpha.7 on) |
+| Linux AppImage | In the app |
+| Linux `.deb` | Install the next release's `.deb` the same way |
 
 No release yet, or you want to build your own installer? See [Build from source](#build-from-source).
-
 ## Unsigned builds, warnings, donations
 
-I do not hold a Windows or macOS developer certificate, so the installers are not Authenticode-signed and the macOS build is not notarized. Expect Windows SmartScreen ("Windows protected your PC", click "More info" then "Run anyway") and the macOS Gatekeeper warning (right-click the app and choose "Open"). That is normal for an unsigned build, not a sign of malware. Every installer's SHA-256 hash is listed in the release manifest, so you can verify what you downloaded before running it. The update-feed signatures described under [Build from source](#build-from-source) are separate and do not change any of this.
+I do not hold a Windows or macOS developer certificate, so the installers are not Authenticode-signed and the macOS build is not notarized. Expect Windows SmartScreen ("Windows protected your PC", click "More info" then "Run anyway") and the macOS Gatekeeper block (see [macOS](#macos-apple-silicon) above). That is normal for an unsigned build, not a sign of malware. Every file's SHA-256 hash is listed in the release's `SHA256SUMS.txt`, so you can [verify what you downloaded](#verify-a-download) before running it. The update-feed signatures described under [Build from source](#build-from-source) are separate and do not change any of this.
 
 No donations, please. This is just a fork, shared as is with no warranty and no support. If you want to support RDP client development financially, support upstream [Drift](https://github.com/CREVIOS/drift-rdp) instead.
 
@@ -94,7 +149,7 @@ Most of my work in this fork went into ClearCodec. I made it the preferred codec
 
 - RDP drive redirection (share one local folder to a saved host) with segmented copies: bounded parallel range requests, verified byte for byte
 - An rsync-style delta protocol on top of redirects, so only changed blocks move. Deferred until measurements show it pays off
-- Auto-update workflow hardening: the signed preview feed and per-platform CI installers are in place; runtime validation currently covers Windows x64 only
+- Auto-update workflow hardening: the signed preview feed serves Windows x64, macOS Apple silicon and the Linux AppImage; runtime validation of an installed update currently covers Windows x64 only
 
 ## Build from source
 
@@ -135,7 +190,7 @@ Version tags trigger `.github/workflows/preview-build.yml`: Windows x64 and ARM6
 node scripts/update-manifest.mjs VERSION ASSET_DIRECTORY OUTPUT_JSON
 ```
 
-Upload the immutable installer assets to the matching version release first, then publish the verified manifest as `latest.json` on the `preview-channel` prerelease. Never replace a published installer under an existing version; check its uploaded digest before touching the feed. Attach the Linux `.deb` to the version release as a download only: the updater replaces the AppImage, and a package install updates through a newer `.deb`.
+Upload the immutable installer assets to the matching version release first, then publish the verified manifest as `latest.json` on the `preview-channel` prerelease. Never replace a published installer under an existing version; check its uploaded digest before touching the feed. Attach the Linux `.deb` and the macOS `.dmg` to the version release as downloads only. The feed lists the Windows installer, the AppImage and the macOS update archive `1-1.app.tar.gz`, so attach that archive and its `.sig` to the version release too; a package install updates through a newer `.deb`. Windows ARM64 is built but not published.
 
 ## Architecture
 

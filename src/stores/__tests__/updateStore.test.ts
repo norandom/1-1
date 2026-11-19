@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../lib/tauri', () => ({ checkForUpdates: vi.fn(), installUpdate: vi.fn() }));
 import * as tauri from '../../lib/tauri';
-import { useUpdateStore } from '../updateStore';
+import { updateNoticeMessage, updateWaiting, useUpdateStore } from '../updateStore';
 import { useSessionStore } from '../sessionStore';
 import type { SessionInfo } from '../../types';
 const available = { currentVersion: '0.1.0-alpha.3', update: { version: '0.1.0-alpha.4', notes: 'Fixes' } };
@@ -49,5 +49,24 @@ describe('verified updater controller', () => {
     vi.mocked(tauri.installUpdate).mockResolvedValue(undefined);
     await useUpdateStore.getState().install();
     expect(tauri.installUpdate).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('update notice', () => {
+  it('marks an update as waiting from discovery until installation starts', async () => {
+    expect(updateWaiting(useUpdateStore.getState())).toBe(false);
+    vi.mocked(tauri.checkForUpdates).mockResolvedValue(available);
+    await useUpdateStore.getState().check(true);
+    expect(updateWaiting(useUpdateStore.getState())).toBe(true);
+    useUpdateStore.setState({ phase: 'downloading' });
+    expect(updateWaiting(useUpdateStore.getState())).toBe(false);
+    // A failed install leaves the update waiting for another try.
+    useUpdateStore.setState({ phase: 'error' });
+    expect(updateWaiting(useUpdateStore.getState())).toBe(true);
+    useUpdateStore.setState({ update: null, phase: 'current' });
+    expect(updateWaiting(useUpdateStore.getState())).toBe(false);
+  });
+  it('names the version and where to install it', () => {
+    expect(updateNoticeMessage('0.1.0-alpha.8')).toBe('1-1 0.1.0-alpha.8 is available. Install it from Settings > Updates when no session is connected.');
   });
 });

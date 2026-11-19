@@ -5,6 +5,8 @@ export interface Toast {
   message: string;
   type: 'success' | 'error' | 'info' | 'warning';
   duration?: number;
+  /** One button next to the message; choosing it also dismisses the toast. */
+  action?: { label: string; onSelect: () => void };
 }
 
 interface ToastState {

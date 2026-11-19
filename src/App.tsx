@@ -1,6 +1,6 @@
-import { useUpdateStore } from './stores/updateStore';
+import { updateNoticeMessage, useUpdateStore } from './stores/updateStore';
 import { useEffect, useState, useCallback } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, useNavigate } from 'react-router-dom';
 import { AnimatePresence } from 'framer-motion';
 import { Titlebar } from './components/layout/Titlebar';
 import { Sidebar } from './components/layout/Sidebar';
@@ -46,7 +46,15 @@ export default function App() {
   const [showNewConnection, setShowNewConnection] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
 
+  const navigate = useNavigate();
   useEffect(() => { void useUpdateStore.getState().check(true); }, []);
+  // Tell the user once per version when the startup check finds an update.
+  useEffect(() => useUpdateStore.subscribe((state, previous) => {
+    const version = state.update?.version;
+    if (!version || version === previous.update?.version || state.phase !== 'ready') return;
+    addToast({ type: 'info', message: updateNoticeMessage(version), duration: 0,
+      action: { label: 'Open', onSelect: () => navigate('/settings') } });
+  }), [addToast, navigate]);
 
   // Initialize theme
   useTheme();

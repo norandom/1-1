@@ -51,6 +51,13 @@ function ToastItem({ toast }: { toast: Toast }) {
         <p className="flex-1 text-xs text-[var(--color-text-primary)] leading-relaxed">
           {toast.message}
         </p>
+        {toast.action && <button
+          type="button"
+          onClick={() => { toast.action?.onSelect(); removeToast(toast.id); }}
+          className="shrink-0 rounded px-1.5 py-0.5 text-xs font-medium text-[var(--color-accent)] hover:bg-[var(--color-surface-3)] transition-colors"
+        >
+          {toast.action.label}
+        </button>}
         <button
           aria-label="Dismiss notification"
           onClick={() => removeToast(toast.id)}

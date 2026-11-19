@@ -8,7 +8,7 @@
   - Per-host Scaling: Automatic (default, desktop scale = device pixel ratio × 100), Custom percentage (100–300%), Off (100%), Low resolution. Sent at connect and on every Display Control resize.
   - Per-host `savePassword` (default on). Off: no keychain entry, password asked at connect and held by the session. A host with no saved password also gets the prompt.
   - Linux keychain errors name KWallet and GNOME Keyring.
-  - Assets add the macOS arm64 `.dmg` (not notarized). The feed is still Windows x64 and the AppImage; macOS could join with `1-1.app.tar.gz`.
+  - Assets add the macOS arm64 `.dmg` (not notarized) and the macOS update archive `1-1.app.tar.gz` with its `.sig`. The feed lists Windows x64, macOS arm64 and the AppImage.
 - **alpha.6** (`705fecd`).
   - Security: Tauri 2.12.5 (IPC origin confusion), tauri-plugin-updater 2.14.1 with zip 9.3.0 (critical), the shadcn CLI package removed (its stylesheet is vendored in `src/styles/shadcn-tailwind.css`), and npm, serde_with and rand fixes.
   - Linux passwords use the Secret Service (keyring feature `linux-native-sync-persistent`) instead of the kernel keyring alone, which lost them at logout.
@@ -21,7 +21,7 @@
   1. Bump the five version files and push.
   2. When CI is green, push a `v*` tag. The tag triggers `preview-build.yml`, which exports the signed AppImage and the `.deb` together.
   3. Verify each asset's SHA-256 against its `build-info.json`, and check that the `.sig` key ID matches the updater key in `tauri.conf.json`.
-  4. Create the release, then run `scripts/update-manifest.mjs` on a folder that holds only the published platforms (`windows-x86_64`, `linux-x86_64` without the `.deb`), and upload `latest.json`.
+  4. Create the release, then run `scripts/update-manifest.mjs` on a folder that holds only the published platforms (`windows-x86_64`, `darwin-aarch64` without the `.dmg`, `linux-x86_64` without the `.deb`), and upload `latest.json`. The release assets are the Windows installer and `.sig`, the AppImage and `.sig`, the `.deb`, the `.dmg`, `1-1.app.tar.gz` and `.sig`, and `SHA256SUMS.txt`.
 
   GitHub's macOS arm64 runners often fail to start a job. Rerun that job, or release on green code checks when macOS is not shipped.
 
@@ -40,7 +40,7 @@
    - **Native pointer, as Royal TS and mstsc do it:** set `pointer_software_rendering` to false, show the remote pointer bitmap as the CSS cursor over the canvas, and hide and restore it cleanly at the window edge. The local pointer currently stays visible next to the drawn one.
    - ~~HiDPI~~: done in alpha.7.
    - ~~Clipboard line endings~~: done in alpha.6.
-   - **Update notice:** the startup update check is silent; the result shows only in Settings > Updates. Consider an `Update available` notice.
+   - ~~Update notice~~: done after alpha.7 (a toast plus a marker on the Settings button). First visible when alpha.8 is out.
    - **Command line:** `1-1 --host <saved name|address[:port]>` connects directly, asks for the password if none is saved, and opens only the session with the sidebar hidden.
    - **CPU:** about 2% per connection on an i9 at high resolution with RDP 6.1 compression. Measure after the pointer change.
 4. **Open acceptance checks from 17 November:**
