@@ -14,7 +14,7 @@
 #[cfg(windows)]
 pub(crate) use windows_links::LinkSafeBackend;
 #[cfg(windows)]
-pub(crate) use windows_root::{BindError, BoundRoot};
+pub(crate) use windows_root::{BindError, BoundRoot, resolves_to};
 
 /// Files with more than one hard link can have a name outside the granted
 /// folder (pnpm and uv stores create them). The remote may read them, which
@@ -23,6 +23,12 @@ pub(crate) use windows_root::{BindError, BoundRoot};
 /// that lives outside it (user decision 2026-11-18). An already-open handle
 /// that a local program moves out stays usable until closed; every new open
 /// still resolves from the bound root.
+///
+/// A stream (`file:stream`) belongs to its file, so it counts that file's
+/// links. When the count cannot be read, a change is refused. Renaming over a
+/// multiply linked file is refused too. Remote hard-link creation
+/// (FileLinkInformation) never reaches the backend: ironrdp-rdpdr 0.9 does not
+/// decode that class, so such a request fails before it.
 #[cfg(windows)]
 mod windows_links {
     use ironrdp_pdu::PduResult;
@@ -30,16 +36,16 @@ mod windows_links {
     use ironrdp_rdpdr::backend::RdpdrBackend;
     use ironrdp_rdpdr::pdu::RdpdrPdu;
     use ironrdp_rdpdr::pdu::efs::{
-        AnyIoCtlCode, CreateDisposition, CreateOptions, DecodedDeviceControlRequest, DesiredAccess,
-        DeviceControlRequest, DeviceCreateRequest, DeviceCreateResponse, DeviceIoRequest,
-        DeviceIoResponse, Information, NtStatus, PrinterIoRequest, ServerDeviceAnnounceResponse,
-        ServerDriveIoRequest,
+        AnyIoCtlCode, Boolean, ClientDriveSetInformationResponse, CreateDisposition, CreateOptions,
+        DecodedDeviceControlRequest, DesiredAccess, DeviceControlRequest, DeviceCreateRequest,
+        DeviceCreateResponse, DeviceIoRequest, DeviceIoResponse, FileInformationClass, Information,
+        NtStatus, PrinterIoRequest, ServerDeviceAnnounceResponse, ServerDriveIoRequest,
     };
     use ironrdp_rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
     use ironrdp_rdpdr::pdu::esp::PortIoRequest;
     use ironrdp_svc::SvcMessage;
     use std::{
-        mem,
+        io, mem,
         os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
         path::{Path, PathBuf},
     };
@@ -79,20 +85,26 @@ mod windows_links {
             .contains(&request.create_disposition)
     }
 
-    /// The link count of an existing entry below `root`, or `None` when it
-    /// does not exist or cannot be inspected; the native backend then
-    /// answers the request itself.
-    pub(super) fn link_count(root: &Path, remote_path: &str) -> Option<u32> {
+    /// The link count of the entry a remote path names below `root`. A stream
+    /// name counts the file it belongs to. `Ok(None)` means nothing exists
+    /// there yet; any other failure is an error, so callers fail closed.
+    pub(super) fn link_count(root: &Path, remote_path: &str) -> io::Result<Option<u32>> {
         let relative = remote_path.trim_start_matches(['\\', '/']);
+        // NTFS names cannot contain ':', so the first one starts a stream name.
+        let relative = relative.split(':').next().unwrap_or_default();
         if relative.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let file = std::fs::File::options()
+        let opened = std::fs::File::options()
             .access_mode(FILE_READ_ATTRIBUTES.0)
             .share_mode(0x7)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
-            .open(root.join(relative))
-            .ok()?;
+            .open(root.join(relative));
+        let file = match opened {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let mut info = FILE_STANDARD_INFO::default();
         // SAFETY: The buffer is an owned struct of the size passed; the
         // handle stays open for the call.
@@ -104,8 +116,13 @@ mod windows_links {
                 mem::size_of::<FILE_STANDARD_INFO>() as u32,
             )
         }
-        .ok()?;
-        Some(info.NumberOfLinks)
+        .map_err(io::Error::other)?;
+        Ok(Some(info.NumberOfLinks))
+    }
+
+    /// A change is safe only for a new entry or one with a single name.
+    fn may_change(root: &Path, remote_path: &str) -> bool {
+        matches!(link_count(root, remote_path), Ok(None | Some(0 | 1)))
     }
 
     /// Refuse a mutating open of a multiply linked file before the native
@@ -126,7 +143,7 @@ mod windows_links {
         }
 
         fn refuses(&self, request: &DeviceCreateRequest) -> bool {
-            mutates(request) && link_count(&self.root, &request.path).is_some_and(|links| links > 1)
+            mutates(request) && !may_change(&self.root, &request.path)
         }
     }
 
@@ -184,6 +201,18 @@ mod windows_links {
                     },
                 ))]);
             }
+            // Replacing a multiply linked file would unlink one of its names.
+            if let ServerDriveIoRequest::ServerDriveSetInformationRequest(set) = &req
+                && let FileInformationClass::Rename(rename) = &set.set_buffer
+                && rename.replace_if_exists == Boolean::True
+                && !may_change(&self.root, &rename.file_name)
+            {
+                let refusal = ClientDriveSetInformationResponse::new(set, NtStatus::ACCESS_DENIED)
+                    .map_err(|e| ironrdp_pdu::encode_err!(e))?;
+                return Ok(vec![SvcMessage::from(
+                    RdpdrPdu::ClientDriveSetInformationResponse(refusal),
+                )]);
+            }
             self.inner.handle_drive_io_request(req)
         }
 
@@ -233,8 +262,9 @@ mod windows_root {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_TRAVERSE,
-        FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx,
+        FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+        FILE_TRAVERSE, FileAttributeTagInfo, FileIdInfo, GETFINALPATHNAMEBYHANDLE_FLAGS,
+        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
     };
 
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
@@ -330,11 +360,24 @@ mod windows_root {
             let mut current = PathBuf::from(prefix.as_os_str());
             current.push(Component::RootDir.as_os_str());
             let mut guards = Vec::with_capacity(names.len());
+            let mut paths = Vec::with_capacity(names.len());
             for name in names {
                 current.push(name.as_os_str());
                 guards.push(guard(&current)?);
+                paths.push(current.clone());
+            }
+            // With every guard held, check again that no component became a
+            // link and that the root resolves to the granted path; a
+            // substituted drive letter or a short name resolves elsewhere.
+            for (file, path) in guards.iter().zip(&paths) {
+                check_directory(file, path)?;
             }
             let root = guards.last().expect("at least one component");
+            match resolves_to(handle(root), &current) {
+                Ok(true) => {}
+                Ok(false) => return Err(BindError::Replaced),
+                Err(cause) => return Err(BindError::Unavailable(cause)),
+            }
             let (volume, file) =
                 identity(root).map_err(|e| BindError::Unavailable(e.to_string()))?;
             if (volume, file) != (volume_id, file_id) {
@@ -365,14 +408,46 @@ mod windows_root {
                 Some(ERROR_SHARING_VIOLATION) => BindError::Busy(path.to_path_buf()),
                 _ => BindError::Unavailable(format!("{}: {error}", path.display())),
             })?;
-        let attributes = attributes(&file).map_err(|e| BindError::Unavailable(e.to_string()))?;
+        check_directory(&file, path)?;
+        Ok(file)
+    }
+
+    /// The open component is a plain directory, not a link.
+    fn check_directory(file: &File, path: &Path) -> Result<(), BindError> {
+        let attributes = attributes(file).map_err(|e| BindError::Unavailable(e.to_string()))?;
         if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(BindError::Link(path.to_path_buf()));
         }
         if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
             return Err(BindError::NotADirectory(path.to_path_buf()));
         }
-        Ok(file)
+        Ok(())
+    }
+
+    /// Whether the open handle's final DOS path is `path` itself.
+    pub(crate) fn resolves_to(handle: HANDLE, path: &Path) -> Result<bool, String> {
+        let mut buffer = vec![0u16; 512];
+        loop {
+            // SAFETY: The buffer is owned and its length is passed; the handle
+            // belongs to an open file for the duration of the call.
+            let length = unsafe {
+                GetFinalPathNameByHandleW(
+                    handle,
+                    &mut buffer,
+                    GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0),
+                )
+            } as usize;
+            if length == 0 {
+                return Err("Could not resolve the folder's location.".into());
+            }
+            if length < buffer.len() {
+                let resolved = String::from_utf16_lossy(&buffer[..length]);
+                let resolved = resolved.strip_prefix(r"\\?\").unwrap_or(&resolved);
+                let chosen = path.to_string_lossy();
+                return Ok(resolved.to_lowercase() == chosen.trim_end_matches('\\').to_lowercase());
+            }
+            buffer.resize(length + 1, 0);
+        }
     }
 
     fn handle(file: &File) -> HANDLE {

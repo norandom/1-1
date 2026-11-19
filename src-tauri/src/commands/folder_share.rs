@@ -442,38 +442,11 @@ mod native {
 
 #[cfg(windows)]
 mod native_paths {
-    use std::path::Path;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{
-        FILE_NAME_NORMALIZED, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW,
-        GetVolumeInformationByHandleW, VOLUME_NAME_DOS,
-    };
+    use windows::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
 
-    /// Whether the open handle's final DOS path is `path` itself.
-    pub(super) fn resolves_to(handle: HANDLE, path: &Path) -> Result<bool, String> {
-        let mut buffer = vec![0u16; 512];
-        loop {
-            // SAFETY: The buffer is owned and its length is passed; the handle
-            // belongs to an open file for the duration of the call.
-            let length = unsafe {
-                GetFinalPathNameByHandleW(
-                    handle,
-                    &mut buffer,
-                    GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0),
-                )
-            } as usize;
-            if length == 0 {
-                return Err("Could not resolve the folder's location.".into());
-            }
-            if length < buffer.len() {
-                let resolved = String::from_utf16_lossy(&buffer[..length]);
-                let resolved = resolved.strip_prefix(r"\\?\").unwrap_or(&resolved);
-                let chosen = path.to_string_lossy();
-                return Ok(resolved.to_lowercase() == chosen.trim_end_matches('\\').to_lowercase());
-            }
-            buffer.resize(length + 1, 0);
-        }
-    }
+    /// Shared with the drive binding, which checks the same thing.
+    pub(super) use crate::rdp::folder_share::resolves_to;
 
     pub(super) fn file_system_name(handle: HANDLE) -> Result<String, String> {
         let mut name = [0u16; 64];

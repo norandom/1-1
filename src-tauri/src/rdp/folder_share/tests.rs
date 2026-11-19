@@ -120,6 +120,29 @@ fn links_missing_folders_and_non_folders_fail_closed() {
 }
 
 #[test]
+fn a_path_that_resolves_elsewhere_is_refused() {
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+    use windows::core::HSTRING;
+    let (_dir, base) = real_dir();
+    let root = base.join("a folder with a long name");
+    fs::create_dir(&root).unwrap();
+    let (volume, file) = identity_of(&root);
+    let mut buffer = [0u16; 1024];
+    // SAFETY: The buffer is owned and its length is passed.
+    let length = unsafe { GetShortPathNameW(&HSTRING::from(root.as_os_str()), Some(&mut buffer)) };
+    let short = PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
+    if length == 0 || short == root {
+        return; // This volume does not create short names.
+    }
+    // The same folder, named differently: only the granted spelling binds.
+    assert_eq!(
+        BoundRoot::bind(&short, volume, file).unwrap_err(),
+        BindError::Replaced
+    );
+    BoundRoot::bind(&root, volume, file).unwrap();
+}
+
+#[test]
 fn a_component_held_open_for_rename_is_reported_busy() {
     use std::os::windows::fs::OpenOptionsExt;
     let (_dir, base) = real_dir();
@@ -146,9 +169,10 @@ mod links {
     use ironrdp_pdu::PduResult;
     use ironrdp_rdpdr::backend::RdpdrBackend;
     use ironrdp_rdpdr::pdu::efs::{
-        CreateDisposition, CreateOptions, DesiredAccess, DeviceControlRequest, DeviceCreateRequest,
-        DeviceIoRequest, FileAttributes, MajorFunction, MinorFunction,
-        ServerDeviceAnnounceResponse, ServerDriveIoRequest, SharedAccess,
+        Boolean, CreateDisposition, CreateOptions, DesiredAccess, DeviceControlRequest,
+        DeviceCreateRequest, DeviceIoRequest, FileAttributes, FileInformationClass,
+        FileRenameInformation, MajorFunction, MinorFunction, ServerDeviceAnnounceResponse,
+        ServerDriveIoRequest, ServerDriveSetInformationRequest, SharedAccess,
     };
     use ironrdp_rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
     use ironrdp_svc::SvcMessage;
@@ -253,11 +277,18 @@ mod links {
         fs::write(root.join("linked.txt"), b"x").unwrap();
         fs::hard_link(root.join("linked.txt"), root.join("alias.txt")).unwrap();
         fs::create_dir(root.join("folder")).unwrap();
-        assert_eq!(link_count(&root, r"\single.txt"), Some(1));
-        assert_eq!(link_count(&root, r"\linked.txt"), Some(2));
-        assert_eq!(link_count(&root, r"\folder"), Some(1));
-        assert_eq!(link_count(&root, r"\missing.txt"), None);
-        assert_eq!(link_count(&root, r"\"), None);
+        let count = |path| link_count(&root, path).unwrap();
+        assert_eq!(count(r"\single.txt"), Some(1));
+        assert_eq!(count(r"\linked.txt"), Some(2));
+        assert_eq!(count(r"\folder"), Some(1));
+        assert_eq!(count(r"\missing.txt"), None);
+        assert_eq!(count(r"\missing\deeper.txt"), None);
+        assert_eq!(count(r"\"), None);
+        // A new stream belongs to its file, so it counts that file's links.
+        assert_eq!(count(r"\linked.txt:notes"), Some(2));
+        assert_eq!(count(r"\linked.txt::`$DATA"), Some(2));
+        // Anything but "not found" is an error, never "no links".
+        assert!(link_count(&root, r"\bad<name>.txt").is_err());
     }
 
     #[derive(Debug, Default)]
@@ -287,6 +318,87 @@ mod links {
         }
     }
 
+    const ACCESS_DENIED: u32 = 0xC000_0022;
+
+    /// The common part of an encoded device I/O reply.
+    struct Reply {
+        completion_id: u32,
+        status: u32,
+        rest: Vec<u8>,
+    }
+
+    impl Reply {
+        fn of(message: &SvcMessage) -> Self {
+            let bytes = message.encode_unframed_pdu().unwrap();
+            let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            // RDPDR header (4 bytes), then DeviceId, CompletionId and IoStatus.
+            Self {
+                completion_id: word(8),
+                status: word(12),
+                rest: bytes[16..].to_vec(),
+            }
+        }
+    }
+
+    fn rename(to: &str, replace: bool) -> ServerDriveIoRequest {
+        ServerDriveIoRequest::ServerDriveSetInformationRequest(ServerDriveSetInformationRequest {
+            device_io_request: DeviceIoRequest {
+                device_id: 1,
+                file_id: 3,
+                completion_id: 9,
+                major_function: MajorFunction::SetInformation,
+                minor_function: MinorFunction::from(0),
+            },
+            set_buffer: FileInformationClass::Rename(FileRenameInformation {
+                replace_if_exists: if replace {
+                    Boolean::True
+                } else {
+                    Boolean::False
+                },
+                file_name: to.into(),
+            }),
+        })
+    }
+
+    #[test]
+    fn renaming_over_a_multiply_linked_file_is_refused() {
+        let (_dir, root) = real_dir();
+        fs::write(root.join("linked.txt"), b"x").unwrap();
+        fs::hard_link(root.join("linked.txt"), root.join("alias.txt")).unwrap();
+        fs::write(root.join("single.txt"), b"x").unwrap();
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let mut backend =
+            LinkSafeBackend::new(Box::new(Recording(Arc::clone(&forwarded))), root.clone());
+
+        let refused = backend
+            .handle_drive_io_request(rename(r"\linked.txt", true))
+            .unwrap();
+        let reply = Reply::of(&refused[0]);
+        assert_eq!((reply.completion_id, reply.status), (9, ACCESS_DENIED));
+        assert_eq!(forwarded.load(Ordering::SeqCst), 0);
+
+        // Without replacing, the native backend reports the collision itself.
+        assert!(
+            backend
+                .handle_drive_io_request(rename(r"\linked.txt", false))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            backend
+                .handle_drive_io_request(rename(r"\single.txt", true))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            backend
+                .handle_drive_io_request(rename(r"\new.txt", true))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(forwarded.load(Ordering::SeqCst), 3);
+    }
+
     #[test]
     fn writes_to_multiply_linked_files_are_refused_and_everything_else_passes_through() {
         let (_dir, root) = real_dir();
@@ -303,7 +415,20 @@ mod links {
         };
 
         let refused = send(write(r"\linked.txt"));
-        assert_eq!(refused.len(), 1, "an ACCESS_DENIED create response");
+        assert_eq!(refused.len(), 1, "one create response");
+        let reply = Reply::of(&refused[0]);
+        assert_eq!((reply.completion_id, reply.status), (7, ACCESS_DENIED));
+        assert_eq!(reply.rest, [0, 0, 0, 0, 0], "file id 0 and no information");
+        // Adding a stream changes the linked file too.
+        assert_eq!(
+            Reply::of(&send(write(r"\linked.txt:notes"))[0]).status,
+            ACCESS_DENIED
+        );
+        // A count that cannot be read refuses the change.
+        assert_eq!(
+            Reply::of(&send(write(r"\bad<name>.txt"))[0]).status,
+            ACCESS_DENIED
+        );
         assert_eq!(
             forwarded.load(Ordering::SeqCst),
             0,
