@@ -5,7 +5,7 @@
 <h1 align="center">1-1</h1>
 
 <p align="center">
-  <strong>1-1 is an RDP client for Windows machines, running on Windows, macOS, and Linux. A personal fork of Drift.</strong>
+  <strong>1-1 is a free cross-platform RDP client for Windows, Linux, and macOS. For Windows RDP, IronRDP, XfreeRDP etc. On top of that it's uniquely designed for the AI era.</strong>
   <br />
   Pronounced "zero."
   <br />
