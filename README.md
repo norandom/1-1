@@ -23,9 +23,16 @@
 
 <br />
 
-<p align="center">
-  <img src=".github/assets/drift-session.png" width="800" alt="1-1, connected to a Windows machine" />
-</p>
+<table align="center">
+  <tr>
+    <td width="50%"><img src=".github/assets/session-linux-xfreerdp.png" alt="1-1 connected to an xfreerdp server on Debian-based Linux, with a shared folder accepted" /></td>
+    <td width="50%"><img src=".github/assets/session-windows-11.png" alt="1-1 connected to Windows 11, with a shared folder shown as a redirected drive in Explorer" /></td>
+  </tr>
+  <tr>
+    <td align="center">xfreerdp server on Debian-based Linux</td>
+    <td align="center">Windows RDP on Windows 11</td>
+  </tr>
+</table>
 
 <br />
 
