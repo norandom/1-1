@@ -2231,11 +2231,18 @@ fn reset_software_pointer(
 }
 
 /// The ready signal of this connection's shared folder worker, if any.
+#[cfg(any(windows, test))]
 fn share_ready(stage: &mut ironrdp_session::ActiveStage) -> Option<Arc<tokio::sync::Notify>> {
     stage
         .get_svc_processor::<ironrdp_rdpdr::Rdpdr>()?
         .downcast_backend::<crate::rdp::folder_share::worker::WorkerBackend>()
         .map(|worker| worker.ready())
+}
+
+/// No folder is shared outside the Windows build.
+#[cfg(not(any(windows, test)))]
+fn share_ready(_stage: &mut ironrdp_session::ActiveStage) -> Option<Arc<tokio::sync::Notify>> {
+    None
 }
 
 /// Keep one request while the server opens the channel and sends capabilities.
