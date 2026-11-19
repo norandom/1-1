@@ -9,13 +9,13 @@ use tokio::io::duplex;
 use tokio::io::{AsyncReadExt as _, DuplexStream};
 use tokio_rustls::TlsAcceptor;
 
-const SERVER: &[u8] = include_bytes!("fixtures/server.der");
-const SERVER_KEY: &[u8] = include_bytes!("fixtures/server-key.der");
-const OTHER_KEY: &[u8] = include_bytes!("fixtures/self-signed-key.der");
-const SELF_SIGNED: &[u8] = include_bytes!("fixtures/self-signed.der");
+pub(crate) const SERVER: &[u8] = include_bytes!("fixtures/server.der");
+pub(crate) const SERVER_KEY: &[u8] = include_bytes!("fixtures/server-key.der");
+pub(crate) const OTHER_KEY: &[u8] = include_bytes!("fixtures/self-signed-key.der");
+pub(crate) const SELF_SIGNED: &[u8] = include_bytes!("fixtures/self-signed.der");
 const CA: &[u8] = include_bytes!("fixtures/ca.der");
 
-fn endpoint(host: &str, port: u16) -> Endpoint {
+pub(crate) fn endpoint(host: &str, port: u16) -> Endpoint {
     ConnectionTarget::new(host, port).unwrap().endpoint
 }
 
@@ -39,7 +39,8 @@ fn fixture_roots() -> RootCertStore {
     roots
 }
 
-async fn fixture(
+/// A real TLS handshake with a fixture server over an in-memory pipe.
+pub(crate) async fn fixture(
     endpoint: &Endpoint,
     cert: &'static [u8],
     key: &'static [u8],

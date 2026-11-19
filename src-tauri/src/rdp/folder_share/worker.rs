@@ -123,6 +123,8 @@ pub(crate) struct WorkerBackend {
     ledger: Arc<Mutex<Ledger>>,
     limits: Limits,
     wake: Wake,
+    /// Signalled with `wake`, for an async session loop to await.
+    ready: Arc<tokio::sync::Notify>,
     drive_security: bool,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -151,6 +153,13 @@ impl WorkerBackend {
         // Admission bounds the queue; the extra room is for setup calls.
         let (jobs, inbox) = mpsc::sync_channel(limits.requests + 4);
         let (outbox, replies) = mpsc::channel();
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&ready);
+        let wake: Wake = Arc::new(move || {
+            // A stored permit means a wake is never lost between polls.
+            signal.notify_one();
+            wake();
+        });
         let worker_wake = Arc::clone(&wake);
         let worker = thread::Builder::new()
             .name("1-1 folder share".into())
@@ -162,9 +171,15 @@ impl WorkerBackend {
             ledger: Arc::default(),
             limits,
             wake,
+            ready,
             drive_security,
             worker: Some(worker),
         }
+    }
+
+    /// Notified whenever completions are waiting for `poll_deferred_messages`.
+    pub(crate) fn ready(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.ready)
     }
 
     pub(crate) fn stats(&self) -> WorkerStats {

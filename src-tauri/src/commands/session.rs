@@ -48,6 +48,20 @@ fn initial_config(
     Ok(config)
 }
 
+/// A connection's folder grant, read again on every connection attempt. An
+/// unreadable grant file offers no folder; the desktop still connects.
+fn share_source(
+    grants: Arc<crate::store::share_grants::ShareGrantStore>,
+) -> crate::rdp::session::ShareSource {
+    Arc::new(move |connection_id| match grants.get(connection_id) {
+        Ok(grant) => grant,
+        Err(error) => {
+            log::warn!("Folder share grant unavailable: {error}");
+            None
+        }
+    })
+}
+
 /// The password a session dials with: one entered at connect, otherwise the
 /// keychain's, and only for a host that saves its password.
 fn session_password(
@@ -129,6 +143,7 @@ pub async fn connect(
     session_mgr: State<'_, SessionManager>,
     settings_store: State<'_, SettingsStore>,
     shared_frame: State<'_, Arc<SharedFrame>>,
+    share_grants: State<'_, Arc<crate::store::share_grants::ShareGrantStore>>,
 ) -> Result<String, String> {
     // Task 7.1 (Req 2.2/11.8/11.9): the session cap and per-connection
     // idempotent admission are enforced atomically inside SessionManager
@@ -193,6 +208,7 @@ pub async fn connect(
             app,
             auto_reconnect,
             native_frame,
+            share_source(Arc::clone(&share_grants)),
         )
         .await?;
 

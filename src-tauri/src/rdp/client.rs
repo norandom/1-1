@@ -323,6 +323,18 @@ pub async fn attempt_rdp_connection(
     width: u32,
     height: u32,
 ) -> ConnectionOutcome {
+    attempt_rdp_connection_with_share(config, password, width, height, None).await
+}
+
+/// [`attempt_rdp_connection`], offering `share` as a redirected drive when
+/// the server and folder still match it (rdp-folder-sharing task 5.2).
+pub(crate) async fn attempt_rdp_connection_with_share(
+    config: &ConnectionConfig,
+    password: Option<&str>,
+    width: u32,
+    height: u32,
+    share: Option<crate::store::share_grants::ShareGrant>,
+) -> ConnectionOutcome {
     let password = password.unwrap_or_default();
 
     // Use the same DNS/IP destination for dialing and TLS name validation.
@@ -389,6 +401,22 @@ pub async fn attempt_rdp_connection(
     };
     // An ordinary desktop permits self-signed hosts. Consumers of authenticated
     // identity call SignedTls::verify before releasing credentials or a share.
+    // The drive channel is decided here, before the channel list is sent.
+    #[cfg(windows)]
+    if let Some(grant) = share {
+        let name = grant.share_name.clone();
+        match crate::rdp::folder_share::attach::drive_channel(&tls, &target.endpoint, grant).await {
+            Ok(rdpdr) => {
+                connector.attach_static_channel(rdpdr);
+                log::info!("Offering the shared folder {name:?} on this connection");
+            }
+            Err(reason) => log::info!("Not offering the shared folder {name:?}: {reason}"),
+        }
+    }
+    #[cfg(not(windows))]
+    if share.is_some() {
+        log::info!("Folder sharing is available only in the Windows build");
+    }
     let (tls_stream, server_public_key) = tls.into_parts();
     let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
     let mut tls_framed = TokioFramed::new(tls_stream);

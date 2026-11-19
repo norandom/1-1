@@ -9,7 +9,7 @@ use tauri::Emitter;
 use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
 
-use crate::rdp::client::{ConnectionOutcome, SessionCommand, attempt_rdp_connection};
+use crate::rdp::client::{ConnectionOutcome, SessionCommand};
 use crate::rdp::clipboard::SessionClipboardBackend;
 use crate::rdp::codec_policy::{CodecErrorPolicy, CopyDamage};
 use crate::rdp::display::FrameBuffer;
@@ -129,13 +129,62 @@ pub(crate) type ConnectFn = Arc<
         + Sync,
 >;
 
-/// Production connector: always [`attempt_rdp_connection`].
-pub(crate) fn real_connect() -> ConnectFn {
-    Arc::new(|config, password, width, height| {
+/// Where a connection attempt finds the host's folder grant. Read on every
+/// attempt, so a reconnect sees a revoked or changed grant.
+pub(crate) type ShareSource =
+    Arc<dyn Fn(&str) -> Option<crate::store::share_grants::ShareGrant> + Send + Sync>;
+
+/// Production connector with the host's shared folder, if one is granted.
+pub(crate) fn real_connect_with_shares(shares: ShareSource) -> ConnectFn {
+    Arc::new(move |config, password, width, height| {
+        let share = shares(&config.id);
         Box::pin(async move {
-            attempt_rdp_connection(&config, password.as_deref(), width, height).await
+            crate::rdp::client::attempt_rdp_connection_with_share(
+                &config,
+                password.as_deref(),
+                width,
+                height,
+                share,
+            )
+            .await
         })
     })
+}
+
+#[cfg(test)]
+mod share_source_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn every_connection_attempt_reads_the_grant_again() {
+        // A port nothing listens on: each attempt fails fast, without a server.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "host-7", "name": "Host", "host": "127.0.0.1", "port": port,
+            "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&reads);
+        let connect = real_connect_with_shares(Arc::new(move |id| {
+            seen.lock().unwrap().push(id.to_owned());
+            None
+        }));
+        for _ in 0..2 {
+            let outcome = connect(config.clone(), None, 800, 600).await;
+            assert!(matches!(outcome, ConnectionOutcome::Failed(_)));
+        }
+        assert_eq!(
+            *reads.lock().unwrap(),
+            ["host-7", "host-7"],
+            "one read per attempt"
+        );
+    }
 }
 
 /// Task 5.3 (Req 12.2/12.10): evaluate a mock-session request at the connect
@@ -1010,6 +1059,45 @@ impl SessionActor {
         }
     }
 
+    /// Send one batch of the shared folder's completed replies. A failed
+    /// encode loses only those replies; a failed write ends the connection.
+    async fn send_share_replies<SW: ironrdp_tokio::FramedWrite>(
+        &mut self,
+        stage: &mut ironrdp_session::ActiveStage,
+        writer: &mut ironrdp_tokio::Framed<SW>,
+    ) -> Result<(), DisconnectReason> {
+        use ironrdp_tokio::FramedWrite as _;
+        let Some(rdpdr) = stage.get_svc_processor_mut::<ironrdp_rdpdr::Rdpdr>() else {
+            return Ok(());
+        };
+        let replies = match rdpdr.poll_deferred_messages() {
+            Ok(replies) if !replies.is_empty() => replies,
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                log::warn!("Session {} folder share replies failed: {error}", self.id);
+                return Ok(());
+            }
+        };
+        let frame = match stage.process_svc_processor_messages(ironrdp_svc::SvcProcessorMessages::<
+            ironrdp_rdpdr::Rdpdr,
+        >::new(replies))
+        {
+            Ok(frame) => frame,
+            Err(error) => {
+                log::warn!(
+                    "Session {} folder share reply encoding failed: {error}",
+                    self.id
+                );
+                return Ok(());
+            }
+        };
+        if let Err(error) = writer.write_all(&frame).await {
+            self.last_error = Some(format!("Folder share write failed: {error}"));
+            return Err(DisconnectReason::ConnectionLost);
+        }
+        Ok(())
+    }
+
     async fn write_display_action<SW: ironrdp_tokio::FramedWrite>(
         &mut self,
         action: DisplayAction,
@@ -1080,6 +1168,8 @@ impl SessionActor {
         self.clipboard_epoch = Uuid::new_v4().to_string();
         self.local_clipboard_text = None;
         let _ = self.clipboard_tx.send(None);
+        // The shared folder's completions, when this connection offers one.
+        let share_ready = share_ready(&mut active_stage);
 
         'session: loop {
             if let Some(result) = encode_pending_resize(
@@ -1118,6 +1208,18 @@ impl SessionActor {
                     self.publish_info();
                 },
                 _ = crate::rdp::frame_delivery::wait_for_stall(self.delivery.deadline()) => self.check_display_stall(),
+                // File replies wait their turn with input and frames: one bounded
+                // batch per wake, and the worker wakes the loop again for more.
+                _ = async {
+                    match &share_ready {
+                        Some(ready) => ready.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Err(reason) = self.send_share_replies(&mut active_stage, &mut writer).await {
+                        return reason;
+                    }
+                },
                 // Read PDUs from the server
                 pdu_result = reader.read_pdu() => {
                     let (action, payload) = match pdu_result {
@@ -2128,6 +2230,14 @@ fn reset_software_pointer(
     Ok(())
 }
 
+/// The ready signal of this connection's shared folder worker, if any.
+fn share_ready(stage: &mut ironrdp_session::ActiveStage) -> Option<Arc<tokio::sync::Notify>> {
+    stage
+        .get_svc_processor::<ironrdp_rdpdr::Rdpdr>()?
+        .downcast_backend::<crate::rdp::folder_share::worker::WorkerBackend>()
+        .map(|worker| worker.ready())
+}
+
 /// Keep one request while the server opens the channel and sends capabilities.
 /// Encoding consumes it only once; server activation/graphics own actual dimensions.
 pub(crate) fn encode_pending_resize(
@@ -2328,6 +2438,7 @@ impl SessionManager {
     }
 
     /// Spawn a new session actor and return its ID.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_session(
         &self,
         config: ConnectionConfig,
@@ -2336,6 +2447,7 @@ impl SessionManager {
         app_handle: tauri::AppHandle,
         auto_reconnect: bool,
         shared_frame: Option<Arc<SharedFrame>>,
+        shares: ShareSource,
     ) -> Result<String, String> {
         self.create_session_with_transport(
             config,
@@ -2344,7 +2456,7 @@ impl SessionManager {
             SessionEventSink::app(app_handle),
             auto_reconnect,
             shared_frame,
-            real_connect(),
+            real_connect_with_shares(shares),
         )
         .await
     }

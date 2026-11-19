@@ -173,6 +173,12 @@ impl<S> SignedTls<S> {
         Ok(VerifiedPeer(&self.observed))
     }
 
+    /// For tests elsewhere: the identity this connection presented.
+    #[cfg(test)]
+    pub(crate) fn observed(&self) -> &ObservedPeer {
+        &self.observed
+    }
+
     pub(crate) fn into_parts(self) -> (TlsStream<S>, Vec<u8>) {
         (self.stream, self.server_public_key)
     }
@@ -356,4 +362,4 @@ async fn discover_on_stream<S: AsyncRead + AsyncWrite + Unpin + Send + Sync>(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

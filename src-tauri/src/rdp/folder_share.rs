@@ -11,12 +11,16 @@
 //! mismatch, link or unavailable folder fails closed and the drive is not
 //! offered.
 
+#[cfg(windows)]
+pub(crate) mod attach;
 pub(crate) mod worker;
 
 #[cfg(windows)]
 pub(crate) use windows_policy::ShareBackend;
+#[cfg(all(windows, test))]
+pub(crate) use windows_root::BindError;
 #[cfg(windows)]
-pub(crate) use windows_root::{BindError, BoundRoot, resolves_to};
+pub(crate) use windows_root::{BoundRoot, resolves_to};
 
 /// Files with more than one hard link can have a name outside the granted
 /// folder (pnpm and uv stores create them). The remote may read them, which

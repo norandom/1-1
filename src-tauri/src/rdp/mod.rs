@@ -10,10 +10,6 @@ pub mod display;
 /// compositor drain to the existing SharedFrame + packet frame paths.
 pub mod egfx;
 /// rdp-folder-sharing 4.1: the granted folder held in place while a drive is attached.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, unused_imports, reason = "attached to sessions by task 5.2")
-)]
 pub(crate) mod folder_share;
 /// Task 9.4 (Req 4.1/4.4/9.8): pure dirty-region batching math for the
 /// session drain — merge one drained batch's regions into a single
