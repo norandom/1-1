@@ -98,6 +98,7 @@ Get-FileHash .\1-1_<version>_x64-setup.exe -Algorithm SHA256     # Windows: comp
 | Linux `.deb` | Install the next release's `.deb` the same way |
 
 No release yet, or you want to build your own installer? See [Build from source](#build-from-source).
+
 ## Unsigned builds, warnings, donations
 
 I do not hold a Windows or macOS developer certificate, so the installers are not Authenticode-signed and the macOS build is not notarized. Expect Windows SmartScreen ("Windows protected your PC", click "More info" then "Run anyway") and the macOS Gatekeeper block (see [macOS](#macos-apple-silicon) above). That is normal for an unsigned build, not a sign of malware. Every file's SHA-256 hash is listed in the release's `SHA256SUMS.txt`, so you can [verify what you downloaded](#verify-a-download) before running it. The update-feed signatures described under [Build from source](#build-from-source) are separate and do not change any of this.
@@ -122,6 +123,16 @@ Most of my work in this fork went into ClearCodec. I made it the preferred codec
 - Verified against three server classes: Windows RDP Server (Windows 11, NLA mandatory), FreeRDP/xfreerdp servers on Linux, and IronRDP-based Rust servers on Linux
 - Keyboard, mouse, and trackpad scroll forwarding; configurable resolution and quality per host
 - Up to 10 simultaneous sessions in tabs, with auto-reconnect and exponential backoff on connection loss
+- Server identity review: confirm a host's key fingerprint once; a changed key is flagged ([guide](docs/user-guide/server-identity.md))
+- Copy a host as a command line (`1-1 import --name … --host …`, every setting as its own flag, no password) and import it elsewhere with the fingerprint checked ([guide](docs/user-guide/command-line.md))
+
+**Shared folders** (Windows build)
+
+- Share up to eight local folders per host as drives in the remote session, read-only or read and write, and stop each one separately. Tested against Windows and xrdp servers
+- A folder is offered only to the server whose key you confirmed, at the saved address, and only while it is still the folder you chose. Otherwise the session connects without it
+- The share cannot leave its folder: no links, no parent paths, no admin-only privileges, and files with several hard links are read-only
+- The bottom bar shows what each folder achieved (offered, accepted, in use, refused, not shared and why)
+- Per-host **File transfers** setting keeps typing and the pointer responsive during copies, or trades that for speed
 
 **Bandwidth**
 
@@ -135,20 +146,25 @@ Most of my work in this fork went into ClearCodec. I made it the preferred codec
 
 - Quick Connect with `Cmd+K`; connection cards with color accents, tags, and latency indicators
 - Status bar along the bottom with connection state and metrics; hide or pin it per host, right from the bar itself
-- Bidirectional clipboard sync, with a status indicator
+- Bidirectional clipboard sync, with a status indicator; line endings are converted between Windows and Linux or macOS
+- HiDPI scaling per host: automatic (matches a Retina or HiDPI display), a custom percentage, off, or low resolution
+- Resizable, hideable sidebar; a click on a host switches to its open tab
+- A notice when an update is available; installing stays your choice
 - Dark and light themes, keyboard shortcut overlay (`Cmd+?`), SSH config import (`~/.ssh/config`)
 
 **Rendering and security**
 
-- GPU-rendered frames via wgpu (Metal on macOS, Vulkan on Linux), zero-copy SharedFrame between session and renderer, software Canvas fallback, 0% CPU when idle
-- Passwords stored in the OS keychain (Windows Credential Manager, macOS Keychain, and on Linux the Secret Service from KWallet or GNOME Keyring); no plaintext credential storage
+- Frames are drawn in the app's WebView canvas. A native wgpu renderer exists but is off by default (`ONE_ONE_NATIVE_RENDERER=1` turns it on)
+- Passwords stored in the OS keychain (Windows Credential Manager, macOS Keychain, and on Linux the Secret Service from KWallet or GNOME Keyring); no plaintext credential storage. Per host you can turn saving off and be asked at each connect
 - Connection configs as local JSON: no cloud, no telemetry
 - Ships as a single `.app`, `.AppImage`, or small NSIS installer
 
 ## In progress
 
-- RDP drive redirection (share one local folder to a saved host) with segmented copies: bounded parallel range requests, verified byte for byte
-- An rsync-style delta protocol on top of redirects, so only changed blocks move. Deferred until measurements show it pays off
+- Shared folders on the Linux and macOS builds
+- Smoother sessions during large copies on slow uplinks (sending input ahead of file data)
+- A Nix flake and an APT repository for Linux installs
+- An rsync-style delta protocol on top of shared folders, so only changed blocks move. Deferred until measurements show it pays off
 - Auto-update workflow hardening: the signed preview feed serves Windows x64, macOS Apple silicon and the Linux AppImage; runtime validation of an installed update currently covers Windows x64 only
 
 ## Build from source
