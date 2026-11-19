@@ -37,6 +37,9 @@ tauri-plugin-clipboard-manager = "=2.3.0"
 # A second launch (1-1 import ...) hands its arguments to the running window.
 tauri-plugin-single-instance = "=2.5.4"
 tokio = { version = "1", features = ["full"] }
+# Caps the socket send buffer while a folder is shared, so file data cannot
+# queue seconds ahead of input.
+socket2 = "0.6"
 thiserror = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

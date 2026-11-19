@@ -1,5 +1,7 @@
 # 1-1 maintainer handover
 
+**19 November 2026, evening.** Folder sharing now works end to end on Windows and xrdp hosts in a local build (not released yet; alpha.8 would carry it). See the folder-sharing notes below.
+
 **19 November 2026.** 1-1 (pronounced “zero”) is an RDP client for coding and monitoring remote agents. The latest release is **v0.1.0-alpha.7**: per-host HiDPI scaling, per-host password saving and the first macOS `.dmg`. The maintainer still has to confirm that Linux passwords survive a logout (KWallet) and that scaling looks right on the MacBook. Folder sharing comes next, through attaching the drive to sessions (task 5.2), before the usability items below. [Releases](https://github.com/norandom/1-1/releases)
 
 ## Releases
@@ -27,6 +29,7 @@
 
 ## Where to resume
 
+0. **Folder sharing state (19 November, evening):** tasks 1 to 5.3 are done and tested by the maintainer against Windows and xrdp. Findings from the real hosts, all fixed: xrdp sends forward-slash paths; Windows starts the drive only when the audio channel (`rdpsnd`) is registered; copies stalled the session until replies were sliced and the send buffer capped (per-host **File transfers** setting). A hung remote Explorer once needed a Windows restart; that was the remote side. hypr_rdp does not seem to implement drive redirection. Also new today: several folders per host with per-folder stop, **Copy as command line** / `1-1 import` with fingerprint check, single-click on a host switches to its tab, `docs/user-guide/`. Diagnostics: one `folder share, last` log line per second during transfers; `ONE_ONE_SHARE_TRACE=1` logs each request. Open: task 6 (acceptance record, typing-latency measurement), a prioritized writer if copies must be smoother, and releasing alpha.8.
 1. ~~Task 4.1 review findings and task 4.2~~: done 19 November (`9da6a28`, `e27c2c0`). `ShareBackend` (formerly `LinkSafeBackend`) also refuses privilege-enabling requests. Next is 4.3. The notes below are kept for context.
 1. **(Done) Fix the task 4.1 review findings**, then mark 4.1 done. Code is in `src-tauri/src/rdp/folder_share.rs`; `BoundRoot` and `LinkSafeBackend` are not wired into sessions yet.
    - *Blocker:* a create of `name:stream` on a multiply-linked file passes the link check, because the stream doesn't exist yet. New streams attach to the file itself. Strip `:stream` before counting links.

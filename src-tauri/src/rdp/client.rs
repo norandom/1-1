@@ -352,6 +352,18 @@ pub(crate) async fn attempt_rdp_connection_with_share(
         }
     };
 
+    // With a shared folder, file data competes with input for this socket.
+    // Send small packets at once and cap what the system queues for sending.
+    if !share.is_empty() {
+        let _ = tcp_stream.set_nodelay(true);
+        if let Some(bytes) = config.host_profile.transfer_pace.send_buffer_bytes() {
+            match socket2::SockRef::from(&tcp_stream).set_send_buffer_size(bytes) {
+                Ok(()) => log::info!("Folder share: send buffer capped at {} KiB", bytes / 1024),
+                Err(error) => log::warn!("Folder share: could not cap the send buffer: {error}"),
+            }
+        }
+    }
+
     // Step 2: Create ClientConnector and begin negotiation
     let connector_config = build_connector_config(config, password, width, height);
     let client_addr = tcp_stream

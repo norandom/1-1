@@ -130,6 +130,17 @@ pub enum TransferPace {
 }
 
 impl TransferPace {
+    /// The most file data the operating system may queue for sending. Input
+    /// and frame acknowledgements wait behind whatever is queued, so a small
+    /// buffer keeps them prompt. `None` keeps the system's own sizing.
+    pub fn send_buffer_bytes(self) -> Option<usize> {
+        match self {
+            Self::Responsive => Some(32 * 1024),
+            Self::Balanced => Some(128 * 1024),
+            Self::Fastest => None,
+        }
+    }
+
     /// File bytes written to the server per session-loop turn.
     pub fn slice_bytes(self) -> usize {
         match self {
