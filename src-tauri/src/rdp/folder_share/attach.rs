@@ -8,6 +8,7 @@
 //! the connection goes ahead without the channel, so the desktop never depends
 //! on a share.
 
+use super::channel::DriveChannel;
 use super::status::{ShareState, ShareStatusCell};
 use super::worker::{Limits, WorkerBackend};
 use super::{BoundRoot, ShareBackend};
@@ -70,7 +71,7 @@ pub(crate) async fn drive_channel<S>(
     tls: &SignedTls<S>,
     endpoint: &Endpoint,
     grants: Vec<ShareGrant>,
-) -> (Option<Rdpdr>, Vec<ShareStatusCell>) {
+) -> (Option<DriveChannel>, Vec<ShareStatusCell>) {
     let statuses: Vec<ShareStatusCell> =
         grants.iter().map(|_| ShareStatusCell::default()).collect();
     let mut verified = Vec::new();
@@ -119,7 +120,7 @@ async fn verify<S>(
 }
 
 /// Bind the verified folders and start one fresh worker for all of them.
-fn start(verified: Vec<(u32, ShareGrant, ShareStatusCell)>) -> Option<Rdpdr> {
+fn start(verified: Vec<(u32, ShareGrant, ShareStatusCell)>) -> Option<DriveChannel> {
     let mut drives = Vec::new();
     let mut bound = Vec::new();
     let mut roots: HashMap<u32, PathBuf> = HashMap::new();
@@ -172,7 +173,9 @@ fn start(verified: Vec<(u32, ShareGrant, ShareStatusCell)>) -> Option<Rdpdr> {
     // The worker keeps every guard until the channel ends.
     let worker = WorkerBackend::spawn(Box::new(share), bound, Limits::default(), Arc::new(|| {}))
         .with_statuses(statuses);
-    Some(Rdpdr::new(Box::new(worker), COMPUTER_NAME.into()).with_drives(Some(names)))
+    Some(DriveChannel(
+        Rdpdr::new(Box::new(worker), COMPUTER_NAME.into()).with_drives(Some(names)),
+    ))
 }
 
 #[cfg(test)]

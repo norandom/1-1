@@ -77,7 +77,7 @@ async fn connect(
         .await
         .unwrap();
     match drive_channel(&tls, &destination, vec![grant]).await {
-        (Some(rdpdr), _) => Ok(rdpdr),
+        (Some(channel), _) => Ok(channel.0),
         (None, statuses) => Err(statuses[0].get().state),
     }
 }
@@ -188,6 +188,7 @@ async fn the_session_status_follows_the_drive_from_setup_to_its_end() {
         .await
         .unwrap();
     let (rdpdr, statuses) = drive_channel(&tls, &destination, vec![s.grant.clone()]).await;
+    let rdpdr = rdpdr.map(|channel| channel.0);
     let (mut rdpdr, status) = (rdpdr.unwrap(), statuses[0].clone());
     let current = status.get();
     assert_eq!(current.state, ShareState::Negotiating);
@@ -345,6 +346,7 @@ async fn several_folders_become_separate_drives_and_a_missing_one_is_left_out() 
         .unwrap();
     let (rdpdr, statuses) =
         drive_channel(&tls, &destination, vec![s.grant.clone(), docs, gone]).await;
+    let rdpdr = rdpdr.map(|channel| channel.0);
     let states: Vec<_> = statuses.iter().map(|status| status.get()).collect();
     assert_eq!(states[0].state, ShareState::Negotiating);
     assert_eq!(states[1].state, ShareState::Negotiating);

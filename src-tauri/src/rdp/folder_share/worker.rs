@@ -55,6 +55,9 @@ pub(crate) struct Limits {
     pub(crate) queued_bytes: usize,
     /// Replies handed to the session loop per poll; the rest wait for the next.
     pub(crate) batch: usize,
+    /// Reply bytes per poll, so a run of large reads cannot hold keyboard and
+    /// pointer traffic behind megabytes on the wire. One reply always goes.
+    pub(crate) batch_bytes: usize,
 }
 
 impl Default for Limits {
@@ -63,6 +66,7 @@ impl Default for Limits {
             requests: 64,
             queued_bytes: 16 * 1024 * 1024,
             batch: 16,
+            batch_bytes: 256 * 1024,
         }
     }
 }
@@ -116,6 +120,8 @@ enum Job {
 struct Done {
     key: Option<Key>,
     status: Option<u32>,
+    /// Encoded size, for the per-poll byte budget.
+    size: usize,
     message: SvcMessage,
 }
 
@@ -314,10 +320,11 @@ fn run(
     // Reading each reply's header here keeps that work off the session loop.
     let deliver = |messages: Vec<SvcMessage>| -> bool {
         for message in messages {
-            let header = header_of(&message);
+            let (header, size) = header_of(&message);
             let done = Done {
                 key: header.map(|(device, completion, _)| (device, completion)),
                 status: header.map(|(_, _, status)| status),
+                size,
                 message,
             };
             if outbox.send(done).is_err() {
@@ -385,12 +392,15 @@ fn run(
     drop(keep_alive);
 }
 
-/// The device ID, completion ID and NTSTATUS of an encoded reply.
-fn header_of(message: &SvcMessage) -> Option<(u32, u32, u32)> {
-    let bytes = message.encode_unframed_pdu().ok()?;
+/// The device ID, completion ID and NTSTATUS of an encoded reply, and its size.
+fn header_of(message: &SvcMessage) -> (Option<(u32, u32, u32)>, usize) {
+    let Ok(bytes) = message.encode_unframed_pdu() else {
+        return (None, 0);
+    };
     let word = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
     // RDPDR header (component and packet ID), then DeviceId, CompletionId, IoStatus.
-    Some((word(4)?, word(8)?, word(12)?))
+    let header = (|| Some((word(4)?, word(8)?, word(12)?)))();
+    (header, bytes.len())
 }
 
 impl RdpdrBackend for WorkerBackend {
@@ -494,10 +504,17 @@ impl RdpdrBackend for WorkerBackend {
 
     fn poll_deferred_messages(&mut self) -> PduResult<Vec<SvcMessage>> {
         let mut messages = Vec::new();
+        let mut bytes = 0;
+        let mut more = false;
         while messages.len() < self.limits.batch {
+            if !messages.is_empty() && bytes >= self.limits.batch_bytes {
+                more = true;
+                break;
+            }
             let Ok(done) = self.replies.try_recv() else {
                 break;
             };
+            bytes += done.size;
             let ticket = done.key.and_then(|key| self.ledger().settle(key));
             if let (Some(status), Some((device_id, _))) = (done.status, done.key)
                 && let Some(cell) = self.status(device_id)
@@ -507,7 +524,7 @@ impl RdpdrBackend for WorkerBackend {
             }
             messages.push(done.message);
         }
-        if messages.len() == self.limits.batch {
+        if more || messages.len() == self.limits.batch {
             // More may be waiting: come back after the next input and frames.
             (self.wake)();
         }

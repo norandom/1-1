@@ -1081,10 +1081,12 @@ impl SessionActor {
         writer: &mut ironrdp_tokio::Framed<SW>,
     ) -> Result<(), DisconnectReason> {
         use ironrdp_tokio::FramedWrite as _;
-        let Some(rdpdr) = stage.get_svc_processor_mut::<ironrdp_rdpdr::Rdpdr>() else {
+        let Some(rdpdr) =
+            stage.get_svc_processor_mut::<crate::rdp::folder_share::channel::DriveChannel>()
+        else {
             return Ok(());
         };
-        let replies = match rdpdr.poll_deferred_messages() {
+        let replies = match rdpdr.0.poll_deferred_messages() {
             Ok(replies) if !replies.is_empty() => replies,
             Ok(_) => return Ok(()),
             Err(error) => {
@@ -1093,7 +1095,7 @@ impl SessionActor {
             }
         };
         let frame = match stage.process_svc_processor_messages(ironrdp_svc::SvcProcessorMessages::<
-            ironrdp_rdpdr::Rdpdr,
+            crate::rdp::folder_share::channel::DriveChannel,
         >::new(replies))
         {
             Ok(frame) => frame,
@@ -2250,7 +2252,8 @@ fn reset_software_pointer(
 #[cfg(any(windows, test))]
 fn share_ready(stage: &mut ironrdp_session::ActiveStage) -> Option<Arc<tokio::sync::Notify>> {
     stage
-        .get_svc_processor::<ironrdp_rdpdr::Rdpdr>()?
+        .get_svc_processor::<crate::rdp::folder_share::channel::DriveChannel>()?
+        .0
         .downcast_backend::<crate::rdp::folder_share::worker::WorkerBackend>()
         .map(|worker| worker.ready())
 }

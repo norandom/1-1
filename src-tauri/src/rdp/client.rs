@@ -477,7 +477,7 @@ pub(crate) async fn attempt_rdp_connection_with_share(
         "Static channels: drive {:?}, clipboard {:?}, I/O {}",
         connection_result
             .static_channels
-            .get_channel_id_by_type::<ironrdp_rdpdr::Rdpdr>(),
+            .get_channel_id_by_type::<crate::rdp::folder_share::channel::DriveChannel>(),
         connection_result
             .static_channels
             .get_channel_id_by_type::<ironrdp_cliprdr::CliprdrClient>(),

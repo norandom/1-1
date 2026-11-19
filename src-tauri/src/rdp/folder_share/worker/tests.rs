@@ -256,6 +256,7 @@ fn a_stalled_disk_never_blocks_the_caller_and_limits_answer_at_once() {
         requests: 4,
         queued_bytes: 4096,
         batch: 16,
+        ..Limits::default()
     };
     let mut h = harness(limits);
     h.script.stalled.store(true, Ordering::SeqCst);
@@ -360,6 +361,7 @@ fn replies_leave_in_bounded_batches_and_the_loop_is_woken_for_the_rest() {
         requests: 64,
         queued_bytes: 1 << 20,
         batch: 4,
+        ..Limits::default()
     });
     for completion in 0..10 {
         h.backend
@@ -434,4 +436,33 @@ fn setup_calls_run_on_the_worker() {
         ["1-1 folder share", "1-1 folder share"],
         "attach and detach ran on the worker"
     );
+}
+
+#[test]
+fn large_replies_leave_a_few_at_a_time_so_input_is_not_held_up() {
+    // Each fake read reply is 32 bytes; a 60-byte budget lets two go per poll.
+    let limits = Limits {
+        batch_bytes: 60,
+        ..Limits::default()
+    };
+    let mut h = harness(limits);
+    for completion in 0..6 {
+        h.backend
+            .handle_drive_io_request(read(1, completion, 0))
+            .unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.script.started.load(Ordering::SeqCst) < 6 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    thread::sleep(Duration::from_millis(50));
+    let woken = h.wakes.load(Ordering::SeqCst);
+    assert_eq!(h.backend.poll_deferred_messages().unwrap().len(), 2);
+    assert!(
+        h.wakes.load(Ordering::SeqCst) > woken,
+        "woken again for the rest"
+    );
+    assert_eq!(h.backend.poll_deferred_messages().unwrap().len(), 2);
+    assert_eq!(h.backend.poll_deferred_messages().unwrap().len(), 2);
+    assert_eq!(h.backend.stats().outstanding, 0);
 }
