@@ -101,6 +101,19 @@ pub enum BottomBar {
     WithToolbar,
 }
 
+/// How the remote desktop follows the local display density (Retina, HiDPI).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DisplayScaling {
+    /// Physical pixels, with the remote UI scaled to the local density.
+    #[default]
+    Automatic,
+    /// Physical pixels at 100%: the most desktop space, small text on HiDPI.
+    Off,
+    /// One remote pixel per logical local pixel at 100%, enlarged locally.
+    LowResolution,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HostProfile {
@@ -119,6 +132,11 @@ pub struct HostProfile {
     pub desktop_composition: bool,
     pub network_hint: NetworkHint,
     pub bottom_bar: BottomBar,
+    pub scaling: DisplayScaling,
+    /// The desktop scale factor (100–500%) requested for the running session,
+    /// measured by the window at connect and resize. Runtime only, never saved.
+    #[serde(skip)]
+    pub desktop_scale: Option<u32>,
 }
 impl Default for HostProfile {
     fn default() -> Self {
@@ -138,6 +156,8 @@ impl Default for HostProfile {
             desktop_composition: false,
             network_hint: NetworkHint::Lan,
             bottom_bar: BottomBar::Always,
+            scaling: DisplayScaling::Automatic,
+            desktop_scale: None,
         }
     }
 }

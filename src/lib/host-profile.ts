@@ -9,6 +9,7 @@ export const DEFAULT_HOST_PROFILE: Readonly<HostProfile> = Object.freeze({
   networkHint: 'lan',
   colorDepth: '32', bulkCompression: 'off',
   bottomBar: 'always',
+  scaling: 'automatic',
 });
 
 /** Defaults missing legacy fields without losing explicit false preferences. */
@@ -29,6 +30,7 @@ export function normalizeHostProfile(profile?: Partial<HostProfile> | null): Hos
     desktopComposition: profile?.desktopComposition ?? DEFAULT_HOST_PROFILE.desktopComposition,
     networkHint: profile?.networkHint ?? DEFAULT_HOST_PROFILE.networkHint,
     bottomBar: profile?.bottomBar ?? DEFAULT_HOST_PROFILE.bottomBar,
+    scaling: profile?.scaling ?? DEFAULT_HOST_PROFILE.scaling,
   };
 }
 

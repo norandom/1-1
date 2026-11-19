@@ -234,9 +234,10 @@ export async function sendMouseEvent(sessionId: string, event: RdpMouseEvent): P
 export async function resizeSession(
   sessionId: string,
   width: number,
-  height: number
+  height: number,
+  scale?: number
 ): Promise<void> {
-  await invoke('resize_session', { sessionId, width, height });
+  await invoke('resize_session', { sessionId, width, height, ...(scale ? { scale } : {}) });
 }
 
 export async function getFrame(sessionId: string): Promise<string | null> {

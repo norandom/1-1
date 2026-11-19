@@ -16,6 +16,14 @@ use crate::store::settings::SettingsStore;
 pub struct InitialSize {
     width: u32,
     height: u32,
+    /// Desktop scale factor in percent for the local display density.
+    #[serde(default)]
+    scale: Option<u32>,
+}
+
+/// Scale factors outside 100–500% are invalid in RDP; clamp what the window measured.
+fn desktop_scale(scale: Option<u32>) -> Option<u32> {
+    scale.map(ironrdp_displaycontrol::pdu::MonitorLayoutEntry::adjust_desktop_scale_factor)
 }
 
 fn initial_config(
@@ -23,6 +31,7 @@ fn initial_config(
     size: Option<InitialSize>,
 ) -> Result<ConnectionConfig, String> {
     let mut config = saved.clone();
+    config.host_profile.desktop_scale = desktop_scale(size.and_then(|size| size.scale));
     if config.host_profile.resize_mode == ResizeMode::Dynamic
         && let Some(size) = size
     {
@@ -123,9 +132,10 @@ pub async fn connect(
     let mut config = initial_config(&config, initial_size)?;
     config.mock = mock_session;
     log::info!(
-        "Initial RDP display request: {}x{} (sizing {:?})",
+        "Initial RDP display request: {}x{} at {}% (sizing {:?})",
         config.display_width.unwrap_or(1920),
         config.display_height.unwrap_or(1080),
+        config.host_profile.desktop_scale.unwrap_or(100),
         config.host_profile.resize_mode
     );
 
@@ -198,7 +208,8 @@ mod viewport_tests {
                 &saved,
                 Some(InitialSize {
                     width: 1201,
-                    height: 701
+                    height: 701,
+                    scale: None
                 })
             )
             .unwrap(),
@@ -216,7 +227,8 @@ mod viewport_tests {
                 &saved,
                 Some(InitialSize {
                     width: 0,
-                    height: 500
+                    height: 500,
+                    scale: None
                 })
             )
             .is_err()
@@ -226,6 +238,7 @@ mod viewport_tests {
             Some(InitialSize {
                 width: u32::MAX,
                 height: 1,
+                scale: None,
             }),
         )
         .unwrap();
@@ -239,13 +252,40 @@ mod viewport_tests {
                 &saved,
                 Some(InitialSize {
                     width: 0,
-                    height: 0
+                    height: 0,
+                    scale: None
                 })
             )
             .unwrap(),
             saved
         );
         assert!(serde_json::from_str::<InitialSize>(r#"{"width":-1,"height":600}"#).is_err());
+    }
+
+    #[test]
+    fn the_measured_scale_is_requested_for_this_session_only() {
+        let saved = saved();
+        let size = |scale| InitialSize {
+            width: 2880,
+            height: 1800,
+            scale,
+        };
+        let config = initial_config(&saved, Some(size(Some(200)))).unwrap();
+        assert_eq!(config.host_profile.desktop_scale, Some(200));
+        let stored = serde_json::to_value(&config).unwrap();
+        assert!(
+            stored["hostProfile"].get("desktopScale").is_none(),
+            "never saved"
+        );
+        // Out-of-range measurements are clamped to RDP's 100–500%.
+        let low = initial_config(&saved, Some(size(Some(50)))).unwrap();
+        assert_eq!(low.host_profile.desktop_scale, Some(100));
+        let high = initial_config(&saved, Some(size(Some(900)))).unwrap();
+        assert_eq!(high.host_profile.desktop_scale, Some(500));
+        // Older frontends omit the scale; the server then keeps its default.
+        let legacy: InitialSize = serde_json::from_str(r#"{"width":1280,"height":720}"#).unwrap();
+        let config = initial_config(&saved, Some(legacy)).unwrap();
+        assert_eq!(config.host_profile.desktop_scale, None);
     }
 }
 
@@ -347,6 +387,7 @@ pub async fn resize_session(
     session_id: String,
     width: u32,
     height: u32,
+    scale: Option<u32>,
     session_mgr: State<'_, SessionManager>,
 ) -> Result<(), String> {
     if width > 8192 || height > 8192 || width == 0 || height == 0 {
@@ -362,7 +403,11 @@ pub async fn resize_session(
         .ok_or_else(|| format!("Session '{}' not found", session_id))?;
 
     cmd_tx
-        .send(SessionCommand::Resize { width, height })
+        .send(SessionCommand::Resize {
+            width,
+            height,
+            scale: desktop_scale(scale),
+        })
         .await
         .map_err(|_| format!("Session '{}' actor is no longer running", session_id))
 }

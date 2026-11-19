@@ -706,10 +706,14 @@ mod tests {
         let (mut stage, mut image) = egfx_stage();
         let mut pending = Some((800, 600));
         let (mut bare, _) = bare_stage();
-        assert!(crate::rdp::session::encode_pending_resize(&mut pending, &mut bare).is_none());
+        assert!(
+            crate::rdp::session::encode_pending_resize(&mut pending, None, &mut bare).is_none()
+        );
         assert_eq!(pending, Some((800, 600)));
         assert_eq!(stage.display_control_ready(), Some(false));
-        assert!(crate::rdp::session::encode_pending_resize(&mut pending, &mut stage).is_none());
+        assert!(
+            crate::rdp::session::encode_pending_resize(&mut pending, None, &mut stage).is_none()
+        );
         pending = Some((1024, 768)); // latest viewport replaces, rather than queues, the old one
         feed(
             &mut stage,
@@ -731,12 +735,14 @@ mod tests {
         );
         assert_eq!(stage.display_control_ready(), Some(true));
         let expected = stage.encode_resize(1024, 768, None, None).unwrap().unwrap();
-        let encoded = crate::rdp::session::encode_pending_resize(&mut pending, &mut stage)
+        let encoded = crate::rdp::session::encode_pending_resize(&mut pending, None, &mut stage)
             .unwrap()
             .unwrap();
         assert_eq!(encoded, expected);
         assert!(pending.is_none());
-        assert!(crate::rdp::session::encode_pending_resize(&mut pending, &mut stage).is_none());
+        assert!(
+            crate::rdp::session::encode_pending_resize(&mut pending, None, &mut stage).is_none()
+        );
     }
 
     #[test]

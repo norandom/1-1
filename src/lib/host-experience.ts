@@ -18,6 +18,10 @@ export const NETWORK_OPTIONS: readonly [HostProfile['networkHint'], string][] = 
   ['lan', 'LAN'], ['wan', 'WAN'], ['broadbandHigh', 'High-speed broadband'],
   ['broadbandLow', 'Low-speed broadband'], ['satellite', 'Satellite'], ['modem', 'Modem'],
 ];
+export const SCALING_OPTIONS: readonly [HostProfile['scaling'], string][] = [
+  ['automatic', 'Automatic (match this display)'], ['off', '100% (most space)'], ['lowResolution', 'Low resolution (larger, softer)'],
+];
+export const SCALING_HELP = 'Automatic scales the remote desktop to this display, so text keeps its size on Retina and HiDPI screens. 100% gives the most space with small text on those screens. Low resolution sends fewer pixels and enlarges them locally. Applies when the remote resizes with the window, otherwise on the next connection.';
 export const EXPERIENCE_HELP = 'Visual effects and connection hints apply on the next connection. Server policy can override these requests.';
 export const COMPOSITION_HELP = 'Desktop composition is a legacy, server-dependent effect requiring 32-bit color.';
 export const NETWORK_HELP = 'Connection type is a performance hint, not a bandwidth limit or automatic detection.';

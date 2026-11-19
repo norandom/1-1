@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Loader2, WifiOff } from 'lucide-react';
 
 import { parseFramePacket } from '../../lib/frame-protocol';
-import { physicalViewport } from '../../lib/viewport-size';
+import { physicalViewport, sessionPixelRatio, type DisplayScaling } from '../../lib/viewport-size';
 import { subscribeCanvasKeyboard } from './canvas-keyboard';
 import type { FrameListener } from '../../lib/session-runtime';
 import {
@@ -28,6 +28,8 @@ const liveDisplay = () => false;
 
 interface Props {
   displayMode?: DisplayMode;
+  /** How remote pixels map to this display's density. */
+  scaling?: DisplayScaling;
   hideLocalCursor?: boolean;
   inputBlocked?: boolean;
   isDisplayPaused?: () => boolean;
@@ -53,6 +55,7 @@ interface Props {
 
 export function SessionCanvas({
   displayMode = 'fit',
+  scaling = 'automatic',
   hideLocalCursor = false,
   inputBlocked = false,
   isDisplayPaused = liveDisplay,
@@ -82,6 +85,7 @@ export function SessionCanvas({
   const pendingConsumptionRef = useRef<(() => void) | undefined>(undefined);
   const animationFrameRef = useRef<number | null>(null);
   const displayModeRef = useRef<DisplayMode>('fit');
+  const scalingRef = useRef<DisplayScaling>(scaling);
   const [displaySize, setDisplaySize] = useState(() => ({
     left: 0,
     top: 0,
@@ -183,17 +187,18 @@ export function SessionCanvas({
       width: container.clientWidth, height: container.clientHeight,
       left: rect.left, top: rect.top,
       scrollLeft: container.scrollLeft, scrollTop: container.scrollTop,
-    }, surface.width, surface.height, displayModeRef.current, window.devicePixelRatio));
+    }, surface.width, surface.height, displayModeRef.current, sessionPixelRatio(scalingRef.current, window.devicePixelRatio)));
   }, []);
 
   useLayoutEffect(() => {
     displayModeRef.current = displayMode;
+    scalingRef.current = scaling;
     if (containerRef.current) {
       containerRef.current.scrollLeft = 0;
       containerRef.current.scrollTop = 0;
     }
     updateLayout();
-  }, [displayMode, surfaceWidth, surfaceHeight, updateLayout, status]);
+  }, [displayMode, scaling, surfaceWidth, surfaceHeight, updateLayout, status]);
 
   useEffect(() => {
     const unsubscribe = subscribeToFrames((frame, consumed) => {
@@ -232,18 +237,22 @@ export function SessionCanvas({
 
     let previousWidth = -1;
     let previousHeight = -1;
+    let previousRatio = -1;
     const resized = () => {
       const container = containerRef.current;
       if (!container) return;
       updateLayout();
       // Include local scrollbars so switching modes cannot resize the server
       // and feed back into the remote surface dimensions.
-      const size = physicalViewport(container.offsetWidth, container.offsetHeight, window.devicePixelRatio);
+      const ratio = window.devicePixelRatio;
+      const size = physicalViewport(container.offsetWidth, container.offsetHeight, sessionPixelRatio(scaling, ratio));
       if (!size) return;
       const { width, height } = size;
-      if (width !== previousWidth || height !== previousHeight) {
+      // A density change alone (another monitor) still needs a new scale.
+      if (width !== previousWidth || height !== previousHeight || ratio !== previousRatio) {
         previousWidth = width;
         previousHeight = height;
+        previousRatio = ratio;
         onResize?.(width, height);
       }
     };
@@ -263,7 +272,7 @@ export function SessionCanvas({
       query.removeEventListener('change', densityChanged);
       window.removeEventListener('resize', densityChanged);
     };
-  }, [onResize, updateLayout, status]);
+  }, [onResize, scaling, updateLayout, status]);
 
   // Auto-focus the canvas when it mounts (so keyboard works immediately)
   useEffect(() => {

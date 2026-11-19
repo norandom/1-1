@@ -38,6 +38,8 @@ pub enum SessionCommand {
     Resize {
         width: u32,
         height: u32,
+        /// Desktop scale factor in percent; `None` keeps the current one.
+        scale: Option<u32>,
     },
     // Legacy actor characterization seam; public IPC uses acknowledged ClipboardSync.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -150,6 +152,9 @@ pub(crate) fn build_connector_config(
     };
 
     let profile = &config.host_profile;
+    let desktop_scale = profile
+        .desktop_scale
+        .map(ironrdp_displaycontrol::pdu::MonitorLayoutEntry::adjust_desktop_scale_factor);
     let mut performance_flags = PerformanceFlags::empty();
     for (flag, enabled) in [
         (PerformanceFlags::DISABLE_WALLPAPER, profile.wallpaper),
@@ -225,11 +230,15 @@ pub(crate) fn build_connector_config(
             width: width as u16,
             height: height as u16,
         },
-        desktop_scale_factor: 0,
+        // 0 leaves scaling to the server (100% on Windows). The device scale
+        // (100, 140 or 180%) follows the desktop scale, as Display Control does.
+        desktop_scale_factor: desktop_scale.unwrap_or(0),
         monitor_layout: None,
         desktop_physical_size: None,
         desktop_orientation: None,
-        device_scale_factor: None,
+        device_scale_factor: desktop_scale.map(|scale| {
+            ironrdp_displaycontrol::pdu::DeviceScaleFactor::from_desktop_scale_factor(scale).value()
+        }),
         monitor_extended_layout: None,
         relative_mouse_input: false,
         bitmap: Some(connector::BitmapConfig {
@@ -563,6 +572,18 @@ mod tests {
             connector.platform, expected,
             "connector must advertise the build OS as its platform capability (Req 8.3)"
         );
+
+        // Without a measured scale the server keeps its own default.
+        assert_eq!(connector.desktop_scale_factor, 0);
+        assert_eq!(connector.device_scale_factor, None);
+        // A Retina window (200%) requests 200% desktop and 180% device scale.
+        let mut scaled = config.clone();
+        for (measured, desktop, device) in [(200, 200, 180), (150, 150, 140), (125, 125, 100)] {
+            scaled.host_profile.desktop_scale = Some(measured);
+            let connector = build_connector_config(&scaled, "pw", 2880, 1800);
+            assert_eq!(connector.desktop_scale_factor, desktop);
+            assert_eq!(connector.device_scale_factor, Some(device));
+        }
     }
 
     #[test]

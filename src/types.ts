@@ -60,6 +60,8 @@ export interface HostProfile {
   networkHint: 'lan' | 'wan' | 'broadbandHigh' | 'broadbandLow' | 'satellite' | 'modem';
   /** A status row below the desktop, or an overlay shown with the top toolbar. */
   bottomBar: 'always' | 'withToolbar';
+  /** Automatic follows this display's density; Off is 100%; Low resolution enlarges locally. */
+  scaling: 'automatic' | 'off' | 'lowResolution';
 }
 
 // Task 6.6 (Req 10.1/10.19): `libraryId`/`folderId`/`mock` mirror the v2

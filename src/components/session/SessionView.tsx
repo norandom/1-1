@@ -13,7 +13,7 @@ import * as tauri from '../../lib/tauri';
 import { ctrlAltDelSequence } from '../../lib/input-mapper';
 import { normalizeHostProfile } from '../../lib/host-profile';
 import { onSessionViewReturn } from '../../lib/idle-preview';
-import { physicalViewport } from '../../lib/viewport-size';
+import { desktopScale, remoteViewport } from '../../lib/viewport-size';
 import { subscribeSessionEscape } from './canvas-keyboard';
 import { resolveSessionView, sessionForConnection } from '../../lib/session-route';
 import {
@@ -109,10 +109,13 @@ function SessionContent() {
     if (sessionId === null || profile.resizeMode === 'fixed') return;
     const viewport = viewportRef.current;
     const initialSize = viewport
-      ? physicalViewport(viewport.offsetWidth, viewport.offsetHeight, window.devicePixelRatio)
+      ? remoteViewport(viewport.offsetWidth, viewport.offsetHeight, profile.scaling, window.devicePixelRatio)
       : undefined;
     const scheduler = createTrailingResizeScheduler((width, height) => {
-      tauri.resizeSession(sessionId, width, height).catch(() => {});
+      // The scale follows the saved setting and this display at emit time.
+      const current = useConnectionStore.getState().connections.find((c) => c.id === resolvedConnectionId);
+      const scale = desktopScale(normalizeHostProfile(current?.hostProfile).scaling, window.devicePixelRatio);
+      tauri.resizeSession(sessionId, width, height, scale).catch(() => {});
     }, undefined, () => {
       // Recheck the committed preference at emit time as well as effect cleanup.
       const current = useConnectionStore.getState().connections.find((c) => c.id === resolvedConnectionId);
@@ -123,7 +126,7 @@ function SessionContent() {
       scheduler.cancel();
       if (resizeSchedulerRef.current === scheduler) resizeSchedulerRef.current = null;
     };
-  }, [sessionId, resolvedConnectionId, profile.resizeMode]);
+  }, [sessionId, resolvedConnectionId, profile.resizeMode, profile.scaling]);
 
   // The existing session for a transitional route's connection, if any
   // — the input the pure swap/guard decisions below consume.
@@ -175,8 +178,9 @@ function SessionContent() {
   const measuredSize = useCallback((connectionId: string) => {
     const saved = useConnectionStore.getState().connections.find((c) => c.id === connectionId);
     const viewport = viewportRef.current;
-    if (!viewport || normalizeHostProfile(saved?.hostProfile).resizeMode === 'fixed') return undefined;
-    return physicalViewport(viewport.offsetWidth, viewport.offsetHeight, window.devicePixelRatio);
+    if (!viewport) return undefined;
+    // A fixed resolution ignores the measured size but still uses the scale.
+    return remoteViewport(viewport.offsetWidth, viewport.offsetHeight, normalizeHostProfile(saved?.hostProfile).scaling, window.devicePixelRatio);
   }, []);
   useEffect(() => {
     connectRef.current = connect;
@@ -318,6 +322,7 @@ function SessionContent() {
         {/* Canvas */}
         <SessionCanvas
           displayMode={profile.displayMode}
+          scaling={profile.scaling}
           hideLocalCursor={sessionResolution?.hideLocalCursor}
           isDisplayPaused={isDisplayPaused}
           inputBlocked={showDisconnectConfirm}

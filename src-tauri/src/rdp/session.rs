@@ -337,6 +337,15 @@ impl SessionActor {
         }
     }
 
+    /// Queue a remote layout change. A new scale also applies to reconnects,
+    /// which dial with this config.
+    fn queue_resize(&mut self, width: u32, height: u32, scale: Option<u32>) {
+        if scale.is_some() {
+            self.config.host_profile.desktop_scale = scale;
+        }
+        self.pending_resize = Some(normalize_remote_resolution(width, height));
+    }
+
     /// Build a SessionInfo snapshot from the current actor state.
     fn build_info(&self) -> SessionInfo {
         let mut network = self.network.clone().or_else(|| {
@@ -787,9 +796,8 @@ impl SessionActor {
                     Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
                         self.delivery.acknowledge(&receipt, refresh);
                     }
-                    Some(SessionCommand::Resize { width, height }) => {
-                        let (width, height) = normalize_remote_resolution(width, height);
-                        self.pending_resize = Some((width, height));
+                    Some(SessionCommand::Resize { width, height, scale }) => {
+                        self.queue_resize(width, height, scale);
                     }
                     Some(SessionCommand::SetDisplayPaused { reply, .. }) => {
                         let _ = reply.send(Err("Session is not connected".into()));
@@ -1074,8 +1082,11 @@ impl SessionActor {
         let _ = self.clipboard_tx.send(None);
 
         'session: loop {
-            if let Some(result) = encode_pending_resize(&mut self.pending_resize, &mut active_stage)
-            {
+            if let Some(result) = encode_pending_resize(
+                &mut self.pending_resize,
+                self.config.host_profile.desktop_scale,
+                &mut active_stage,
+            ) {
                 match result {
                     Ok(frame) => {
                         if let Err(error) = writer.write_all(&frame).await {
@@ -1494,16 +1505,15 @@ impl SessionActor {
                                 }
                             }
                         }
-                        Some(SessionCommand::Resize { width, height }) => {
-                            let (width, height) = normalize_remote_resolution(width, height);
-                            self.pending_resize = Some((width, height));
+                        Some(SessionCommand::Resize { width, height, scale }) => {
+                            self.queue_resize(width, height, scale);
                             // A viewport burst needs one layout. Preserve the next non-resize
                             // command at the head of the FIFO before writing that layout.
                             for _ in 0..deferred_commands.len() + self.cmd_rx.len() {
                                 let Some(next) = deferred_commands.pop_front().or_else(|| self.cmd_rx.try_recv().ok()) else { break };
                                 match next {
-                                    SessionCommand::Resize { width, height } => {
-                                        self.pending_resize = Some(normalize_remote_resolution(width, height));
+                                    SessionCommand::Resize { width, height, scale } => {
+                                        self.queue_resize(width, height, scale);
                                     }
                                     other => {
                                         deferred_commands.push_front(other);
@@ -1655,8 +1665,8 @@ impl SessionActor {
                                     DisconnectReason::UserDisconnect,
                                 );
                             }
-                            Some(SessionCommand::Resize { width, height }) => {
-                                self.pending_resize = Some(normalize_remote_resolution(width, height));
+                            Some(SessionCommand::Resize { width, height, scale }) => {
+                                self.queue_resize(width, height, scale);
                                 continue;
                             }
                             // Preserve input order until the replacement share is ready.
@@ -1919,9 +1929,8 @@ impl SessionActor {
                         }
                         Some(SessionCommand::Disconnect) | None => return true,
                         // Process other commands while waiting
-                        Some(SessionCommand::Resize { width, height }) => {
-                            let (width, height) = normalize_remote_resolution(width, height);
-                            self.pending_resize = Some((width, height));
+                        Some(SessionCommand::Resize { width, height, scale }) => {
+                            self.queue_resize(width, height, scale);
                         }
                         Some(SessionCommand::SetDisplayPaused { reply, .. }) => {
                             let _ = reply.send(Err("Session is not connected".into()));
@@ -1987,7 +1996,14 @@ impl SessionActor {
                     );
                     return DisconnectReason::ConnectionLost;
                 }
-                Some(SessionCommand::Resize { width, height }) => {
+                Some(SessionCommand::Resize {
+                    width,
+                    height,
+                    scale,
+                }) => {
+                    if scale.is_some() {
+                        self.config.host_profile.desktop_scale = scale;
+                    }
                     let (width, height) = normalize_remote_resolution(width, height);
                     log::info!("Session {} resized to {}x{}", self.id, width, height);
                     self.width = width;
@@ -2116,10 +2132,11 @@ fn reset_software_pointer(
 /// Encoding consumes it only once; server activation/graphics own actual dimensions.
 pub(crate) fn encode_pending_resize(
     pending: &mut Option<(u32, u32)>,
+    scale: Option<u32>,
     stage: &mut ironrdp_session::ActiveStage,
 ) -> Option<ironrdp_session::SessionResult<Vec<u8>>> {
     let (width, height) = (*pending)?;
-    let result = stage.encode_resize(width, height, None, None)?;
+    let result = stage.encode_resize(width, height, scale, None)?;
     *pending = None;
     Some(result)
 }
@@ -4224,6 +4241,7 @@ mod tests {
             .send(SessionCommand::Resize {
                 width: 320,
                 height: 240,
+                scale: None,
             })
             .await
             .expect("resize command accepted");
@@ -4291,6 +4309,7 @@ mod tests {
             .send(SessionCommand::Resize {
                 width: 201,
                 height: 9999,
+                scale: None,
             })
             .await
             .expect("resize command accepted");
@@ -4311,6 +4330,7 @@ mod tests {
             .send(SessionCommand::Resize {
                 width: 200,
                 height: 8192,
+                scale: None,
             })
             .await
             .expect("repeat resize accepted");
@@ -4327,6 +4347,7 @@ mod tests {
             .send(SessionCommand::Resize {
                 width: 128,
                 height: 96,
+                scale: None,
             })
             .await
             .expect("sub-minimum resize accepted");
@@ -4385,6 +4406,7 @@ mod tests {
             .send(SessionCommand::Resize {
                 width: 320,
                 height: 240,
+                scale: None,
             })
             .await
             .expect("resize command accepted");
@@ -4931,6 +4953,7 @@ mod tests {
                 .send(SessionCommand::Resize {
                     width: 96,
                     height: 72,
+                    scale: None,
                 })
                 .await
                 .unwrap();
@@ -5002,6 +5025,7 @@ mod tests {
                 .send(SessionCommand::Resize {
                     width: 128,
                     height: 64,
+                    scale: None,
                 })
                 .await
                 .unwrap();
@@ -5577,6 +5601,7 @@ mod tests {
                 .send(SessionCommand::Resize {
                     width: 640,
                     height: 480,
+                    scale: None,
                 })
                 .await
                 .unwrap();
@@ -6048,6 +6073,7 @@ mod tests {
                     .send(SessionCommand::Resize {
                         width: 800,
                         height: 600,
+                        scale: None,
                     })
                     .await
                     .unwrap();
@@ -6055,6 +6081,7 @@ mod tests {
                     .send(SessionCommand::Resize {
                         width: 1024,
                         height: 768,
+                        scale: None,
                     })
                     .await
                     .unwrap();
@@ -6284,6 +6311,7 @@ mod tests {
                 .send(SessionCommand::Resize {
                     width: 800,
                     height: 600,
+                    scale: None,
                 })
                 .await
                 .unwrap();
@@ -6705,7 +6733,11 @@ mod tests {
             let sender = manager.get_cmd_sender(&id).await.unwrap();
             for (width, height) in [(800, 600), (1024, 768)] {
                 sender
-                    .send(SessionCommand::Resize { width, height })
+                    .send(SessionCommand::Resize {
+                        width,
+                        height,
+                        scale: None,
+                    })
                     .await
                     .unwrap();
             }

@@ -6,7 +6,7 @@ import { resumeDisplay } from '../../lib/tauri';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { selectIsWriteBlocked, useLibraryStore } from '../../stores/libraryStore';
 import { normalizeHostProfile } from '../../lib/host-profile';
-import { CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset } from '../../lib/host-experience';
+import { SCALING_HELP, SCALING_OPTIONS, CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset } from '../../lib/host-experience';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuPortal, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuCheckboxItem, DropdownMenuItem } from '@/components/ui/dropdown-menu';
 
@@ -71,6 +71,12 @@ export function SessionOptionsMenu({ connection, session }: { connection: Connec
               <DropdownMenuRadioItem disabled={disabled} value="fixed" onSelect={(e) => e.preventDefault()}>Fixed resolution</DropdownMenuRadioItem>
             </DropdownMenuRadioGroup>
             <p className="px-2 py-2 text-xs text-muted-foreground">Applies immediately. Fixed mode stops automatic resizing; reconnect to use the saved {connection.displayWidth ?? 1920} × {connection.displayHeight ?? 1080} resolution.</p>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Scaling</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={profile.scaling} onValueChange={(scaling) => void save({ hostProfile: { scaling: scaling as HostProfile['scaling'] } })}>
+              {SCALING_OPTIONS.map(([key, label]) => <DropdownMenuRadioItem key={key} value={key} disabled={disabled} onSelect={(e) => e.preventDefault()}>{label}</DropdownMenuRadioItem>)}
+            </DropdownMenuRadioGroup>
+            <p className="px-2 py-2 text-xs text-muted-foreground">{SCALING_HELP}</p>
             <DropdownMenuSeparator />
             <DropdownMenuLabel>Bottom bar</DropdownMenuLabel>
             <DropdownMenuRadioGroup value={profile.bottomBar} onValueChange={(bottomBar) => void save({ hostProfile: { bottomBar: bottomBar as HostProfile['bottomBar'] } })}>
