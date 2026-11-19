@@ -1,17 +1,22 @@
 # 1-1 maintainer handover
 
-**18 November 2026, end of day.** 1-1 (pronounced “zero”) is an RDP client for coding and monitoring remote agents. The latest release is **v0.1.0-alpha.5**. The maintainer tested it on Windows and on Linux (Hyprland, Wayland), and found no regressions. Folder sharing comes next, through attaching the drive to sessions (task 5.2), before the usability items below. [Releases](https://github.com/norandom/1-1/releases)
+**19 November 2026.** 1-1 (pronounced “zero”) is an RDP client for coding and monitoring remote agents. The latest release is **v0.1.0-alpha.6**, a security update with Linux password and clipboard fixes. The maintainer still has to confirm that Linux passwords survive a logout. Folder sharing comes next, through attaching the drive to sessions (task 5.2), before the usability items below. [Releases](https://github.com/norandom/1-1/releases)
 
 ## Releases
 
-- **alpha.5** (`c84ab4b`, current feed). Fixes the Wayland exit with protocol error 71 ([#1](https://github.com/norandom/1-1/issues/1), closed). The native wgpu renderer drew under the web view, which already draws every frame. It now starts only with `ONE_ONE_NATIVE_RENDERER=1`. This release also adds the folder sharing preview (the choice is saved, but no session offers the folder yet) and a Linux `.deb`.
+- **alpha.6** (`705fecd`, current feed).
+  - Security: Tauri 2.12.5 (IPC origin confusion), tauri-plugin-updater 2.14.1 with zip 9.3.0 (critical), the shadcn CLI package removed (its stylesheet is vendored in `src/styles/shadcn-tailwind.css`), and npm, serde_with and rand fixes.
+  - Linux passwords use the Secret Service (keyring feature `linux-native-sync-persistent`) instead of the kernel keyring alone, which lost them at logout.
+  - Clipboard text is LF on Linux and macOS and CRLF toward the remote.
+  - Bundle targets are listed explicitly (NSIS, deb, AppImage, app, DMG). With `"all"`, Tauri 2.12 rejected the pre-release version for RPM.
+- **alpha.5** (`c84ab4b`). Fixes the Wayland exit with protocol error 71 ([#1](https://github.com/norandom/1-1/issues/1), closed). The native wgpu renderer drew under the web view, which already draws every frame. It now starts only with `ONE_ONE_NATIVE_RENDERER=1`. This release also adds the folder sharing preview (the choice is saved, but no session offers the folder yet) and a Linux `.deb`.
 - **alpha.4** (`832ca8c`). Pause display, credential test, server identity review, sidebar Disconnect, resizable and hideable sidebar, per-host bottom bar, and fixes for the window-snapping drag and a resize crash.
 - **Published assets:** each release has the Windows x64 installer plus the Linux `.deb` and AppImage, with signatures and `SHA256SUMS.txt`. `latest.json` on `preview-channel` lists Windows x64 and the AppImage. A `.deb` cannot replace itself, so `.deb` users update by installing the next release's `.deb`. Windows ARM64 and macOS are built in CI but not published.
 - **Releasing:**
   1. Bump the five version files and push.
   2. When CI is green, push a `v*` tag. The tag triggers `preview-build.yml`, which exports the signed AppImage and the `.deb` together.
   3. Verify each asset's SHA-256 against its `build-info.json`, and check that the `.sig` key ID matches the updater key in `tauri.conf.json`.
-  4. Create the release, then run `scripts/update-manifest.mjs` and upload `latest.json`.
+  4. Create the release, then run `scripts/update-manifest.mjs` on a folder that holds only the published platforms (`windows-x86_64`, `linux-x86_64` without the `.deb`), and upload `latest.json`.
 
   GitHub's macOS arm64 runners often fail to start a job. Rerun that job, or release on green code checks when macOS is not shipped.
 
@@ -28,7 +33,7 @@
 3. **Usability backlog, after 5.2:**
    - **Native pointer, as Royal TS and mstsc do it:** set `pointer_software_rendering` to false, show the remote pointer bitmap as the CSS cursor over the canvas, and hide and restore it cleanly at the window edge. The local pointer currently stays visible next to the drawn one.
    - **HiDPI:** `rdp/client.rs` sends `desktop_scale_factor: 0` while requesting physical pixels, so the remote UI is tiny on a MacBook. Add a per-host Scaling option: Automatic (device pixel ratio × 100), 100%, or Low resolution.
-   - **Clipboard line endings:** convert CRLF to LF for the Linux and macOS clipboards, and back to CRLF when sending to the remote. Wayland currently gets an extra `\r`.
+   - ~~Clipboard line endings~~: done in alpha.6.
    - **Command line:** `1-1 --host <saved name|address[:port]>` connects directly, asks for the password if none is saved, and opens only the session with the sidebar hidden.
    - **CPU:** about 2% per connection on an i9 at high resolution with RDP 6.1 compression. Measure after the pointer change.
 4. **Open acceptance checks from 17 November:**
@@ -50,6 +55,7 @@
 
 - **CI times:** a full run takes about 9 minutes with the Rust build cache. Docs-only pushes are skipped. The macOS cold-launch spike runs only on a manual dispatch with `macos_cold_launch` checked. Intel macOS builds only on a manual dispatch.
 - **Linux coverage:** Linux CI compiles and tests the non-Windows code paths. Keep test paths portable.
+- **Security scanning:** CodeQL default setup covers Actions, JavaScript/TypeScript and Rust. The 65 initial alerts were dismissed on 19 November as test fixtures or false positives. Remaining Dependabot alerts: `minimatch` in the typescript-eslint chain (fix newer than the two-week age rule) and `glib` 0.18 from Tauri's GTK stack.
 - **Contract checks:** `pwsh -NoProfile -File scripts/Invoke-CI.Tests.ps1` passes 249 of 249.
 - **Local preview:** `pwsh -NoProfile -File scripts/Invoke-WindowsPreview.ps1` builds into `D:/BuildArtifacts/cargo-target/release/rdp-client.exe`. Copy it under `D:/BuildArtifacts/drift-rdp/releases/` before testing; later builds overwrite the target. Launch it with stderr redirected and `RUST_BACKTRACE=1` to capture a panic.
 - **Logs:** the app log is `%LOCALAPPDATA%/com.drift.app/logs/1-1.log`. It keeps five 2 MB files and records panics with a backtrace.
