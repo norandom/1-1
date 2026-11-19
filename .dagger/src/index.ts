@@ -352,7 +352,7 @@ export class Drift {
    * packaging — npm ci plus `npx tauri build --target
    * x86_64-unknown-linux-gnu` (the same command .github/workflows/ci.yml
    * runs), driven by src-tauri/tauri.conf.json (beforeBuildCommand
-   * `npm run build`; bundle targets "all" → AppImage/deb on Linux) — inside
+   * `npm run build`; bundle targets in tauri.conf.json → AppImage/deb on Linux) — inside
    * the pinned containers. The build log is captured to
    * /test-results/linux-build.log; after a successful build the produced
    * AppImage and deb are VERIFIED (missing artifacts throw — a green build
