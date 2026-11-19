@@ -163,8 +163,8 @@ fn a_component_held_open_for_rename_is_reported_busy() {
 }
 
 mod links {
-    use super::super::LinkSafeBackend;
-    use super::super::windows_links::{link_count, mutates};
+    use super::super::ShareBackend;
+    use super::super::windows_policy::{link_count, mutates};
     use super::real_dir;
     use ironrdp_pdu::PduResult;
     use ironrdp_rdpdr::backend::RdpdrBackend;
@@ -368,7 +368,7 @@ mod links {
         fs::write(root.join("single.txt"), b"x").unwrap();
         let forwarded = Arc::new(AtomicUsize::new(0));
         let mut backend =
-            LinkSafeBackend::new(Box::new(Recording(Arc::clone(&forwarded))), root.clone());
+            ShareBackend::new(Box::new(Recording(Arc::clone(&forwarded))), root.clone());
 
         let refused = backend
             .handle_drive_io_request(rename(r"\linked.txt", true))
@@ -407,7 +407,7 @@ mod links {
         fs::write(root.join("single.txt"), b"x").unwrap();
         let forwarded = Arc::new(AtomicUsize::new(0));
         let mut backend =
-            LinkSafeBackend::new(Box::new(Recording(Arc::clone(&forwarded))), root.clone());
+            ShareBackend::new(Box::new(Recording(Arc::clone(&forwarded))), root.clone());
         let mut send = |request| {
             backend
                 .handle_drive_io_request(ServerDriveIoRequest::ServerCreateDriveRequest(request))
@@ -444,5 +444,509 @@ mod links {
             b"x",
             "the outside alias is unchanged"
         );
+    }
+}
+
+/// Task 4.2: the share's policy in front of the real native backend.
+mod policy {
+    use super::super::ShareBackend;
+    use super::real_dir;
+    use ironrdp_rdpdr::backend::RdpdrBackend;
+    use ironrdp_rdpdr::pdu::efs::{
+        AnyIoCtlCode, Boolean, CreateDisposition, CreateOptions, DesiredAccess,
+        DeviceControlRequest, DeviceCreateRequest, DeviceIoRequest, DeviceReadRequest,
+        DeviceWriteRequest, FileAttributes, FileEndOfFileInformation, FileInformationClass,
+        FileInformationClassLevel, FileRenameInformation, MajorFunction, MinorFunction,
+        SecurityInformation, ServerDriveIoRequest, ServerDriveQueryDirectoryRequest,
+        ServerDriveQuerySecurityRequest, ServerDriveSetInformationRequest,
+        ServerDriveSetSecurityRequest, SharedAccess,
+    };
+    use ironrdp_rdpdr_native::{RedirectedDrive, WindowsRdpdrBackendFactory};
+    use std::{fs, path::PathBuf, time::Duration};
+
+    const SUCCESS: u32 = 0;
+    const END_OF_FILE: u32 = 0xC000_0011;
+    const ACCESS_DENIED: u32 = 0xC000_0022;
+    const PRIVILEGE_NOT_HELD: u32 = 0xC000_0061;
+    const MEDIA_WRITE_PROTECTED: u32 = 0xC000_00A2;
+    const NOT_SUPPORTED: u32 = 0xC000_00BB;
+    const CONTENT: &[u8] = b"original bytes";
+
+    struct Drive {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        backend: ShareBackend,
+        completion: u32,
+    }
+
+    /// The status and the body after it of one reply.
+    struct Reply {
+        status: u32,
+        body: Vec<u8>,
+    }
+
+    impl Reply {
+        fn word(&self, at: usize) -> u32 {
+            u32::from_le_bytes(self.body[at..at + 4].try_into().unwrap())
+        }
+        /// DR_READ_RSP: Length, then the data.
+        fn data(&self) -> &[u8] {
+            &self.body[4..4 + self.word(0) as usize]
+        }
+    }
+
+    fn drive(read_only: bool) -> Drive {
+        let (dir, root) = real_dir();
+        fs::write(root.join("data.bin"), CONTENT).unwrap();
+        let share = RedirectedDrive::new(1, "Share", &root, read_only).unwrap();
+        let native = WindowsRdpdrBackendFactory::new(share).build();
+        let mut backend = ShareBackend::new(Box::new(native), root.clone());
+        backend.add_drive(1).unwrap();
+        Drive {
+            _dir: dir,
+            root,
+            backend,
+            completion: 0,
+        }
+    }
+
+    impl Drive {
+        fn io(&mut self, major_function: MajorFunction, file_id: u32) -> DeviceIoRequest {
+            self.completion += 1;
+            DeviceIoRequest {
+                device_id: 1,
+                file_id,
+                completion_id: self.completion,
+                major_function,
+                minor_function: MinorFunction::from(0),
+            }
+        }
+
+        /// Exactly one reply per request, synchronous or deferred.
+        fn send(&mut self, request: ServerDriveIoRequest) -> Reply {
+            let mut replies = self.backend.handle_drive_io_request(request).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while replies.is_empty() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+                replies = self.backend.poll_deferred_messages().unwrap();
+            }
+            assert_eq!(replies.len(), 1, "one reply per request");
+            let bytes = replies[0].encode_unframed_pdu().unwrap();
+            let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            assert_eq!(word(8), self.completion, "the reply completes this request");
+            Reply {
+                status: word(12),
+                body: bytes[16..].to_vec(),
+            }
+        }
+
+        fn create(
+            &mut self,
+            path: &str,
+            access: DesiredAccess,
+            disposition: CreateDisposition,
+            options: CreateOptions,
+        ) -> Reply {
+            let device_io_request = self.io(MajorFunction::Create, 0);
+            self.send(ServerDriveIoRequest::ServerCreateDriveRequest(
+                DeviceCreateRequest {
+                    device_io_request,
+                    desired_access: access,
+                    allocation_size: 0,
+                    file_attributes: FileAttributes::empty(),
+                    shared_access: SharedAccess::FILE_SHARE_READ | SharedAccess::FILE_SHARE_WRITE,
+                    create_disposition: disposition,
+                    create_options: options,
+                    path: path.into(),
+                },
+            ))
+        }
+
+        /// A file ID for a successful open.
+        fn open(&mut self, path: &str, access: DesiredAccess) -> u32 {
+            let reply = self.create(
+                path,
+                access,
+                CreateDisposition::FILE_OPEN,
+                CreateOptions::empty(),
+            );
+            assert_eq!(reply.status, SUCCESS, "open {path}");
+            reply.word(0)
+        }
+
+        fn read(&mut self, file_id: u32, offset: u64, length: u32) -> Reply {
+            let device_io_request = self.io(MajorFunction::Read, file_id);
+            self.send(ServerDriveIoRequest::DeviceReadRequest(DeviceReadRequest {
+                device_io_request,
+                length,
+                offset,
+            }))
+        }
+
+        fn write(&mut self, file_id: u32, offset: u64, data: &[u8]) -> Reply {
+            let device_io_request = self.io(MajorFunction::Write, file_id);
+            self.send(ServerDriveIoRequest::DeviceWriteRequest(
+                DeviceWriteRequest {
+                    device_io_request,
+                    offset,
+                    write_data: data.to_vec(),
+                },
+            ))
+        }
+
+        fn set_information(&mut self, file_id: u32, set_buffer: FileInformationClass) -> Reply {
+            let device_io_request = self.io(MajorFunction::SetInformation, file_id);
+            self.send(ServerDriveIoRequest::ServerDriveSetInformationRequest(
+                ServerDriveSetInformationRequest {
+                    device_io_request,
+                    set_buffer,
+                },
+            ))
+        }
+
+        fn query_security(&mut self, file_id: u32, information: SecurityInformation) -> Reply {
+            let device_io_request = self.io(MajorFunction::QuerySecurity, file_id);
+            self.send(ServerDriveIoRequest::ServerDriveQuerySecurityRequest(
+                ServerDriveQuerySecurityRequest {
+                    device_io_request,
+                    security_information: information,
+                },
+            ))
+        }
+
+        fn set_security(&mut self, file_id: u32, information: SecurityInformation) -> Reply {
+            let device_io_request = self.io(MajorFunction::SetSecurity, file_id);
+            // A minimal self-relative descriptor: revision 1, SE_SELF_RELATIVE, nothing set.
+            let descriptor = vec![
+                1, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ];
+            self.send(ServerDriveIoRequest::ServerDriveSetSecurityRequest(
+                ServerDriveSetSecurityRequest {
+                    device_io_request,
+                    security_information: information,
+                    security_descriptor: descriptor,
+                },
+            ))
+        }
+
+        fn control(&mut self, file_id: u32, code: u32, output_buffer_length: u32) -> Reply {
+            let header = self.io(MajorFunction::DeviceControl, file_id);
+            self.send(ServerDriveIoRequest::DeviceControlRequest(
+                DeviceControlRequest {
+                    header,
+                    output_buffer_length,
+                    input_buffer_length: 0,
+                    io_control_code: AnyIoCtlCode(code),
+                },
+            ))
+        }
+
+        /// The raw directory entries for `\*`, query by query until the end.
+        fn list(&mut self, folder: u32) -> Vec<u8> {
+            let mut entries = Vec::new();
+            for initial_query in std::iter::once(1).chain(std::iter::repeat(0)).take(64) {
+                let mut device_io_request = self.io(MajorFunction::DirectoryControl, folder);
+                device_io_request.minor_function = MinorFunction::IRP_MN_QUERY_DIRECTORY;
+                let reply = self.send(ServerDriveIoRequest::ServerDriveQueryDirectoryRequest(
+                    ServerDriveQueryDirectoryRequest {
+                        device_io_request,
+                        file_info_class_lvl: FileInformationClassLevel::FILE_DIRECTORY_INFORMATION,
+                        initial_query,
+                        path: r"\*".into(),
+                    },
+                ));
+                if reply.status != SUCCESS {
+                    break;
+                }
+                entries.extend(reply.body);
+            }
+            entries
+        }
+
+        /// Everything a change could affect: names, bytes, size, times, attributes.
+        fn snapshot(&self) -> Vec<(String, Vec<u8>, u64, std::time::SystemTime, bool)> {
+            let mut entries: Vec<_> = fs::read_dir(&self.root)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let meta = entry.metadata().unwrap();
+                    let bytes = if meta.is_file() {
+                        fs::read(entry.path()).unwrap()
+                    } else {
+                        vec![]
+                    };
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    (
+                        name,
+                        bytes,
+                        meta.len(),
+                        meta.modified().unwrap(),
+                        meta.permissions().readonly(),
+                    )
+                })
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            entries
+        }
+    }
+
+    #[test]
+    fn a_read_only_share_refuses_every_change_and_leaves_bytes_and_metadata_intact() {
+        let mut drive = drive(true);
+        let before = drive.snapshot();
+        let read = || DesiredAccess::GENERIC_READ | DesiredAccess::FILE_READ_ATTRIBUTES;
+        let open = CreateDisposition::FILE_OPEN;
+        let none = CreateOptions::empty;
+        let attempts = [
+            (
+                r"\data.bin",
+                DesiredAccess::GENERIC_WRITE,
+                open,
+                none(),
+                "write access",
+            ),
+            (
+                r"\data.bin",
+                read(),
+                CreateDisposition::FILE_OVERWRITE_IF,
+                none(),
+                "overwrite",
+            ),
+            (
+                r"\data.bin",
+                read(),
+                CreateDisposition::FILE_SUPERSEDE,
+                none(),
+                "supersede",
+            ),
+            (
+                r"\data.bin",
+                DesiredAccess::DELETE,
+                open,
+                CreateOptions::FILE_DELETE_ON_CLOSE,
+                "delete on close",
+            ),
+            (
+                r"\data.bin",
+                DesiredAccess::FILE_WRITE_ATTRIBUTES,
+                open,
+                none(),
+                "attributes",
+            ),
+            (
+                r"\data.bin",
+                DesiredAccess::WRITE_DAC,
+                open,
+                none(),
+                "permissions",
+            ),
+            (
+                r"\data.bin:extra",
+                read(),
+                CreateDisposition::FILE_OPEN_IF,
+                none(),
+                "new stream",
+            ),
+            (
+                r"\new.txt",
+                read(),
+                CreateDisposition::FILE_CREATE,
+                none(),
+                "new file",
+            ),
+            (
+                r"\folder",
+                read(),
+                CreateDisposition::FILE_CREATE,
+                CreateOptions::FILE_DIRECTORY_FILE,
+                "new folder",
+            ),
+        ];
+        for (path, access, disposition, options, what) in attempts {
+            let reply = drive.create(path, access, disposition, options);
+            assert_eq!(reply.status, MEDIA_WRITE_PROTECTED, "{what}");
+        }
+
+        // Through a read handle: writes, truncation, rename, security, object IDs.
+        let file = drive.open(r"\data.bin", read());
+        assert_eq!(
+            drive.write(file, 0, b"changed").status,
+            MEDIA_WRITE_PROTECTED
+        );
+        let truncate = FileInformationClass::EndOfFile(FileEndOfFileInformation { end_of_file: 0 });
+        assert_eq!(
+            drive.set_information(file, truncate).status,
+            MEDIA_WRITE_PROTECTED
+        );
+        let rename = FileInformationClass::Rename(FileRenameInformation {
+            replace_if_exists: Boolean::False,
+            file_name: r"\renamed.bin".into(),
+        });
+        assert_eq!(
+            drive.set_information(file, rename).status,
+            MEDIA_WRITE_PROTECTED
+        );
+        assert_eq!(
+            drive.set_security(file, SecurityInformation::DACL).status,
+            MEDIA_WRITE_PROTECTED
+        );
+        const FSCTL_CREATE_OR_GET_OBJECT_ID: u32 = 0x0009_00C0;
+        assert_eq!(
+            drive
+                .control(file, FSCTL_CREATE_OR_GET_OBJECT_ID, 64)
+                .status,
+            MEDIA_WRITE_PROTECTED
+        );
+        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+        assert_eq!(
+            drive.control(file, FSCTL_SET_REPARSE_POINT, 0).status,
+            NOT_SUPPORTED,
+            "unknown control"
+        );
+
+        // Listing still works.
+        let folder = drive.create(r"\", read(), open, CreateOptions::FILE_DIRECTORY_FILE);
+        assert_eq!(folder.status, SUCCESS, "open the shared folder");
+        let listed = drive.list(folder.word(0));
+        let name: Vec<u8> = "data.bin"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert!(
+            listed.windows(name.len()).any(|w| w == name),
+            "data.bin is listed"
+        );
+
+        assert_eq!(
+            drive.snapshot(),
+            before,
+            "names, bytes, sizes, times and attributes"
+        );
+        assert!(
+            fs::metadata(drive.root.join("data.bin:extra")).is_err(),
+            "no stream was added"
+        );
+    }
+
+    #[test]
+    fn reads_return_exact_short_empty_and_end_of_file_results() {
+        let mut drive = drive(true);
+        // 64 MiB past the start; the gap reads as zeros.
+        let high = 64 * 1024 * 1024;
+        let tall = drive.root.join("tall.bin");
+        let file = fs::File::create(&tall).unwrap();
+        file.set_len(high + 8).unwrap();
+        drop(file);
+
+        let read = || DesiredAccess::GENERIC_READ;
+        let data = drive.open(r"\data.bin", read());
+        let whole = drive.read(data, 0, 4096);
+        assert_eq!(
+            (whole.status, whole.data()),
+            (SUCCESS, CONTENT),
+            "a short read returns what exists"
+        );
+        let middle = drive.read(data, 9, 3);
+        assert_eq!(middle.data(), b"byt");
+        let empty = drive.read(data, 0, 0);
+        assert_eq!(
+            (empty.status, empty.data()),
+            (SUCCESS, &[][..]),
+            "zero length"
+        );
+        let end = drive.read(data, CONTENT.len() as u64, 16);
+        assert_eq!(end.status, END_OF_FILE, "at the end");
+        assert!(end.data().is_empty());
+
+        let gap = drive.open(r"\tall.bin", read());
+        let zeros = drive.read(gap, high - 8, 32);
+        assert_eq!(
+            (zeros.status, zeros.data()),
+            (SUCCESS, &[0u8; 16][..]),
+            "high offset"
+        );
+    }
+
+    #[test]
+    fn privileged_requests_are_refused_in_both_modes_before_the_native_backend() {
+        for read_only in [true, false] {
+            let mut drive = drive(read_only);
+            let sacl = DesiredAccess::GENERIC_READ | DesiredAccess::ACCESS_SYSTEM_SECURITY;
+            let reply = drive.create(
+                r"\data.bin",
+                sacl,
+                CreateDisposition::FILE_OPEN,
+                CreateOptions::empty(),
+            );
+            assert_eq!(
+                reply.status, PRIVILEGE_NOT_HELD,
+                "SACL access, read_only={read_only}"
+            );
+            assert_eq!(reply.body, [0, 0, 0, 0, 0], "no file ID");
+
+            let file = drive.open(
+                r"\data.bin",
+                DesiredAccess::GENERIC_READ | DesiredAccess::READ_CONTROL,
+            );
+            for information in [
+                SecurityInformation::SACL,
+                SecurityInformation::LABEL,
+                SecurityInformation::BACKUP | SecurityInformation::DACL,
+            ] {
+                let bits = information.bits();
+                assert_eq!(
+                    drive.query_security(file, information).status,
+                    PRIVILEGE_NOT_HELD,
+                    "query {bits:#x}"
+                );
+                assert_eq!(
+                    drive.set_security(file, information).status,
+                    PRIVILEGE_NOT_HELD,
+                    "set {bits:#x}"
+                );
+            }
+            // The ordinary parts still work with the user's own rights.
+            let dacl =
+                drive.query_security(file, SecurityInformation::OWNER | SecurityInformation::DACL);
+            assert_eq!(
+                dacl.status, SUCCESS,
+                "owner and DACL, read_only={read_only}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_write_share_writes_with_the_users_own_permissions() {
+        let mut drive = drive(false);
+        let file = drive.open(
+            r"\data.bin",
+            DesiredAccess::GENERIC_READ | DesiredAccess::GENERIC_WRITE,
+        );
+        assert_eq!(drive.write(file, 0, b"replaced").status, SUCCESS);
+        assert_eq!(
+            fs::read(drive.root.join("data.bin")).unwrap(),
+            b"replaced bytes"
+        );
+
+        // A file the user may not write stays unchanged, and the remote is told.
+        let locked = drive.root.join("locked.bin");
+        fs::write(&locked, CONTENT).unwrap();
+        let mut permissions = fs::metadata(&locked).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&locked, permissions.clone()).unwrap();
+        let reply = drive.create(
+            r"\locked.bin",
+            DesiredAccess::GENERIC_WRITE,
+            CreateDisposition::FILE_OPEN,
+            CreateOptions::empty(),
+        );
+        assert_eq!(reply.status, ACCESS_DENIED);
+        assert_eq!(fs::read(&locked).unwrap(), CONTENT);
+        #[allow(
+            clippy::permissions_set_readonly_false,
+            reason = "lets the temporary folder be removed"
+        )]
+        permissions.set_readonly(false);
+        fs::set_permissions(&locked, permissions).unwrap();
     }
 }

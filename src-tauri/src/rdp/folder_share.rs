@@ -12,7 +12,7 @@
 //! offered.
 
 #[cfg(windows)]
-pub(crate) use windows_links::LinkSafeBackend;
+pub(crate) use windows_policy::ShareBackend;
 #[cfg(windows)]
 pub(crate) use windows_root::{BindError, BoundRoot, resolves_to};
 
@@ -30,16 +30,18 @@ pub(crate) use windows_root::{BindError, BoundRoot, resolves_to};
 /// (FileLinkInformation) never reaches the backend: ironrdp-rdpdr 0.9 does not
 /// decode that class, so such a request fails before it.
 #[cfg(windows)]
-mod windows_links {
+mod windows_policy {
     use ironrdp_pdu::PduResult;
     use ironrdp_rdpdr::Rdpdr;
     use ironrdp_rdpdr::backend::RdpdrBackend;
     use ironrdp_rdpdr::pdu::RdpdrPdu;
     use ironrdp_rdpdr::pdu::efs::{
-        AnyIoCtlCode, Boolean, ClientDriveSetInformationResponse, CreateDisposition, CreateOptions,
+        AnyIoCtlCode, Boolean, ClientDriveQuerySecurityResponse, ClientDriveSetInformationResponse,
+        ClientDriveSetSecurityResponse, CreateDisposition, CreateOptions,
         DecodedDeviceControlRequest, DesiredAccess, DeviceControlRequest, DeviceCreateRequest,
         DeviceCreateResponse, DeviceIoRequest, DeviceIoResponse, FileInformationClass, Information,
-        NtStatus, PrinterIoRequest, ServerDeviceAnnounceResponse, ServerDriveIoRequest,
+        NtStatus, PrinterIoRequest, SecurityInformation, ServerDeviceAnnounceResponse,
+        ServerDriveIoRequest,
     };
     use ironrdp_rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
     use ironrdp_rdpdr::pdu::esp::PortIoRequest;
@@ -125,17 +127,78 @@ mod windows_links {
         matches!(link_count(root, remote_path), Ok(None | Some(0 | 1)))
     }
 
-    /// Refuse a mutating open of a multiply linked file before the native
-    /// backend sees it; forward everything else unchanged.
+    /// Security information the native backend can only read or write after
+    /// enabling SeSecurityPrivilege (SACL, label and related parts) or the backup
+    /// and restore privileges (`BACKUP`).
+    const PRIVILEGED_SECURITY_INFORMATION: SecurityInformation = SecurityInformation::SACL
+        .union(SecurityInformation::LABEL)
+        .union(SecurityInformation::ATTRIBUTE)
+        .union(SecurityInformation::SCOPE)
+        .union(SecurityInformation::PROCESS_TRUST_LABEL)
+        .union(SecurityInformation::BACKUP)
+        .union(SecurityInformation::PROTECTED_SACL)
+        .union(SecurityInformation::UNPROTECTED_SACL);
+
+    /// The share acts with the workstation user's ordinary rights in either
+    /// mode. The native backend would enable a privilege for these requests, so
+    /// they are answered with STATUS_PRIVILEGE_NOT_HELD before it sees them.
+    fn privilege_refusal(req: &ServerDriveIoRequest) -> PduResult<Option<SvcMessage>> {
+        let denied = NtStatus::PRIVILEGE_NOT_HELD;
+        let reply = match req {
+            ServerDriveIoRequest::ServerCreateDriveRequest(create)
+                if create
+                    .desired_access
+                    .contains(DesiredAccess::ACCESS_SYSTEM_SECURITY) =>
+            {
+                RdpdrPdu::DeviceCreateResponse(DeviceCreateResponse {
+                    device_io_reply: DeviceIoResponse::new(
+                        create.device_io_request.clone(),
+                        denied,
+                    ),
+                    file_id: 0,
+                    information: Information::empty(),
+                })
+            }
+            ServerDriveIoRequest::ServerDriveQuerySecurityRequest(query)
+                if query
+                    .security_information
+                    .intersects(PRIVILEGED_SECURITY_INFORMATION) =>
+            {
+                RdpdrPdu::ClientDriveQuerySecurityResponse(ClientDriveQuerySecurityResponse {
+                    device_io_response: DeviceIoResponse::new(
+                        query.device_io_request.clone(),
+                        denied,
+                    ),
+                    security_descriptor: None,
+                })
+            }
+            ServerDriveIoRequest::ServerDriveSetSecurityRequest(set)
+                if set
+                    .security_information
+                    .intersects(PRIVILEGED_SECURITY_INFORMATION) =>
+            {
+                RdpdrPdu::ClientDriveSetSecurityResponse(
+                    ClientDriveSetSecurityResponse::new(set, denied)
+                        .map_err(|e| ironrdp_pdu::encode_err!(e))?,
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(SvcMessage::from(reply)))
+    }
+
+    /// The share's policy in front of the native backend: no privileges, and no
+    /// change to a multiply linked file. Read-only mode is the native backend's
+    /// own (`RedirectedDrive::new(.., read_only)`); everything else is forwarded.
     #[derive(Debug)]
-    pub(crate) struct LinkSafeBackend {
+    pub(crate) struct ShareBackend {
         inner: Box<dyn RdpdrBackend>,
         root: PathBuf,
     }
 
-    ironrdp_core::impl_as_any!(LinkSafeBackend);
+    ironrdp_core::impl_as_any!(ShareBackend);
 
-    impl LinkSafeBackend {
+    impl ShareBackend {
         /// `root` must be the path of a [`super::BoundRoot`] held for the
         /// backend's lifetime.
         pub(crate) fn new(inner: Box<dyn RdpdrBackend>, root: PathBuf) -> Self {
@@ -147,7 +210,7 @@ mod windows_links {
         }
     }
 
-    impl RdpdrBackend for LinkSafeBackend {
+    impl RdpdrBackend for ShareBackend {
         fn supports_drive_security(&self) -> bool {
             self.inner.supports_drive_security()
         }
@@ -187,6 +250,9 @@ mod windows_links {
             &mut self,
             req: ServerDriveIoRequest,
         ) -> PduResult<Vec<SvcMessage>> {
+            if let Some(refusal) = privilege_refusal(&req)? {
+                return Ok(vec![refusal]);
+            }
             if let ServerDriveIoRequest::ServerCreateDriveRequest(create) = &req
                 && self.refuses(create)
             {
