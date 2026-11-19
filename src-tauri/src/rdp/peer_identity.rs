@@ -96,6 +96,11 @@ impl ConfirmedPin {
     pub(crate) fn from_operator_confirmation(peer: ObservedPeer) -> Self {
         Self(peer)
     }
+
+    /// The confirmed key, to show its fingerprint.
+    pub(crate) fn spki_sha256(&self) -> [u8; 32] {
+        self.0.spki_sha256
+    }
 }
 
 /// This proof borrows the observed identity from a completed TLS connection.

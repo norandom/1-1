@@ -60,6 +60,7 @@ import {
 import { ConnectionForm } from '../connections/ConnectionForm';
 import { ServerIdentityDialog } from '../connections/ServerIdentityDialog';
 import { FolderShareDialog } from '../connections/FolderShareDialog';
+import { copyHostCommand } from '../../lib/host-import';
 import { CredentialTestMenuItem } from '../connections/CredentialTestMenuItem';
 // Task 8.5 (Req 10.6): the ONE shared connect action (design.md L379).
 import { useConnectAction } from '../../hooks/useConnectAction';
@@ -470,6 +471,12 @@ export function ConnectionTree() {
         break;
       case 'share-folder':
         setShareNode(node);
+        break;
+      case 'copy-command':
+        void copyHostCommand(node.id).then(
+          () => addToast({ message: 'Command line copied. Run it where 1-1 is installed to import this host.', type: 'success' }),
+          (cause: unknown) => addToast({ message: `Could not copy the command line: ${String(cause)}`, type: 'error' }),
+        );
         break;
       case 'edit': {
         const conn = connections.find((c) => c.id === node.id);

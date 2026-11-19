@@ -417,3 +417,17 @@ export async function installUpdate(onProgress: (progress: UpdateProgress) => vo
   progress.onmessage = onProgress;
   return invoke<void>('install_update', { progress });
 }
+
+/** The arguments 1-1 was started with, once; `null` when there were none. */
+export function takeLaunchArgs(): Promise<string[] | null> {
+  return invoke('take_launch_args');
+}
+
+/** The fingerprint confirmed for a host's address, without connecting. */
+export function confirmedFingerprint(id: string): Promise<string | null> {
+  return invoke('confirmed_fingerprint', { id });
+}
+
+export function copyText(text: string): Promise<void> {
+  return invoke('copy_text', { text });
+}

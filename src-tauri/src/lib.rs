@@ -44,6 +44,11 @@ pub fn run() {
     }));
 
     let app = tauri::Builder::default()
+        // First, so a second launch hands over its command line and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            commands::launch::forward(app, argv)
+        }))
+        .manage(commands::launch::LaunchArgs::from_env())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(commands::updater::UpdateState::default())
         .manage(commands::credential_check::CredentialChecks::default())
@@ -233,6 +238,9 @@ pub fn run() {
             commands::connection::test_connection,
             commands::connection::get_connection_password,
             commands::connection::has_saved_password,
+            commands::launch::take_launch_args,
+            commands::launch::copy_text,
+            commands::peer_identity::confirmed_fingerprint,
             commands::connection::measure_latency,
             commands::connection::import_ssh_config,
             // Clipboard commands

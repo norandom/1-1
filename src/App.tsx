@@ -22,6 +22,10 @@ import { SettingsPage } from './components/settings/SettingsPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastContainer } from './components/Toast';
 import { ConnectPasswordDialog } from './components/connections/ConnectPasswordDialog';
+import { ImportHostDialog } from './components/connections/ImportHostDialog';
+import { useHostImport } from './stores/hostImportStore';
+import { takeLaunchArgs } from './lib/tauri';
+import { listen } from '@tauri-apps/api/event';
 import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { useTheme } from './hooks/useTheme';
 import { useKeyboard } from './hooks/useKeyboard';
@@ -48,6 +52,13 @@ export default function App() {
 
   const navigate = useNavigate();
   useEffect(() => { void useUpdateStore.getState().check(true); }, []);
+  // `1-1 import …`: this launch's arguments, then any later launch's.
+  useEffect(() => {
+    const offer = useHostImport.getState().offer;
+    void takeLaunchArgs().then((args) => { if (args) offer(args); }).catch(() => {});
+    const stop = listen<string[]>('launch-args', (event) => offer(event.payload));
+    return () => { void stop.then((unlisten) => unlisten()); };
+  }, []);
   // Tell the user once per version when the startup check finds an update.
   useEffect(() => useUpdateStore.subscribe((state, previous) => {
     const version = state.update?.version;
@@ -126,6 +137,7 @@ export default function App() {
         {/* Toast Notifications */}
         <ToastContainer />
         <ConnectPasswordDialog />
+        <ImportHostDialog />
 
         {/* Quick Connect Modal */}
         <QuickConnect />

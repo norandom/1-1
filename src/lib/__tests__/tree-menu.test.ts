@@ -40,6 +40,7 @@ describe('contextMenuItems (Req 10.7, pinned sets)', () => {
       'Test credentials',
       'Review server identity',
       'Share folder…',
+      'Copy as command line',
       'Edit',
       'Duplicate',
       'Move…',

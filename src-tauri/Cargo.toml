@@ -34,6 +34,8 @@ tauri = { version = "2.12.5", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 tauri-plugin-updater = "=2.14.1"
 tauri-plugin-clipboard-manager = "=2.3.0"
+# A second launch (1-1 import ...) hands its arguments to the running window.
+tauri-plugin-single-instance = "=2.5.4"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
