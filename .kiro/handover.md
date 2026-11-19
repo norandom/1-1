@@ -1,10 +1,15 @@
 # 1-1 maintainer handover
 
-**19 November 2026.** 1-1 (pronounced “zero”) is an RDP client for coding and monitoring remote agents. The latest release is **v0.1.0-alpha.6**, a security update with Linux password and clipboard fixes. The maintainer still has to confirm that Linux passwords survive a logout. Folder sharing comes next, through attaching the drive to sessions (task 5.2), before the usability items below. [Releases](https://github.com/norandom/1-1/releases)
+**19 November 2026.** 1-1 (pronounced “zero”) is an RDP client for coding and monitoring remote agents. The latest release is **v0.1.0-alpha.7**: per-host HiDPI scaling, per-host password saving and the first macOS `.dmg`. The maintainer still has to confirm that Linux passwords survive a logout (KWallet) and that scaling looks right on the MacBook. Folder sharing comes next, through attaching the drive to sessions (task 5.2), before the usability items below. [Releases](https://github.com/norandom/1-1/releases)
 
 ## Releases
 
-- **alpha.6** (`705fecd`, current feed).
+- **alpha.7** (`20e4e4c`, current feed).
+  - Per-host Scaling: Automatic (default, desktop scale = device pixel ratio × 100), Custom percentage (100–300%), Off (100%), Low resolution. Sent at connect and on every Display Control resize.
+  - Per-host `savePassword` (default on). Off: no keychain entry, password asked at connect and held by the session. A host with no saved password also gets the prompt.
+  - Linux keychain errors name KWallet and GNOME Keyring.
+  - Assets add the macOS arm64 `.dmg` (not notarized). The feed is still Windows x64 and the AppImage; macOS could join with `1-1.app.tar.gz`.
+- **alpha.6** (`705fecd`).
   - Security: Tauri 2.12.5 (IPC origin confusion), tauri-plugin-updater 2.14.1 with zip 9.3.0 (critical), the shadcn CLI package removed (its stylesheet is vendored in `src/styles/shadcn-tailwind.css`), and npm, serde_with and rand fixes.
   - Linux passwords use the Secret Service (keyring feature `linux-native-sync-persistent`) instead of the kernel keyring alone, which lost them at logout.
   - Clipboard text is LF on Linux and macOS and CRLF toward the remote.
@@ -22,7 +27,8 @@
 
 ## Where to resume
 
-1. **Fix the task 4.1 review findings**, then mark 4.1 done. Code is in `src-tauri/src/rdp/folder_share.rs`; `BoundRoot` and `LinkSafeBackend` are not wired into sessions yet.
+1. ~~Task 4.1 review findings and task 4.2~~: done 19 November (`9da6a28`, `e27c2c0`). `ShareBackend` (formerly `LinkSafeBackend`) also refuses privilege-enabling requests. Next is 4.3. The notes below are kept for context.
+1. **(Done) Fix the task 4.1 review findings**, then mark 4.1 done. Code is in `src-tauri/src/rdp/folder_share.rs`; `BoundRoot` and `LinkSafeBackend` are not wired into sessions yet.
    - *Blocker:* a create of `name:stream` on a multiply-linked file passes the link check, because the stream doesn't exist yet. New streams attach to the file itself. Strip `:stream` before counting links.
    - Count links fail-closed: only "not found" forwards the request.
    - Refuse a `FileRenameInformation` that replaces a multiply-linked destination, and refuse remote hard-link creation (`FileLinkInformation`).
@@ -32,8 +38,9 @@
 2. **Continue folder sharing:** 4.2 read-only and permission enforcement, 4.3 scoped create, copy, rename and delete, 5.1 a bounded file worker off the input path, 5.2 attaching the drive. The maintainer's main past pain was RDP file transfers making the mouse and typing slow. Keep input traffic ahead of file replies and measure typing latency during copies (6.2). [Folder-sharing tasks](specs/rdp-folder-sharing/tasks.md)
 3. **Usability backlog, after 5.2:**
    - **Native pointer, as Royal TS and mstsc do it:** set `pointer_software_rendering` to false, show the remote pointer bitmap as the CSS cursor over the canvas, and hide and restore it cleanly at the window edge. The local pointer currently stays visible next to the drawn one.
-   - **HiDPI:** `rdp/client.rs` sends `desktop_scale_factor: 0` while requesting physical pixels, so the remote UI is tiny on a MacBook. Add a per-host Scaling option: Automatic (device pixel ratio × 100), 100%, or Low resolution.
+   - ~~HiDPI~~: done in alpha.7.
    - ~~Clipboard line endings~~: done in alpha.6.
+   - **Update notice:** the startup update check is silent; the result shows only in Settings > Updates. Consider an `Update available` notice.
    - **Command line:** `1-1 --host <saved name|address[:port]>` connects directly, asks for the password if none is saved, and opens only the session with the sidebar hidden.
    - **CPU:** about 2% per connection on an i9 at high resolution with RDP 6.1 compression. Measure after the pointer change.
 4. **Open acceptance checks from 17 November:**
