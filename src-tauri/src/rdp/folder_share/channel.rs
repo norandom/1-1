@@ -1,11 +1,12 @@
 //! The drive redirection channel as 1-1 announces it.
 //!
 //! IronRDP's RDPDR processor advertises its static channel with only the
-//! compression option. [MS-RDPBCGR] 2.2.1.3.4.1 says a channel without
-//! CHANNEL_OPTION_INITIALIZED is a placeholder the server must not set up,
-//! and Windows servers keep to that: they joined the channel but never sent a
-//! Server Announce, so the drive stayed "connecting". xrdp ignores the option.
-//! mstsc announces rdpdr as INITIALIZED | COMPRESS_RDP; so does this wrapper.
+//! compression option. mstsc announces rdpdr as INITIALIZED | COMPRESS_RDP,
+//! and [MS-RDPBCGR] 2.2.1.3.4.1 describes a channel without
+//! CHANNEL_OPTION_INITIALIZED as not set up, so this wrapper adds the option.
+//! Testing on 2026-11-19 showed it is not what Windows needs to start drive
+//! redirection (that is the audio channel, see `rdp::client`); it is kept to
+//! match mstsc.
 
 use ironrdp_core::impl_as_any;
 use ironrdp_pdu::PduResult;

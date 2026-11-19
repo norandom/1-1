@@ -412,6 +412,12 @@ pub(crate) async fn attempt_rdp_connection_with_share(
             crate::rdp::folder_share::attach::drive_channel(&tls, &target.endpoint, share).await;
         if let Some(rdpdr) = rdpdr {
             connector.attach_static_channel(rdpdr);
+            // Windows starts drive redirection only when the audio channel is
+            // registered as well (FreeRDP and IronRDP's own client do the same).
+            // It offers no formats, so the server sends no sound.
+            connector.attach_static_channel(ironrdp_rdpsnd::client::Rdpsnd::new(Box::new(
+                ironrdp_rdpsnd::client::NoopRdpsndBackend,
+            )));
         }
         statuses
     };
