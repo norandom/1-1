@@ -449,8 +449,8 @@ mod links {
 
 /// Task 4.2: the share's policy in front of the real native backend.
 mod policy {
-    use super::super::ShareBackend;
-    use super::real_dir;
+    use super::super::{BoundRoot, ShareBackend};
+    use super::{identity_of, real_dir};
     use ironrdp_rdpdr::backend::RdpdrBackend;
     use ironrdp_rdpdr::pdu::efs::{
         AnyIoCtlCode, Boolean, CreateDisposition, CreateOptions, DesiredAccess,
@@ -472,11 +472,13 @@ mod policy {
     const NOT_SUPPORTED: u32 = 0xC000_00BB;
     const CONTENT: &[u8] = b"original bytes";
 
+    /// Fields drop in order: the backend's handles, then the guards, then the folder.
     struct Drive {
-        _dir: tempfile::TempDir,
-        root: PathBuf,
         backend: ShareBackend,
+        _bound: Option<BoundRoot>,
+        root: PathBuf,
         completion: u32,
+        _dir: tempfile::TempDir,
     }
 
     /// The status and the body after it of one reply.
@@ -496,17 +498,27 @@ mod policy {
     }
 
     fn drive(read_only: bool) -> Drive {
+        drive_with(read_only, false)
+    }
+
+    /// With `bind`, the root is bound before the drive opens, as in a session.
+    fn drive_with(read_only: bool, bind: bool) -> Drive {
         let (dir, root) = real_dir();
         fs::write(root.join("data.bin"), CONTENT).unwrap();
+        let bound = bind.then(|| {
+            let (volume, file) = identity_of(&root);
+            BoundRoot::bind(&root, volume, file).unwrap()
+        });
         let share = RedirectedDrive::new(1, "Share", &root, read_only).unwrap();
         let native = WindowsRdpdrBackendFactory::new(share).build();
         let mut backend = ShareBackend::new(Box::new(native), root.clone());
         backend.add_drive(1).unwrap();
         Drive {
-            _dir: dir,
-            root,
             backend,
+            _bound: bound,
+            root,
             completion: 0,
+            _dir: dir,
         }
     }
 
@@ -641,8 +653,9 @@ mod policy {
             ))
         }
 
-        /// The raw directory entries for `\*`, query by query until the end.
-        fn list(&mut self, folder: u32) -> Vec<u8> {
+        /// The raw directory entries matching `pattern` (a full path such as
+        /// `\folder\*`), query by query until the end.
+        fn list(&mut self, folder: u32, pattern: &str) -> Vec<u8> {
             let mut entries = Vec::new();
             for initial_query in std::iter::once(1).chain(std::iter::repeat(0)).take(64) {
                 let mut device_io_request = self.io(MajorFunction::DirectoryControl, folder);
@@ -652,7 +665,7 @@ mod policy {
                         device_io_request,
                         file_info_class_lvl: FileInformationClassLevel::FILE_DIRECTORY_INFORMATION,
                         initial_query,
-                        path: r"\*".into(),
+                        path: pattern.into(),
                     },
                 ));
                 if reply.status != SUCCESS {
@@ -807,7 +820,7 @@ mod policy {
         // Listing still works.
         let folder = drive.create(r"\", read(), open, CreateOptions::FILE_DIRECTORY_FILE);
         assert_eq!(folder.status, SUCCESS, "open the shared folder");
-        let listed = drive.list(folder.word(0));
+        let listed = drive.list(folder.word(0), r"\*");
         let name: Vec<u8> = "data.bin"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
@@ -949,4 +962,6 @@ mod policy {
         permissions.set_readonly(false);
         fs::set_permissions(&locked, permissions).unwrap();
     }
+
+    mod operations;
 }

@@ -122,6 +122,18 @@ mod windows_policy {
         Ok(Some(info.NumberOfLinks))
     }
 
+    /// The shared folder itself is never renamed or deleted from the remote.
+    /// Both need an open with DELETE access; asked for explicitly, it is
+    /// refused here. Broader requests (GENERIC_ALL, MAXIMUM_ALLOWED) that would
+    /// grant DELETE fail on the root guard, which denies delete sharing.
+    pub(super) fn removes_root(request: &DeviceCreateRequest) -> bool {
+        request.path.trim_matches(['\\', '/']).is_empty()
+            && (request.desired_access.contains(DesiredAccess::DELETE)
+                || request
+                    .create_options
+                    .contains(CreateOptions::FILE_DELETE_ON_CLOSE))
+    }
+
     /// A change is safe only for a new entry or one with a single name.
     fn may_change(root: &Path, remote_path: &str) -> bool {
         matches!(link_count(root, remote_path), Ok(None | Some(0 | 1)))
@@ -206,7 +218,7 @@ mod windows_policy {
         }
 
         fn refuses(&self, request: &DeviceCreateRequest) -> bool {
-            mutates(request) && !may_change(&self.root, &request.path)
+            removes_root(request) || (mutates(request) && !may_change(&self.root, &request.path))
         }
     }
 
