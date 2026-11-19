@@ -16,10 +16,11 @@ export interface FolderShareGrant {
   mode: ShareMode;
 }
 
-/** The committed folder share of one saved host. */
+/** The committed folder shares of one saved host. */
 export interface FolderShareState {
   supported: boolean;
-  grant: FolderShareGrant | null;
+  /** In the order they were added; each is one drive on the remote. */
+  folders: FolderShareGrant[];
   /** Why sharing is off although a grant may exist. */
   error: string | null;
 }
@@ -133,8 +134,8 @@ export interface SessionInfo {
   reconnectAttempts: number;
   maxReconnectAttempts: number;
   lastError?: string | null;
-  /** What this connection's shared folder achieved, from protocol evidence. */
-  folderShare?: FolderShareStatus;
+  /** What each of this connection's shared folders achieved, from protocol evidence. */
+  folderShares?: FolderShareStatus[];
 }
 
 /** Mirrors `rdp::folder_share::status::ShareStatus`. */

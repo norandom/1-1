@@ -1,10 +1,12 @@
-//! Attaching the granted folder to one connection (rdp-folder-sharing task 5.2).
+//! Attaching the granted folders to one connection (rdp-folder-sharing 5.2).
 //!
 //! The drive channel is decided per connection attempt, after TLS and before
-//! the client announces its static channels. The saved grant must name this
-//! address, the server must present the key the user reviewed, and the folder
-//! must still be the one chosen. Otherwise the connection goes ahead without
-//! the channel or a device name, so the desktop never depends on the share.
+//! the client announces its static channels. Each saved folder must name this
+//! address, the server must present the key the user reviewed for it, and the
+//! folder must still be the one chosen. Folders that pass become drives of one
+//! channel; any that do not are left out with their reason, and with none left
+//! the connection goes ahead without the channel, so the desktop never depends
+//! on a share.
 
 use super::status::{ShareState, ShareStatusCell};
 use super::worker::{Limits, WorkerBackend};
@@ -15,14 +17,14 @@ use ironrdp_rdpdr::Rdpdr;
 use ironrdp_rdpdr_native::{
     FIRST_NAMED_DRIVE_DEVICE_ID, RedirectedDrive, WindowsRdpdrBackendFactory,
 };
-use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-/// The RDPDR device ID of the shared folder; one drive per connection.
-pub(crate) const SHARE_DEVICE_ID: u32 = FIRST_NAMED_DRIVE_DEVICE_ID;
+/// The RDPDR device ID of a host's first folder; the next ones follow it.
+pub(crate) const FIRST_SHARE_DEVICE_ID: u32 = FIRST_NAMED_DRIVE_DEVICE_ID;
 /// The client name the redirection channel reports to the server.
 const COMPUTER_NAME: &str = "1-1";
 
-/// Why a connection goes ahead without its folder. Shown to the user.
+/// Why a folder is left out of this connection. Shown to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NotOffered {
     /// The saved address no longer matches the grant's.
@@ -62,13 +64,47 @@ impl std::fmt::Display for NotOffered {
     }
 }
 
-/// The redirection channel for `grant`, if this connection qualifies.
+/// The connection's drive channel, if any folder qualifies, and each
+/// folder's status in grant order.
 pub(crate) async fn drive_channel<S>(
     tls: &SignedTls<S>,
     endpoint: &Endpoint,
-    grant: ShareGrant,
-    status: ShareStatusCell,
-) -> Result<Rdpdr, NotOffered> {
+    grants: Vec<ShareGrant>,
+) -> (Option<Rdpdr>, Vec<ShareStatusCell>) {
+    let statuses: Vec<ShareStatusCell> =
+        grants.iter().map(|_| ShareStatusCell::default()).collect();
+    let mut verified = Vec::new();
+    for (index, grant) in grants.into_iter().enumerate() {
+        let device_id = FIRST_SHARE_DEVICE_ID + index as u32;
+        match verify(tls, endpoint, &grant).await {
+            Ok(()) => verified.push((device_id, grant, statuses[index].clone())),
+            Err(reason) => leave_out(&grant, &statuses[index], reason),
+        }
+    }
+    if verified.is_empty() {
+        return (None, statuses);
+    }
+    // Binding opens every folder on each path; keep that off the async runtime.
+    let rdpdr = tokio::task::spawn_blocking(move || start(verified))
+        .await
+        .ok()
+        .flatten();
+    (rdpdr, statuses)
+}
+
+fn leave_out(grant: &ShareGrant, status: &ShareStatusCell, reason: NotOffered) {
+    log::info!(
+        "Not offering the shared folder {:?}: {reason}",
+        grant.share_name
+    );
+    status.set(reason.state());
+}
+
+async fn verify<S>(
+    tls: &SignedTls<S>,
+    endpoint: &Endpoint,
+    grant: &ShareGrant,
+) -> Result<(), NotOffered> {
     if peer_identity::endpoint_key(endpoint) != grant.endpoint {
         return Err(NotOffered::AddressChanged);
     }
@@ -78,35 +114,65 @@ pub(crate) async fn drive_channel<S>(
     });
     tls.verify(Some(&reviewed))
         .await
-        .map_err(|_| NotOffered::IdentityChanged)?;
-    let name = grant.share_name.clone();
-    let read_only = grant.mode == ShareMode::ReadOnly;
-    // Binding opens every folder on the path; keep that off the async runtime.
-    let worker = tokio::task::spawn_blocking(move || start(grant))
-        .await
-        .map_err(|error| NotOffered::DriveFailed(error.to_string()))??;
-    status.negotiating(&name, read_only);
-    let worker = worker.with_status(status);
-    Ok(Rdpdr::new(Box::new(worker), COMPUTER_NAME.into())
-        .with_drives(Some(vec![(SHARE_DEVICE_ID, name)])))
+        .map(drop)
+        .map_err(|_| NotOffered::IdentityChanged)
 }
 
-/// Bind the folder and start a fresh worker for this connection attempt.
-fn start(grant: ShareGrant) -> Result<WorkerBackend, NotOffered> {
-    let bound = BoundRoot::bind(&grant.root_path, grant.volume_id, grant.directory_file_id)
-        .map_err(|error| NotOffered::FolderUnavailable(error.to_string()))?;
-    let read_only = grant.mode == ShareMode::ReadOnly;
-    let drive = RedirectedDrive::new(SHARE_DEVICE_ID, &grant.share_name, bound.path(), read_only)
-        .map_err(|error| NotOffered::DriveFailed(error.to_string()))?;
-    let native = WindowsRdpdrBackendFactory::new(drive).build();
-    let share = ShareBackend::new(Box::new(native), bound.path().to_path_buf());
-    // The worker keeps the guards until the channel ends.
-    Ok(WorkerBackend::spawn(
-        Box::new(share),
-        bound,
-        Limits::default(),
-        Arc::new(|| {}),
-    ))
+/// Bind the verified folders and start one fresh worker for all of them.
+fn start(verified: Vec<(u32, ShareGrant, ShareStatusCell)>) -> Option<Rdpdr> {
+    let mut drives = Vec::new();
+    let mut bound = Vec::new();
+    let mut roots: HashMap<u32, PathBuf> = HashMap::new();
+    let mut statuses = HashMap::new();
+    let mut names = Vec::new();
+    for (device_id, grant, status) in verified {
+        let root = match BoundRoot::bind(&grant.root_path, grant.volume_id, grant.directory_file_id)
+        {
+            Ok(root) => root,
+            Err(error) => {
+                leave_out(
+                    &grant,
+                    &status,
+                    NotOffered::FolderUnavailable(error.to_string()),
+                );
+                continue;
+            }
+        };
+        let read_only = grant.mode == ShareMode::ReadOnly;
+        match RedirectedDrive::new(device_id, &grant.share_name, root.path(), read_only) {
+            Ok(drive) => drives.push(drive),
+            Err(error) => {
+                leave_out(&grant, &status, NotOffered::DriveFailed(error.to_string()));
+                continue;
+            }
+        }
+        log::info!(
+            "Offering the shared folder {:?} on this connection",
+            grant.share_name
+        );
+        status.negotiating(&grant.share_name, read_only);
+        roots.insert(device_id, root.path().to_path_buf());
+        names.push((device_id, grant.share_name));
+        statuses.insert(device_id, status);
+        bound.push(root);
+    }
+    if drives.is_empty() {
+        return None;
+    }
+    let factory = match WindowsRdpdrBackendFactory::from_drives(drives) {
+        Ok(factory) => factory,
+        Err(error) => {
+            for status in statuses.values() {
+                status.set(NotOffered::DriveFailed(error.to_string()).state());
+            }
+            return None;
+        }
+    };
+    let share = ShareBackend::with_roots(Box::new(factory.build()), roots);
+    // The worker keeps every guard until the channel ends.
+    let worker = WorkerBackend::spawn(Box::new(share), bound, Limits::default(), Arc::new(|| {}))
+        .with_statuses(statuses);
+    Some(Rdpdr::new(Box::new(worker), COMPUTER_NAME.into()).with_drives(Some(names)))
 }
 
 #[cfg(test)]

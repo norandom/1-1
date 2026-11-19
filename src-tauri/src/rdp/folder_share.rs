@@ -215,20 +215,50 @@ mod windows_policy {
     #[derive(Debug)]
     pub(crate) struct ShareBackend {
         inner: Box<dyn RdpdrBackend>,
-        root: PathBuf,
+        /// Each drive device's bound folder.
+        roots: std::collections::HashMap<u32, PathBuf>,
+        /// The folder of every device, for a single-drive backend.
+        root: Option<PathBuf>,
     }
 
     ironrdp_core::impl_as_any!(ShareBackend);
 
     impl ShareBackend {
-        /// `root` must be the path of a [`super::BoundRoot`] held for the
-        /// backend's lifetime.
+        /// One drive: `root` must be the path of a [`super::BoundRoot`] held
+        /// for the backend's lifetime.
+        #[cfg_attr(not(test), allow(dead_code, reason = "sessions use with_roots"))]
         pub(crate) fn new(inner: Box<dyn RdpdrBackend>, root: PathBuf) -> Self {
-            Self { inner, root }
+            Self {
+                inner,
+                roots: Default::default(),
+                root: Some(root),
+            }
+        }
+
+        /// Several drives, each device ID with its bound folder.
+        pub(crate) fn with_roots(
+            inner: Box<dyn RdpdrBackend>,
+            roots: std::collections::HashMap<u32, PathBuf>,
+        ) -> Self {
+            Self {
+                inner,
+                roots,
+                root: None,
+            }
+        }
+
+        /// A device without a known folder is refused any change.
+        fn may_change_on(&self, device_id: u32, remote_path: &str) -> bool {
+            self.roots
+                .get(&device_id)
+                .or(self.root.as_ref())
+                .is_some_and(|root| may_change(root, remote_path))
         }
 
         fn refuses(&self, request: &DeviceCreateRequest) -> bool {
-            removes_root(request) || (mutates(request) && !may_change(&self.root, &request.path))
+            removes_root(request)
+                || (mutates(request)
+                    && !self.may_change_on(request.device_io_request.device_id, &request.path))
         }
     }
 
@@ -293,7 +323,7 @@ mod windows_policy {
             if let ServerDriveIoRequest::ServerDriveSetInformationRequest(set) = &req
                 && let FileInformationClass::Rename(rename) = &set.set_buffer
                 && rename.replace_if_exists == Boolean::True
-                && !may_change(&self.root, &rename.file_name)
+                && !self.may_change_on(set.device_io_request.device_id, &rename.file_name)
             {
                 let refusal = ClientDriveSetInformationResponse::new(set, NtStatus::ACCESS_DENIED)
                     .map_err(|e| ironrdp_pdu::encode_err!(e))?;

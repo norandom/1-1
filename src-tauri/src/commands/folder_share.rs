@@ -42,13 +42,14 @@ pub(crate) struct GrantView {
     mode: ShareMode,
 }
 
-/// The committed state of one host's folder share.
+/// The committed folder shares of one host.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FolderShareView {
     /// Only the Windows build can share a folder.
     supported: bool,
-    grant: Option<GrantView>,
+    /// In the order they were added; each is one drive on the remote.
+    folders: Vec<GrantView>,
     /// Why sharing is off although a grant may exist (unreadable store).
     error: Option<String>,
 }
@@ -93,19 +94,22 @@ impl FolderShareDrafts {
 }
 
 fn view(grants: &ShareGrantStore, profile_id: &str) -> FolderShareView {
-    let (grant, error) = match grants.get(profile_id) {
-        Ok(grant) => (grant, None),
-        Err(error) => (None, Some(error.to_string())),
+    let (folders, error) = match grants.get(profile_id) {
+        Ok(folders) => (folders, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
     };
     FolderShareView {
         supported: native::SUPPORTED,
-        grant: grant.map(|grant| GrantView {
-            endpoint: grant.endpoint,
-            fingerprint: fingerprint(&grant.spki_sha256),
-            folder: grant.root_path.display().to_string(),
-            share_name: grant.share_name,
-            mode: grant.mode,
-        }),
+        folders: folders
+            .into_iter()
+            .map(|grant| GrantView {
+                endpoint: grant.endpoint,
+                fingerprint: fingerprint(&grant.spki_sha256),
+                folder: grant.root_path.display().to_string(),
+                share_name: grant.share_name,
+                mode: grant.mode,
+            })
+            .collect(),
         error,
     }
 }
@@ -272,15 +276,19 @@ pub(crate) fn cancel_folder_share(selection: Uuid, drafts: State<'_, FolderShare
     drafts.take(selection);
 }
 
-/// Idempotent. Takes effect on the next connection.
+/// Stop sharing one folder (`share_name`), or every folder of the host when
+/// none is named. Idempotent. Takes effect on the next connection.
 #[tauri::command]
 pub(crate) fn revoke_folder_share(
     profile_id: String,
+    share_name: Option<String>,
     grants: State<'_, Arc<ShareGrantStore>>,
 ) -> Result<FolderShareView, String> {
-    grants
-        .revoke([profile_id.as_str()])
-        .map_err(|e| e.to_string())?;
+    match share_name {
+        Some(name) => grants.remove(&profile_id, &name),
+        None => grants.revoke([profile_id.as_str()]),
+    }
+    .map_err(|e| e.to_string())?;
     Ok(view(&grants, &profile_id))
 }
 

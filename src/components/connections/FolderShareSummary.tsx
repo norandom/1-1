@@ -11,7 +11,7 @@ export function FolderShareSummary({ id, name }: { id: string; name: string }) {
   const [state, setState] = useState<FolderShareState | null>(null);
   const [managing, setManaging] = useState(false);
   const refresh = useCallback(() => {
-    getFolderShare(id).then(setState, (cause: unknown) => setState({ supported: true, grant: null, error: String(cause) }));
+    getFolderShare(id).then(setState, (cause: unknown) => setState({ supported: true, folders: [], error: String(cause) }));
   }, [id]);
   useEffect(refresh, [refresh]);
 

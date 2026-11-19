@@ -120,8 +120,9 @@ export function cancelFolderShare(selection: string): Promise<void> {
   return invoke('cancel_folder_share', { selection });
 }
 
-export function revokeFolderShare(profileId: string): Promise<FolderShareState> {
-  return invoke('revoke_folder_share', { profileId });
+/** Stop sharing one folder, or every folder of the host when no name is given. */
+export function revokeFolderShare(profileId: string, shareName?: string): Promise<FolderShareState> {
+  return invoke('revoke_folder_share', { profileId, shareName: shareName ?? null });
 }
 
 export async function testConnection(host: string, port: number = 3389): Promise<boolean> {

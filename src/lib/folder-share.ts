@@ -19,9 +19,10 @@ export function folderShareSummary(state: FolderShareState | null): string {
   if (!state) return 'Checking folder sharing…';
   if (!state.supported) return 'Folder sharing is available in the Windows build.';
   if (state.error) return state.error;
-  if (!state.grant) return 'No folder is shared with this host.';
-  const { folder, shareName, mode } = state.grant;
-  return `${folder} as “${shareName}”, ${shareModeLabel(mode).toLowerCase()}.`;
+  if (state.folders.length === 0) return 'No folder is shared with this host.';
+  return state.folders
+    .map(({ folder, shareName, mode }) => `${folder} as “${shareName}”, ${shareModeLabel(mode).toLowerCase()}`)
+    .join('; ') + '.';
 }
 
 /** The bottom bar's short word for a session's folder share. */
@@ -51,4 +52,16 @@ export function shareStatusDetail(status: FolderShareStatus): string {
     case 'refused': return `The server refused the drive (${status.status}). That alone does not say why; a server policy may block drive redirection.`;
     case 'ended': return 'The connection that carried the drive ended.';
   }
+}
+
+/** Folders a host may share at once; mirrors `MAX_FOLDERS`. */
+export const MAX_SHARED_FOLDERS = 8;
+
+const PROGRESS: FolderShareStatus['state'][] = ['accessObserved', 'accepted', 'offered', 'negotiating', 'refused', 'ended', 'unverified', 'folderUnavailable', 'unknown', 'unsupported', 'off'];
+
+/** The bottom bar's one-line summary of a session's folders. */
+export function sharesSummary(shares: FolderShareStatus[]): string {
+  const best = [...shares].sort((a, b) => PROGRESS.indexOf(a.state) - PROGRESS.indexOf(b.state))[0];
+  if (!best) return '';
+  return shares.length === 1 ? `Folder: ${shareStatusLabel(best)}` : `Folders (${shares.length}): ${shareStatusLabel(best)}`;
 }

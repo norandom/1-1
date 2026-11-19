@@ -1,6 +1,7 @@
 //! Explicit folder grants for saved hosts (rdp-folder-sharing task 3.1).
 //!
-//! A grant authorizes one local folder for one saved host, at the endpoint
+//! A host can share up to [`MAX_FOLDERS`] folders, each under its own share
+//! name. A grant authorizes one local folder for one saved host, at the endpoint
 //! and server key the user confirmed. Grants live in a per-user file outside
 //! the exported library. A missing file means no grants; an unreadable or
 //! malformed file means sharing stays off for every host until it is
@@ -22,7 +23,11 @@ use uuid::Uuid;
 #[cfg(test)]
 mod tests;
 
-const FILE_VERSION: u32 = 1;
+/// Version 2 keeps a list of folders per host; version 1 files (one folder
+/// per host) are still read and are rewritten as version 2 on the next change.
+const FILE_VERSION: u32 = 2;
+/// Folders one host may share at once.
+pub const MAX_FOLDERS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,9 +74,18 @@ pub fn is_portable_share_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+type Grants = BTreeMap<String, Vec<ShareGrant>>;
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrantFile {
+    version: u32,
+    grants: Grants,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GrantFileV1 {
     version: u32,
     grants: BTreeMap<String, ShareGrant>,
 }
@@ -85,14 +99,11 @@ pub enum GrantError {
     /// The change could not be saved; the previous state is retained.
     SaveFailed,
     /// The grant itself is not acceptable (empty fields or share name).
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "consumed by the folder grant commands of task 3.2"
-        )
-    )]
     Invalid,
+    /// The host already shares the maximum number of folders.
+    TooMany,
+    /// This folder is already shared with the host under the given name.
+    AlreadyShared(String),
 }
 
 impl std::fmt::Display for GrantError {
@@ -102,6 +113,10 @@ impl std::fmt::Display for GrantError {
             Self::Corrupt => "The saved folder shares are invalid, so folder sharing is off.",
             Self::SaveFailed => "Could not save the folder share change.",
             Self::Invalid => "The folder share is incomplete or its name is not portable.",
+            Self::TooMany => {
+                "This host already shares the most folders allowed. Stop sharing one first."
+            }
+            Self::AlreadyShared(_) => "This folder is already shared with this host.",
         })
     }
 }
@@ -109,8 +124,23 @@ impl std::fmt::Display for GrantError {
 impl std::error::Error for GrantError {}
 
 enum Loaded {
-    Grants(BTreeMap<String, ShareGrant>),
+    Grants(Grants),
     Corrupt,
+}
+
+/// Every folder of every host is valid, filed under its own host, and no host
+/// repeats a share name (Windows compares them without case).
+fn consistent(grants: &Grants) -> bool {
+    grants.iter().all(|(id, folders)| {
+        !folders.is_empty()
+            && folders.len() <= MAX_FOLDERS
+            && folders.iter().all(|g| *id == g.profile_id && g.is_valid())
+            && folders.iter().enumerate().all(|(i, a)| {
+                folders[..i]
+                    .iter()
+                    .all(|b| !a.share_name.eq_ignore_ascii_case(&b.share_name))
+            })
+    })
 }
 
 pub struct ShareGrantStore {
@@ -146,32 +176,30 @@ impl ShareGrantStore {
             }
             Err(_) => return Err(GrantError::Unreadable),
         };
-        let Ok(file) = serde_json::from_slice::<GrantFile>(&data) else {
-            return Ok(Loaded::Corrupt);
+        let grants = match serde_json::from_slice::<GrantFile>(&data) {
+            Ok(file) if file.version == FILE_VERSION => Some(file.grants),
+            Ok(_) => None,
+            Err(_) => serde_json::from_slice::<GrantFileV1>(&data)
+                .ok()
+                .filter(|file| file.version == 1)
+                .map(|file| {
+                    file.grants
+                        .into_iter()
+                        .map(|(id, grant)| (id, vec![grant]))
+                        .collect()
+                }),
         };
-        let consistent = file.version == FILE_VERSION
-            && file
-                .grants
-                .iter()
-                .all(|(id, grant)| *id == grant.profile_id && grant.is_valid());
-        Ok(if consistent {
-            Loaded::Grants(file.grants)
-        } else {
-            Loaded::Corrupt
+        Ok(match grants {
+            Some(grants) if consistent(&grants) => Loaded::Grants(grants),
+            _ => Loaded::Corrupt,
         })
     }
 
-    /// The committed grant for a profile. `Err` means sharing stays off.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "consumed by the folder grant commands of task 3.2"
-        )
-    )]
-    pub fn get(&self, profile_id: &str) -> Result<Option<ShareGrant>, GrantError> {
+    /// A profile's committed folders, in the order they were added. `Err`
+    /// means sharing stays off.
+    pub fn get(&self, profile_id: &str) -> Result<Vec<ShareGrant>, GrantError> {
         match self.load()? {
-            Loaded::Grants(mut grants) => Ok(grants.remove(profile_id)),
+            Loaded::Grants(mut grants) => Ok(grants.remove(profile_id).unwrap_or_default()),
             Loaded::Corrupt => Err(GrantError::Corrupt),
         }
     }
@@ -179,19 +207,13 @@ impl ShareGrantStore {
     /// Every committed grant, for reconciliation after a library reload.
     pub fn all(&self) -> Result<Vec<ShareGrant>, GrantError> {
         match self.load()? {
-            Loaded::Grants(grants) => Ok(grants.into_values().collect()),
+            Loaded::Grants(grants) => Ok(grants.into_values().flatten().collect()),
             Loaded::Corrupt => Err(GrantError::Corrupt),
         }
     }
 
-    /// Save or replace a profile's single grant, atomically.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "consumed by the folder grant commands of task 3.2"
-        )
-    )]
+    /// Add a folder to its profile, atomically. A folder with the same share
+    /// name is replaced; the same directory under another name is refused.
     pub fn put(&self, grant: ShareGrant) -> Result<(), GrantError> {
         if !grant.is_valid() {
             return Err(GrantError::Invalid);
@@ -202,7 +224,40 @@ impl ShareGrantStore {
             // Never overwrite a file we cannot interpret with a new grant.
             Loaded::Corrupt => return Err(GrantError::Corrupt),
         };
-        grants.insert(grant.profile_id.clone(), grant);
+        let folders = grants.entry(grant.profile_id.clone()).or_default();
+        let same_name = |g: &ShareGrant| g.share_name.eq_ignore_ascii_case(&grant.share_name);
+        if let Some(other) = folders.iter().find(|g| {
+            !same_name(g)
+                && (g.volume_id, g.directory_file_id) == (grant.volume_id, grant.directory_file_id)
+        }) {
+            return Err(GrantError::AlreadyShared(other.share_name.clone()));
+        }
+        match folders.iter().position(same_name) {
+            Some(index) => folders[index] = grant,
+            None if folders.len() >= MAX_FOLDERS => return Err(GrantError::TooMany),
+            None => folders.push(grant),
+        }
+        self.write(grants)
+    }
+
+    /// Stop sharing one folder of a profile. Idempotent.
+    pub fn remove(&self, profile_id: &str, share_name: &str) -> Result<(), GrantError> {
+        let _writer = self.writer.lock().expect("share grant lock poisoned");
+        let mut grants = match self.load()? {
+            Loaded::Grants(grants) => grants,
+            Loaded::Corrupt => return Err(GrantError::Corrupt),
+        };
+        let Some(folders) = grants.get_mut(profile_id) else {
+            return Ok(());
+        };
+        let before = folders.len();
+        folders.retain(|g| !g.share_name.eq_ignore_ascii_case(share_name));
+        if folders.len() == before {
+            return Ok(());
+        }
+        if folders.is_empty() {
+            grants.remove(profile_id);
+        }
         self.write(grants)
     }
 
@@ -248,7 +303,7 @@ impl ShareGrantStore {
         Ok(())
     }
 
-    fn write(&self, grants: BTreeMap<String, ShareGrant>) -> Result<(), GrantError> {
+    fn write(&self, grants: Grants) -> Result<(), GrantError> {
         self.check_injected_failure()?;
         let data = serde_json::to_vec_pretty(&GrantFile {
             version: FILE_VERSION,

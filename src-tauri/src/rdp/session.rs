@@ -95,9 +95,10 @@ pub struct SessionInfo {
     pub reconnect_attempts: u32,
     pub max_reconnect_attempts: u32,
     pub last_error: Option<String>,
-    /// What this connection's shared folder achieved, from protocol evidence.
+    /// What each of this connection's shared folders achieved, from protocol
+    /// evidence, in the order the host lists them.
     #[serde(default)]
-    pub folder_share: crate::rdp::folder_share::status::ShareStatus,
+    pub folder_shares: Vec<crate::rdp::folder_share::status::ShareStatus>,
 }
 
 /// Lightweight handle to a running session actor.
@@ -135,7 +136,7 @@ pub(crate) type ConnectFn = Arc<
 /// Where a connection attempt finds the host's folder grant. Read on every
 /// attempt, so a reconnect sees a revoked or changed grant.
 pub(crate) type ShareSource =
-    Arc<dyn Fn(&str) -> Option<crate::store::share_grants::ShareGrant> + Send + Sync>;
+    Arc<dyn Fn(&str) -> Vec<crate::store::share_grants::ShareGrant> + Send + Sync>;
 
 /// Production connector with the host's shared folder, if one is granted.
 pub(crate) fn real_connect_with_shares(shares: ShareSource) -> ConnectFn {
@@ -176,7 +177,7 @@ mod share_source_tests {
         let seen = Arc::clone(&reads);
         let connect = real_connect_with_shares(Arc::new(move |id| {
             seen.lock().unwrap().push(id.to_owned());
-            None
+            Vec::new()
         }));
         for _ in 0..2 {
             let outcome = connect(config.clone(), None, 800, 600).await;
@@ -333,8 +334,8 @@ struct SessionActor {
     pending_resize: Option<(u32, u32)>,
     connect: ConnectFn,
     shared_frame: Option<Arc<SharedFrame>>,
-    /// The current connection's shared folder status (task 5.3).
-    share_status: crate::rdp::folder_share::status::ShareStatusCell,
+    /// The current connection's shared folders' status (task 5.3).
+    share_status: Vec<crate::rdp::folder_share::status::ShareStatusCell>,
 }
 
 impl SessionActor {
@@ -450,7 +451,11 @@ impl SessionActor {
             reconnect_attempts: self.reconnect_attempts,
             max_reconnect_attempts: MAX_RECONNECT_ATTEMPTS,
             last_error: self.last_error.clone(),
-            folder_share: self.share_status.get(),
+            folder_shares: self
+                .share_status
+                .iter()
+                .map(|status| status.get())
+                .collect(),
         }
     }
 
@@ -2601,7 +2606,7 @@ impl SessionManager {
             reconnect_attempts: 0,
             max_reconnect_attempts: MAX_RECONNECT_ATTEMPTS,
             last_error: None,
-            folder_share: Default::default(),
+            folder_shares: Vec::new(),
         };
         let (info_tx, info_rx) = watch::channel(initial_info);
         let (clipboard_tx, clipboard_rx) = watch::channel(None);

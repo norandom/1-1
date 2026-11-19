@@ -54,10 +54,10 @@ fn share_source(
     grants: Arc<crate::store::share_grants::ShareGrantStore>,
 ) -> crate::rdp::session::ShareSource {
     Arc::new(move |connection_id| match grants.get(connection_id) {
-        Ok(grant) => grant,
+        Ok(folders) => folders,
         Err(error) => {
-            log::warn!("Folder share grant unavailable: {error}");
-            None
+            log::warn!("Folder share grants unavailable: {error}");
+            Vec::new()
         }
     })
 }

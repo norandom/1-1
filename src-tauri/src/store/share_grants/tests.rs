@@ -76,7 +76,7 @@ impl Fixture {
 #[test]
 fn missing_file_means_no_grants_and_revoking_writes_nothing() {
     let fixture = Fixture::new();
-    assert_eq!(fixture.grants.get("anything"), Ok(None));
+    assert_eq!(fixture.grants.get("anything"), Ok(vec![]));
     fixture.grants.revoke(["anything"]).unwrap();
     assert!(!fixture.root.join("share-grants.json").exists());
 }
@@ -86,7 +86,7 @@ fn grants_survive_restart_and_replace_per_profile() {
     let fixture = Fixture::new();
     let first = grant("host-a", "a.example:3389");
     fixture.grants.put(first.clone()).unwrap();
-    assert_eq!(fixture.reopen_grants().get("host-a"), Ok(Some(first)));
+    assert_eq!(fixture.reopen_grants().get("host-a"), Ok(vec![first]));
     let renewed = ShareGrant {
         mode: ShareMode::ReadWrite,
         revision: Uuid::new_v4(),
@@ -94,7 +94,7 @@ fn grants_survive_restart_and_replace_per_profile() {
     };
     fixture.grants.put(renewed.clone()).unwrap();
     let reopened = fixture.reopen_grants();
-    assert_eq!(reopened.get("host-a"), Ok(Some(renewed)));
+    assert_eq!(reopened.get("host-a"), Ok(vec![renewed]));
     assert_eq!(reopened.all().unwrap().len(), 1, "one grant per saved host");
 }
 
@@ -104,17 +104,20 @@ fn malformed_or_inconsistent_data_leaves_sharing_off_and_is_never_extended() {
     let path = fixture.root.join("share-grants.json");
     let valid = serde_json::to_value(GrantFile {
         version: FILE_VERSION,
-        grants: BTreeMap::from([("host-a".to_string(), grant("host-a", "a.example:3389"))]),
+        grants: BTreeMap::from([(
+            "host-a".to_string(),
+            vec![grant("host-a", "a.example:3389")],
+        )]),
     })
     .unwrap();
     let mut wrong_version = valid.clone();
-    wrong_version["version"] = 2.into();
+    wrong_version["version"] = 3.into();
     let mut wrong_key = valid.clone();
-    wrong_key["grants"]["host-a"]["profileId"] = "host-b".into();
+    wrong_key["grants"]["host-a"][0]["profileId"] = "host-b".into();
     let mut bad_name = valid.clone();
-    bad_name["grants"]["host-a"]["shareName"] = "not portable".into();
+    bad_name["grants"]["host-a"][0]["shareName"] = "not portable".into();
     let mut unknown_field = valid.clone();
-    unknown_field["grants"]["host-a"]["extra"] = true.into();
+    unknown_field["grants"]["host-a"][0]["extra"] = true.into();
     for data in [
         b"{ not json".to_vec(),
         serde_json::to_vec(&wrong_version).unwrap(),
@@ -143,7 +146,7 @@ fn revoking_a_malformed_file_sets_it_aside_so_no_grant_can_return() {
     let path = fixture.root.join("share-grants.json");
     fs::write(&path, b"{ not json").unwrap();
     fixture.grants.revoke(["host-a"]).unwrap();
-    assert_eq!(fixture.grants.get("host-a"), Ok(None));
+    assert_eq!(fixture.grants.get("host-a"), Ok(vec![]));
     assert_eq!(
         fs::read(fixture.root.join("share-grants.json.corrupt")).unwrap(),
         b"{ not json"
@@ -163,14 +166,14 @@ fn failed_saves_keep_the_previous_committed_state() {
     assert_eq!(fixture.grants.put(changed), Err(GrantError::SaveFailed));
     assert_eq!(
         fixture.reopen_grants().get("host-a"),
-        Ok(Some(first.clone()))
+        Ok(vec![first.clone()])
     );
     fixture.grants.fail_next_write();
     assert_eq!(
         fixture.grants.revoke(["host-a"]),
         Err(GrantError::SaveFailed)
     );
-    assert_eq!(fixture.reopen_grants().get("host-a"), Ok(Some(first)));
+    assert_eq!(fixture.reopen_grants().get("host-a"), Ok(vec![first]));
     assert_eq!(
         fixture.grants.put(grant("", "a.example:3389")),
         Err(GrantError::Invalid)
@@ -199,7 +202,7 @@ fn name_edits_moves_and_same_endpoint_spellings_keep_the_grant() {
         .library
         .move_node(NodeId::connection(&host.id), NodeId::library(&other.id))
         .unwrap();
-    assert!(fixture.grants.get(&host.id).unwrap().is_some());
+    assert!(fixture.grants.get(&host.id).unwrap().len() == 1);
 }
 
 #[test]
@@ -215,7 +218,7 @@ fn retargeting_withdraws_the_grant_and_changing_back_does_not_reactivate_it() {
         fixture.library.update_connection(&host.id, away).unwrap();
         assert_eq!(
             fixture.grants.get(&host.id),
-            Ok(None),
+            Ok(vec![]),
             "{change} change withdraws the grant"
         );
         fixture
@@ -224,7 +227,7 @@ fn retargeting_withdraws_the_grant_and_changing_back_does_not_reactivate_it() {
             .unwrap();
         assert_eq!(
             fixture.reopen_grants().get(&host.id),
-            Ok(None),
+            Ok(vec![]),
             "changing the {change} back needs fresh consent"
         );
     }
@@ -247,7 +250,7 @@ fn a_failed_revoke_rejects_the_retarget_and_a_failed_commit_leaves_the_grant_wit
     let unchanged = fixture.library.get_connection(&host.id).unwrap().unwrap();
     assert_eq!(unchanged.host, "guarded.example", "the edit did not commit");
     assert!(
-        fixture.grants.get(&host.id).unwrap().is_some(),
+        fixture.grants.get(&host.id).unwrap().len() == 1,
         "the grant still matches the unchanged host"
     );
 
@@ -257,7 +260,7 @@ fn a_failed_revoke_rejects_the_retarget_and_a_failed_commit_leaves_the_grant_wit
     assert_eq!(unchanged.host, "guarded.example");
     assert_eq!(
         fixture.grants.get(&host.id),
-        Ok(None),
+        Ok(vec![]),
         "consent was withdrawn before the failed commit"
     );
 }
@@ -268,14 +271,14 @@ fn duplicates_and_imports_never_inherit_a_grant() {
     let host = fixture.shared_host("Original", "original.example");
     let copy = fixture.library.duplicate_connection(&host.id).unwrap();
     assert_ne!(copy.id, host.id);
-    assert_eq!(fixture.grants.get(&copy.id), Ok(None));
+    assert_eq!(fixture.grants.get(&copy.id), Ok(vec![]));
     let imported = fixture
         .library
         .create_connection(input_like(&host))
         .unwrap();
-    assert_eq!(fixture.grants.get(&imported.id), Ok(None));
+    assert_eq!(fixture.grants.get(&imported.id), Ok(vec![]));
     assert!(
-        fixture.grants.get(&host.id).unwrap().is_some(),
+        fixture.grants.get(&host.id).unwrap().len() == 1,
         "the original keeps its grant"
     );
 }
@@ -286,7 +289,7 @@ fn single_and_cascaded_deletions_withdraw_exactly_the_removed_hosts() {
     let deleted = fixture.shared_host("Deleted", "deleted.example");
     let kept = fixture.shared_host("Kept", "kept.example");
     assert!(fixture.library.delete_connection(&deleted.id).unwrap());
-    assert_eq!(fixture.grants.get(&deleted.id), Ok(None));
+    assert_eq!(fixture.grants.get(&deleted.id), Ok(vec![]));
 
     let cascade = fixture.library.create_library("Cascade").unwrap();
     let folder = fixture
@@ -302,8 +305,8 @@ fn single_and_cascaded_deletions_withdraw_exactly_the_removed_hosts() {
         .unwrap();
     let removed = fixture.library.delete_library(&cascade.id).unwrap();
     assert_eq!(removed.deleted_connection_ids, vec![nested.id.clone()]);
-    assert_eq!(fixture.grants.get(&nested.id), Ok(None));
-    assert!(fixture.grants.get(&kept.id).unwrap().is_some());
+    assert_eq!(fixture.grants.get(&nested.id), Ok(vec![]));
+    assert!(fixture.grants.get(&kept.id).unwrap().len() == 1);
 }
 
 #[test]
@@ -313,7 +316,7 @@ fn a_failed_revoke_keeps_the_host_when_deletion_cannot_withdraw_consent() {
     fixture.grants.fail_next_write();
     assert!(fixture.library.delete_connection(&host.id).is_err());
     assert!(fixture.library.get_connection(&host.id).unwrap().is_some());
-    assert!(fixture.grants.get(&host.id).unwrap().is_some());
+    assert!(fixture.grants.get(&host.id).unwrap().len() == 1);
 }
 
 #[test]
@@ -333,7 +336,7 @@ fn folder_deletion_keeps_grants_of_hosts_moved_to_the_library_root() {
         .unwrap();
     let removed = fixture.library.delete_folder(&folder.id).unwrap();
     assert_eq!(removed.moved_connection_ids, vec![host.id.clone()]);
-    assert!(fixture.grants.get(&host.id).unwrap().is_some());
+    assert!(fixture.grants.get(&host.id).unwrap().len() == 1);
 }
 
 #[test]
@@ -355,9 +358,9 @@ fn a_reload_withdraws_grants_of_hosts_that_vanished_or_now_point_elsewhere() {
     }
     fs::write(&path, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
     fixture.library.reload().unwrap();
-    assert!(fixture.grants.get(&kept.id).unwrap().is_some());
-    assert_eq!(fixture.grants.get(&moved.id), Ok(None));
-    assert_eq!(fixture.grants.get(&vanished.id), Ok(None));
+    assert!(fixture.grants.get(&kept.id).unwrap().len() == 1);
+    assert_eq!(fixture.grants.get(&moved.id), Ok(vec![]));
+    assert_eq!(fixture.grants.get(&vanished.id), Ok(vec![]));
 }
 
 #[test]
@@ -408,7 +411,82 @@ fn attaching_at_startup_withdraws_grants_for_hosts_changed_while_closed() {
         .put(grant("deleted-host", "gone.example:3389"))
         .unwrap();
     library.attach_share_grants(Arc::clone(&grants));
-    assert!(grants.get(&kept.id).unwrap().is_some());
-    assert_eq!(grants.get(&moved.id), Ok(None));
-    assert_eq!(grants.get("deleted-host"), Ok(None));
+    assert!(grants.get(&kept.id).unwrap().len() == 1);
+    assert_eq!(grants.get(&moved.id), Ok(vec![]));
+    assert_eq!(grants.get("deleted-host"), Ok(vec![]));
+}
+
+fn folder(profile: &str, name: &str, file: u8) -> ShareGrant {
+    ShareGrant {
+        share_name: name.into(),
+        directory_file_id: [file; 16],
+        ..grant(profile, "a.example:3389")
+    }
+}
+
+#[test]
+fn a_host_shares_several_folders_and_stops_sharing_one() {
+    let fixture = Fixture::new();
+    let (work, docs) = (folder("host-a", "Work", 1), folder("host-a", "Docs", 2));
+    fixture.grants.put(work.clone()).unwrap();
+    fixture.grants.put(docs.clone()).unwrap();
+    assert_eq!(
+        fixture.reopen_grants().get("host-a"),
+        Ok(vec![work.clone(), docs.clone()])
+    );
+
+    // The same name, in any case, replaces that folder only.
+    let renewed = ShareGrant {
+        mode: ShareMode::ReadWrite,
+        ..folder("host-a", "work", 1)
+    };
+    fixture.grants.put(renewed.clone()).unwrap();
+    assert_eq!(
+        fixture.grants.get("host-a"),
+        Ok(vec![renewed, docs.clone()])
+    );
+
+    fixture.grants.remove("host-a", "WORK").unwrap();
+    assert_eq!(fixture.reopen_grants().get("host-a"), Ok(vec![docs]));
+    fixture.grants.remove("host-a", "WORK").unwrap();
+    fixture.grants.remove("host-a", "Docs").unwrap();
+    assert_eq!(fixture.grants.get("host-a"), Ok(vec![]));
+    assert_eq!(fixture.grants.all(), Ok(vec![]));
+}
+
+#[test]
+fn a_folder_is_shared_once_per_host_and_hosts_have_a_limit() {
+    let fixture = Fixture::new();
+    fixture.grants.put(folder("host-a", "Work", 1)).unwrap();
+    assert_eq!(
+        fixture.grants.put(folder("host-a", "Again", 1)),
+        Err(GrantError::AlreadyShared("Work".into()))
+    );
+    // Another host may share the same folder.
+    fixture.grants.put(folder("host-b", "Work", 1)).unwrap();
+    for i in 2..=MAX_FOLDERS as u8 {
+        fixture
+            .grants
+            .put(folder("host-a", &format!("F{i}"), i))
+            .unwrap();
+    }
+    assert_eq!(fixture.grants.get("host-a").unwrap().len(), MAX_FOLDERS);
+    assert_eq!(
+        fixture.grants.put(folder("host-a", "More", 99)),
+        Err(GrantError::TooMany)
+    );
+}
+
+#[test]
+fn a_version_1_file_is_read_and_rewritten_as_version_2() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("share-grants.json");
+    let old = grant("host-a", "a.example:3389");
+    let v1 = serde_json::json!({ "version": 1, "grants": { "host-a": old } });
+    fs::write(&path, serde_json::to_vec(&v1).unwrap()).unwrap();
+    assert_eq!(fixture.grants.get("host-a"), Ok(vec![old.clone()]));
+    fixture.grants.put(folder("host-a", "Docs", 2)).unwrap();
+    let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written["version"], 2);
+    assert_eq!(fixture.reopen_grants().get("host-a").unwrap().len(), 2);
 }

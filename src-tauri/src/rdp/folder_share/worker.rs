@@ -131,8 +131,8 @@ pub(crate) struct WorkerBackend {
     /// Signalled with `wake`, for an async session loop to await.
     ready: Arc<tokio::sync::Notify>,
     drive_security: bool,
-    /// What this channel achieved, for the session details.
-    status: ShareStatusCell,
+    /// What each drive achieved, by device ID, for the session details.
+    statuses: HashMap<u32, ShareStatusCell>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -180,15 +180,19 @@ impl WorkerBackend {
             wake,
             ready,
             drive_security,
-            status: ShareStatusCell::default(),
+            statuses: HashMap::new(),
             worker: Some(worker),
         }
     }
 
-    /// Record protocol evidence in `status` (rdp-folder-sharing task 5.3).
-    pub(crate) fn with_status(mut self, status: ShareStatusCell) -> Self {
-        self.status = status;
+    /// Record each drive's protocol evidence in its status (task 5.3).
+    pub(crate) fn with_statuses(mut self, statuses: HashMap<u32, ShareStatusCell>) -> Self {
+        self.statuses = statuses;
         self
+    }
+
+    fn status(&self, device_id: u32) -> Option<&ShareStatusCell> {
+        self.statuses.get(&device_id)
     }
 
     /// Notified whenever completions are waiting for `poll_deferred_messages`.
@@ -262,7 +266,9 @@ impl WorkerBackend {
 
 impl Drop for WorkerBackend {
     fn drop(&mut self) {
-        self.status.ended();
+        for status in self.statuses.values() {
+            status.ended();
+        }
         // Requests still unanswered are interrupted; the remote program that
         // issued them owns cleanup and retries.
         let interrupted: Vec<String> = self
@@ -425,7 +431,9 @@ impl RdpdrBackend for WorkerBackend {
         &mut self,
         pdu: ServerDeviceAnnounceResponse,
     ) -> PduResult<()> {
-        self.status.answered(u32::from(pdu.result_code));
+        if let Some(status) = self.status(pdu.device_id) {
+            status.answered(u32::from(pdu.result_code));
+        }
         self.call(Box::new(move |backend| {
             backend
                 .handle_server_device_announce_response(pdu)
@@ -450,8 +458,9 @@ impl RdpdrBackend for WorkerBackend {
             _ => 0,
         };
         if let Err(status) = self.admit(&io, bytes) {
-            self.status
-                .replied(Some(u32::from(io.major_function)), u32::from(status));
+            if let Some(cell) = self.status(io.device_id) {
+                cell.replied(Some(u32::from(io.major_function)), u32::from(status));
+            }
             return Ok(vec![error_reply(&req, status)?]);
         }
         let refusal = error_reply(&req, NtStatus::INSUFFICIENT_RESOURCES)?;
@@ -468,8 +477,9 @@ impl RdpdrBackend for WorkerBackend {
     ) -> PduResult<Vec<SvcMessage>> {
         let header = req.request.header.clone();
         if let Err(status) = self.admit(&header, 0) {
-            self.status
-                .replied(Some(u32::from(header.major_function)), u32::from(status));
+            if let Some(cell) = self.status(header.device_id) {
+                cell.replied(Some(u32::from(header.major_function)), u32::from(status));
+            }
             return Ok(vec![control_error(&header, status)]);
         }
         if self.queue(Job::Control(req), &header) {
@@ -489,10 +499,11 @@ impl RdpdrBackend for WorkerBackend {
                 break;
             };
             let ticket = done.key.and_then(|key| self.ledger().settle(key));
-            if let Some(status) = done.status {
+            if let (Some(status), Some((device_id, _))) = (done.status, done.key)
+                && let Some(cell) = self.status(device_id)
+            {
                 // The reply goes on the wire right after this poll.
-                self.status
-                    .replied(ticket.map(|t| t.major_function), status);
+                cell.replied(ticket.map(|t| t.major_function), status);
             }
             messages.push(done.message);
         }
@@ -505,7 +516,9 @@ impl RdpdrBackend for WorkerBackend {
 
     fn handle_user_logged_on(&mut self, _rdpdr: &mut Rdpdr) -> PduResult<Vec<SvcMessage>> {
         // The channel announces its drives right after this call.
-        self.status.offered();
+        for status in self.statuses.values() {
+            status.offered();
+        }
         Ok(Vec::new())
     }
 

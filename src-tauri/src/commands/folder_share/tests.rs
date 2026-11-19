@@ -118,12 +118,12 @@ mod windows_build {
         let view = fixture
             .confirm(selection, "work", ShareMode::ReadWrite)
             .unwrap();
-        let shown = view.grant.unwrap();
+        let [shown] = <[_; 1]>::try_from(view.folders).unwrap();
         assert_eq!(shown.endpoint, "build.example:3389");
         assert_eq!(shown.fingerprint, fingerprint(&[5; 32]));
         assert_eq!(shown.share_name, "work");
         assert_eq!(shown.mode, ShareMode::ReadWrite);
-        let saved = fixture.grants.get(&host.id).unwrap().unwrap();
+        let [saved] = <[_; 1]>::try_from(fixture.grants.get(&host.id).unwrap()).unwrap();
         let identity = native::inspect(&folder).unwrap();
         assert_eq!(
             (saved.volume_id, saved.directory_file_id),
@@ -147,7 +147,7 @@ mod windows_build {
                 .confirm(selection, "too long name", ShareMode::ReadOnly)
                 .is_err()
         );
-        assert!(fixture.grants.get(&host.id).unwrap().is_none());
+        assert!(fixture.grants.get(&host.id).unwrap().is_empty());
         assert!(
             fixture
                 .confirm(selection, "ok", ShareMode::ReadOnly)
@@ -179,7 +179,7 @@ mod windows_build {
             fixture.confirm(cancelled, "work", ShareMode::ReadOnly),
             Err(STALE.into())
         );
-        assert!(fixture.grants.get(&host.id).unwrap().is_none());
+        assert!(fixture.grants.get(&host.id).unwrap().is_empty());
     }
 
     #[test]
@@ -196,7 +196,7 @@ mod windows_build {
             .confirm(selection, "work", ShareMode::ReadOnly)
             .unwrap_err();
         assert!(error.contains("changed"), "{error}");
-        assert!(fixture.grants.get(&host.id).unwrap().is_none());
+        assert!(fixture.grants.get(&host.id).unwrap().is_empty());
     }
 
     #[test]
@@ -211,7 +211,7 @@ mod windows_build {
             .confirm(selection, "work", ShareMode::ReadOnly)
             .unwrap_err();
         assert!(error.contains("folder changed"), "{error}");
-        assert!(fixture.grants.get(&host.id).unwrap().is_none());
+        assert!(fixture.grants.get(&host.id).unwrap().is_empty());
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod windows_build {
             .unwrap();
         for _ in 0..2 {
             fixture.grants.revoke([host.id.as_str()]).unwrap();
-            assert_eq!(view(&fixture.grants, &host.id).grant, None);
+            assert_eq!(view(&fixture.grants, &host.id).folders, vec![]);
         }
         assert!(view(&fixture.grants, &host.id).supported);
     }
@@ -299,7 +299,7 @@ mod windows_build {
             .confirm(selection, "work", ShareMode::ReadOnly)
             .unwrap_err();
         assert!(error.contains("Could not save"), "{error}");
-        assert_eq!(view(&fixture.grants, &host.id).grant, None);
+        assert_eq!(view(&fixture.grants, &host.id).folders, vec![]);
         assert_eq!(
             fixture.confirm(selection, "work", ShareMode::ReadOnly),
             Err(STALE.into())

@@ -71,12 +71,15 @@ async fn connect(
     cert: &'static [u8],
     key: &'static [u8],
     grant: ShareGrant,
-) -> Result<Rdpdr, NotOffered> {
+) -> Result<Rdpdr, ShareState> {
     let destination = endpoint(host.0, host.1);
     let tls = fixture(&destination, cert, key, &version::TLS13)
         .await
         .unwrap();
-    drive_channel(&tls, &destination, grant, ShareStatusCell::default()).await
+    match drive_channel(&tls, &destination, vec![grant]).await {
+        (Some(rdpdr), _) => Ok(rdpdr),
+        (None, statuses) => Err(statuses[0].get().state),
+    }
 }
 
 fn movable(root: &std::path::Path) -> bool {
@@ -99,9 +102,20 @@ fn eventually(mut check: impl FnMut() -> bool) -> bool {
     false
 }
 
-/// Open `path` for `access` on the attached drive and return the reply status.
+/// Open `path` for `access` on the first attached drive and return the reply status.
 fn open(
     rdpdr: &mut Rdpdr,
+    path: &str,
+    access: DesiredAccess,
+    disposition: CreateDisposition,
+) -> u32 {
+    open_on(rdpdr, FIRST_SHARE_DEVICE_ID, path, access, disposition)
+}
+
+/// As `open`, on a given drive device.
+fn open_on(
+    rdpdr: &mut Rdpdr,
+    device_id: u32,
     path: &str,
     access: DesiredAccess,
     disposition: CreateDisposition,
@@ -109,7 +123,7 @@ fn open(
     let worker = rdpdr.downcast_backend_mut::<WorkerBackend>().unwrap();
     let request = DeviceCreateRequest {
         device_io_request: DeviceIoRequest {
-            device_id: SHARE_DEVICE_ID,
+            device_id,
             file_id: 0,
             completion_id: 1,
             major_function: MajorFunction::Create,
@@ -149,7 +163,7 @@ async fn the_reviewed_server_gets_the_folder_and_holds_it_in_place_until_the_cha
     // The channel's own start activates the drive; then files can be created.
     let worker = rdpdr.downcast_backend_mut::<WorkerBackend>().unwrap();
     worker.reset().unwrap();
-    worker.restore_drive(SHARE_DEVICE_ID).unwrap();
+    worker.restore_drive(FIRST_SHARE_DEVICE_ID).unwrap();
     let created = open(
         &mut rdpdr,
         r"\new.txt",
@@ -173,10 +187,8 @@ async fn the_session_status_follows_the_drive_from_setup_to_its_end() {
     let tls = fixture(&destination, SELF_SIGNED, OTHER_KEY, &version::TLS13)
         .await
         .unwrap();
-    let status = ShareStatusCell::default();
-    let mut rdpdr = drive_channel(&tls, &destination, s.grant.clone(), status.clone())
-        .await
-        .unwrap();
+    let (rdpdr, statuses) = drive_channel(&tls, &destination, vec![s.grant.clone()]).await;
+    let (mut rdpdr, status) = (rdpdr.unwrap(), statuses[0].clone());
     let current = status.get();
     assert_eq!(current.state, ShareState::Negotiating);
     assert_eq!(
@@ -186,7 +198,7 @@ async fn the_session_status_follows_the_drive_from_setup_to_its_end() {
 
     let worker = rdpdr.downcast_backend_mut::<WorkerBackend>().unwrap();
     worker.reset().unwrap();
-    worker.restore_drive(SHARE_DEVICE_ID).unwrap();
+    worker.restore_drive(FIRST_SHARE_DEVICE_ID).unwrap();
     let mut raw = ironrdp_rdpdr::Rdpdr::new(
         Box::new(
             ironrdp_rdpdr_native::WindowsRdpdrBackendFactory::new(
@@ -201,7 +213,7 @@ async fn the_session_status_follows_the_drive_from_setup_to_its_end() {
     worker
         .handle_server_device_announce_response(
             ironrdp_rdpdr::pdu::efs::ServerDeviceAnnounceResponse {
-                device_id: SHARE_DEVICE_ID,
+                device_id: FIRST_SHARE_DEVICE_ID,
                 result_code: ironrdp_rdpdr::pdu::efs::NtStatus::SUCCESS,
             },
         )
@@ -248,7 +260,7 @@ async fn a_read_only_grant_attaches_a_read_only_drive() {
         .unwrap();
     let worker = rdpdr.downcast_backend_mut::<WorkerBackend>().unwrap();
     worker.reset().unwrap();
-    worker.restore_drive(SHARE_DEVICE_ID).unwrap();
+    worker.restore_drive(FIRST_SHARE_DEVICE_ID).unwrap();
     let status = open(
         &mut rdpdr,
         r"\data.txt",
@@ -269,9 +281,9 @@ async fn another_address_or_server_key_gets_no_folder() {
         s.grant.clone(),
     )
     .await;
-    assert_eq!(moved.unwrap_err(), NotOffered::AddressChanged);
+    assert_eq!(moved.unwrap_err(), NotOffered::AddressChanged.state());
     let rotated = connect(ADDRESS, SERVER, SERVER_KEY, s.grant.clone()).await;
-    assert_eq!(rotated.unwrap_err(), NotOffered::IdentityChanged);
+    assert_eq!(rotated.unwrap_err(), NotOffered::IdentityChanged.state());
     assert!(movable(&s.root), "nothing was bound");
 }
 
@@ -283,13 +295,13 @@ async fn a_replaced_or_missing_folder_gets_no_folder() {
     let replaced = connect(ADDRESS, SELF_SIGNED, OTHER_KEY, s.grant.clone()).await;
     assert!(matches!(
         replaced.unwrap_err(),
-        NotOffered::FolderUnavailable(_)
+        ShareState::FolderUnavailable { .. }
     ));
     fs::remove_dir(&s.root).unwrap();
     let missing = connect(ADDRESS, SELF_SIGNED, OTHER_KEY, s.grant.clone()).await;
     assert!(matches!(
         missing.unwrap_err(),
-        NotOffered::FolderUnavailable(_)
+        ShareState::FolderUnavailable { .. }
     ));
 }
 
@@ -307,4 +319,62 @@ async fn two_sessions_can_share_the_same_folder_independently() {
     assert!(!movable(&s.root), "the other session still holds it");
     drop(second);
     assert!(eventually(|| movable(&s.root)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn several_folders_become_separate_drives_and_a_missing_one_is_left_out() {
+    let s = setup(ShareMode::ReadWrite).await;
+    let second = s.root.with_file_name("second");
+    fs::create_dir(&second).unwrap();
+    let (volume_id, directory_file_id) = identity_of(&second);
+    let docs = ShareGrant {
+        root_path: second.clone(),
+        volume_id,
+        directory_file_id,
+        share_name: "Docs".into(),
+        ..s.grant.clone()
+    };
+    let gone = ShareGrant {
+        root_path: s.root.with_file_name("gone"),
+        share_name: "Gone".into(),
+        ..s.grant.clone()
+    };
+    let destination = endpoint(ADDRESS.0, ADDRESS.1);
+    let tls = fixture(&destination, SELF_SIGNED, OTHER_KEY, &version::TLS13)
+        .await
+        .unwrap();
+    let (rdpdr, statuses) =
+        drive_channel(&tls, &destination, vec![s.grant.clone(), docs, gone]).await;
+    let states: Vec<_> = statuses.iter().map(|status| status.get()).collect();
+    assert_eq!(states[0].state, ShareState::Negotiating);
+    assert_eq!(states[1].state, ShareState::Negotiating);
+    assert!(matches!(
+        states[2].state,
+        ShareState::FolderUnavailable { .. }
+    ));
+    assert_eq!(states[1].name.as_deref(), Some("Docs"));
+    assert!(
+        !movable(&s.root) && !movable(&second),
+        "both folders are bound"
+    );
+
+    // The second folder is the next device ID, and its files land in it.
+    let mut rdpdr = rdpdr.unwrap();
+    let worker = rdpdr.downcast_backend_mut::<WorkerBackend>().unwrap();
+    worker.reset().unwrap();
+    worker.restore_drive(FIRST_SHARE_DEVICE_ID).unwrap();
+    worker.restore_drive(FIRST_SHARE_DEVICE_ID + 1).unwrap();
+    let created = open_on(
+        &mut rdpdr,
+        FIRST_SHARE_DEVICE_ID + 1,
+        r"\notes.txt",
+        DesiredAccess::GENERIC_WRITE,
+        CreateDisposition::FILE_CREATE,
+    );
+    assert_eq!(created, 0);
+    assert!(second.join("notes.txt").is_file());
+    assert!(!s.root.join("notes.txt").exists());
+
+    drop(rdpdr);
+    assert!(eventually(|| movable(&s.root) && movable(&second)));
 }
