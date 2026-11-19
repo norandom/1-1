@@ -76,7 +76,7 @@ async fn connect(
     let tls = fixture(&destination, cert, key, &version::TLS13)
         .await
         .unwrap();
-    drive_channel(&tls, &destination, grant).await
+    drive_channel(&tls, &destination, grant, ShareStatusCell::default()).await
 }
 
 fn movable(root: &std::path::Path) -> bool {
@@ -164,6 +164,79 @@ async fn the_reviewed_server_gets_the_folder_and_holds_it_in_place_until_the_cha
         eventually(|| movable(&s.root)),
         "released after the channel ends"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_session_status_follows_the_drive_from_setup_to_its_end() {
+    let s = setup(ShareMode::ReadOnly).await;
+    let destination = endpoint(ADDRESS.0, ADDRESS.1);
+    let tls = fixture(&destination, SELF_SIGNED, OTHER_KEY, &version::TLS13)
+        .await
+        .unwrap();
+    let status = ShareStatusCell::default();
+    let mut rdpdr = drive_channel(&tls, &destination, s.grant.clone(), status.clone())
+        .await
+        .unwrap();
+    let current = status.get();
+    assert_eq!(current.state, ShareState::Negotiating);
+    assert_eq!(
+        (current.name.as_deref(), current.read_only),
+        (Some("Work"), Some(true))
+    );
+
+    let worker = rdpdr.downcast_backend_mut::<WorkerBackend>().unwrap();
+    worker.reset().unwrap();
+    worker.restore_drive(SHARE_DEVICE_ID).unwrap();
+    let mut raw = ironrdp_rdpdr::Rdpdr::new(
+        Box::new(
+            ironrdp_rdpdr_native::WindowsRdpdrBackendFactory::new(
+                ironrdp_rdpdr_native::RedirectedDrive::new(9, "Other", &s.root, true).unwrap(),
+            )
+            .build(),
+        ),
+        "x".into(),
+    );
+    worker.handle_user_logged_on(&mut raw).unwrap();
+    assert_eq!(status.get().state, ShareState::Offered);
+    worker
+        .handle_server_device_announce_response(
+            ironrdp_rdpdr::pdu::efs::ServerDeviceAnnounceResponse {
+                device_id: SHARE_DEVICE_ID,
+                result_code: ironrdp_rdpdr::pdu::efs::NtStatus::SUCCESS,
+            },
+        )
+        .unwrap();
+    assert_eq!(status.get().state, ShareState::Accepted);
+
+    // A refused write is a failure, not access.
+    fs::write(s.root.join("data.txt"), b"keep").unwrap();
+    let refused = open(
+        &mut rdpdr,
+        r"\data.txt",
+        DesiredAccess::GENERIC_WRITE,
+        CreateDisposition::FILE_OPEN,
+    );
+    assert_eq!(refused, MEDIA_WRITE_PROTECTED);
+    let current = status.get();
+    assert_eq!(current.state, ShareState::Accepted);
+    assert_eq!(
+        current.last_failure.unwrap().description,
+        "The share is read-only"
+    );
+    // A successful read is.
+    assert_eq!(
+        open(
+            &mut rdpdr,
+            r"\data.txt",
+            DesiredAccess::GENERIC_READ,
+            CreateDisposition::FILE_OPEN
+        ),
+        0
+    );
+    assert_eq!(status.get().state, ShareState::AccessObserved);
+
+    drop(rdpdr);
+    assert_eq!(status.get().state, ShareState::Ended);
 }
 
 #[tokio::test(flavor = "multi_thread")]

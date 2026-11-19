@@ -6,6 +6,7 @@
 //! must still be the one chosen. Otherwise the connection goes ahead without
 //! the channel or a device name, so the desktop never depends on the share.
 
+use super::status::{ShareState, ShareStatusCell};
 use super::worker::{Limits, WorkerBackend};
 use super::{BoundRoot, ShareBackend};
 use crate::rdp::peer_identity::{self, ConfirmedPin, Endpoint, ObservedPeer, SignedTls};
@@ -34,6 +35,18 @@ pub(crate) enum NotOffered {
     DriveFailed(String),
 }
 
+impl NotOffered {
+    /// How the session details show this outcome.
+    pub(crate) fn state(&self) -> ShareState {
+        let reason = self.to_string();
+        match self {
+            Self::AddressChanged | Self::IdentityChanged => ShareState::Unverified { reason },
+            Self::FolderUnavailable(_) => ShareState::FolderUnavailable { reason },
+            Self::DriveFailed(_) => ShareState::Unknown { reason },
+        }
+    }
+}
+
 impl std::fmt::Display for NotOffered {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -54,6 +67,7 @@ pub(crate) async fn drive_channel<S>(
     tls: &SignedTls<S>,
     endpoint: &Endpoint,
     grant: ShareGrant,
+    status: ShareStatusCell,
 ) -> Result<Rdpdr, NotOffered> {
     if peer_identity::endpoint_key(endpoint) != grant.endpoint {
         return Err(NotOffered::AddressChanged);
@@ -66,10 +80,13 @@ pub(crate) async fn drive_channel<S>(
         .await
         .map_err(|_| NotOffered::IdentityChanged)?;
     let name = grant.share_name.clone();
+    let read_only = grant.mode == ShareMode::ReadOnly;
     // Binding opens every folder on the path; keep that off the async runtime.
     let worker = tokio::task::spawn_blocking(move || start(grant))
         .await
         .map_err(|error| NotOffered::DriveFailed(error.to_string()))??;
+    status.negotiating(&name, read_only);
+    let worker = worker.with_status(status);
     Ok(Rdpdr::new(Box::new(worker), COMPUTER_NAME.into())
         .with_drives(Some(vec![(SHARE_DEVICE_ID, name)])))
 }

@@ -133,7 +133,21 @@ export interface SessionInfo {
   reconnectAttempts: number;
   maxReconnectAttempts: number;
   lastError?: string | null;
+  /** What this connection's shared folder achieved, from protocol evidence. */
+  folderShare?: FolderShareStatus;
 }
+
+/** Mirrors `rdp::folder_share::status::ShareStatus`. */
+export type FolderShareStatus = (
+  | { state: 'off' }
+  | { state: 'unsupported' | 'unverified' | 'folderUnavailable' | 'unknown'; reason: string }
+  | { state: 'negotiating' | 'offered' | 'accepted' | 'accessObserved' | 'ended' }
+  | { state: 'refused'; status: string }
+) & {
+  name?: string | null;
+  readOnly?: boolean | null;
+  lastFailure?: { operation: string; status: string; description: string } | null;
+};
 
 export interface NetworkMetrics {
   rxBytes: number;

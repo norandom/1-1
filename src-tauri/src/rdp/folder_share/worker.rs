@@ -15,6 +15,7 @@
 //! the backend ends the channel's generation: the worker stops, its handles
 //! close, and replies still in flight go nowhere.
 
+use super::status::ShareStatusCell;
 use ironrdp_pdu::PduResult;
 use ironrdp_rdpdr::Rdpdr;
 use ironrdp_rdpdr::backend::RdpdrBackend;
@@ -92,12 +93,14 @@ struct Ledger {
 }
 
 impl Ledger {
-    fn settle(&mut self, key: Key) {
-        if let Some(ticket) = self.outstanding.remove(&key) {
+    fn settle(&mut self, key: Key) -> Option<Ticket> {
+        let ticket = self.outstanding.remove(&key);
+        if let Some(ticket) = ticket {
             self.stats.queued_bytes -= ticket.bytes;
             self.stats.completed += 1;
         }
         self.stats.outstanding = self.outstanding.len();
+        ticket
     }
 }
 
@@ -109,8 +112,10 @@ enum Job {
     Call(Call, mpsc::SyncSender<PduResult<Vec<SvcMessage>>>),
 }
 
+/// A reply with the IDs and status read from its header on the worker thread.
 struct Done {
     key: Option<Key>,
+    status: Option<u32>,
     message: SvcMessage,
 }
 
@@ -126,6 +131,8 @@ pub(crate) struct WorkerBackend {
     /// Signalled with `wake`, for an async session loop to await.
     ready: Arc<tokio::sync::Notify>,
     drive_security: bool,
+    /// What this channel achieved, for the session details.
+    status: ShareStatusCell,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -173,8 +180,15 @@ impl WorkerBackend {
             wake,
             ready,
             drive_security,
+            status: ShareStatusCell::default(),
             worker: Some(worker),
         }
+    }
+
+    /// Record protocol evidence in `status` (rdp-folder-sharing task 5.3).
+    pub(crate) fn with_status(mut self, status: ShareStatusCell) -> Self {
+        self.status = status;
+        self
     }
 
     /// Notified whenever completions are waiting for `poll_deferred_messages`.
@@ -248,6 +262,7 @@ impl WorkerBackend {
 
 impl Drop for WorkerBackend {
     fn drop(&mut self) {
+        self.status.ended();
         // Requests still unanswered are interrupted; the remote program that
         // issued them owns cleanup and retries.
         let interrupted: Vec<String> = self
@@ -290,11 +305,16 @@ fn run(
     outbox: mpsc::Sender<Done>,
     wake: Wake,
 ) {
-    let deliver = |key: Option<Key>, messages: Vec<SvcMessage>| -> bool {
-        let one = messages.len() == 1;
+    // Reading each reply's header here keeps that work off the session loop.
+    let deliver = |messages: Vec<SvcMessage>| -> bool {
         for message in messages {
-            let key = if one { key } else { None };
-            if outbox.send(Done { key, message }).is_err() {
+            let header = header_of(&message);
+            let done = Done {
+                key: header.map(|(device, completion, _)| (device, completion)),
+                status: header.map(|(_, _, status)| status),
+                message,
+            };
+            if outbox.send(done).is_err() {
                 return false;
             }
         }
@@ -310,8 +330,6 @@ fn run(
         if let Some(job) = job {
             let alive = match job {
                 Job::Io(request) => {
-                    let io = io_request(&request).clone();
-                    let key = Some((io.device_id, io.completion_id));
                     // Built before the request moves: the reply if the backend fails.
                     let fallback = error_reply(&request, NtStatus::UNSUCCESSFUL);
                     let messages = backend.handle_drive_io_request(request).or_else(|error| {
@@ -319,11 +337,10 @@ fn run(
                         fallback.map(|message| vec![message])
                     });
                     delivered = true;
-                    deliver(key, messages.unwrap_or_default())
+                    deliver(messages.unwrap_or_default())
                 }
                 Job::Control(request) => {
                     let header = request.request.header.clone();
-                    let key = Some((header.device_id, header.completion_id));
                     let messages =
                         backend
                             .handle_drive_device_control(request)
@@ -332,7 +349,7 @@ fn run(
                                 vec![control_error(&header, NtStatus::UNSUCCESSFUL)]
                             });
                     delivered = true;
-                    deliver(key, messages)
+                    deliver(messages)
                 }
                 Job::Call(call, reply) => {
                     let _ = reply.send(call(backend.as_mut()));
@@ -346,7 +363,7 @@ fn run(
         match backend.poll_deferred_messages() {
             Ok(messages) if !messages.is_empty() => {
                 delivered = true;
-                if !deliver(None, messages) {
+                if !deliver(messages) {
                     break;
                 }
             }
@@ -362,12 +379,12 @@ fn run(
     drop(keep_alive);
 }
 
-/// The device and completion IDs of an encoded reply.
-fn key_of(message: &SvcMessage) -> Option<Key> {
+/// The device ID, completion ID and NTSTATUS of an encoded reply.
+fn header_of(message: &SvcMessage) -> Option<(u32, u32, u32)> {
     let bytes = message.encode_unframed_pdu().ok()?;
     let word = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
-    // RDPDR header (component and packet ID), then DeviceId and CompletionId.
-    Some((word(4)?, word(8)?))
+    // RDPDR header (component and packet ID), then DeviceId, CompletionId, IoStatus.
+    Some((word(4)?, word(8)?, word(12)?))
 }
 
 impl RdpdrBackend for WorkerBackend {
@@ -407,6 +424,7 @@ impl RdpdrBackend for WorkerBackend {
         &mut self,
         pdu: ServerDeviceAnnounceResponse,
     ) -> PduResult<()> {
+        self.status.answered(u32::from(pdu.result_code));
         self.call(Box::new(move |backend| {
             backend
                 .handle_server_device_announce_response(pdu)
@@ -431,6 +449,8 @@ impl RdpdrBackend for WorkerBackend {
             _ => 0,
         };
         if let Err(status) = self.admit(&io, bytes) {
+            self.status
+                .replied(Some(u32::from(io.major_function)), u32::from(status));
             return Ok(vec![error_reply(&req, status)?]);
         }
         let refusal = error_reply(&req, NtStatus::INSUFFICIENT_RESOURCES)?;
@@ -447,6 +467,8 @@ impl RdpdrBackend for WorkerBackend {
     ) -> PduResult<Vec<SvcMessage>> {
         let header = req.request.header.clone();
         if let Err(status) = self.admit(&header, 0) {
+            self.status
+                .replied(Some(u32::from(header.major_function)), u32::from(status));
             return Ok(vec![control_error(&header, status)]);
         }
         if self.queue(Job::Control(req), &header) {
@@ -465,8 +487,11 @@ impl RdpdrBackend for WorkerBackend {
             let Ok(done) = self.replies.try_recv() else {
                 break;
             };
-            if let Some(key) = done.key.or_else(|| key_of(&done.message)) {
-                self.ledger().settle(key);
+            let ticket = done.key.and_then(|key| self.ledger().settle(key));
+            if let Some(status) = done.status {
+                // The reply goes on the wire right after this poll.
+                self.status
+                    .replied(ticket.map(|t| t.major_function), status);
             }
             messages.push(done.message);
         }
@@ -478,6 +503,8 @@ impl RdpdrBackend for WorkerBackend {
     }
 
     fn handle_user_logged_on(&mut self, _rdpdr: &mut Rdpdr) -> PduResult<Vec<SvcMessage>> {
+        // The channel announces its drives right after this call.
+        self.status.offered();
         Ok(Vec::new())
     }
 

@@ -95,6 +95,9 @@ pub struct SessionInfo {
     pub reconnect_attempts: u32,
     pub max_reconnect_attempts: u32,
     pub last_error: Option<String>,
+    /// What this connection's shared folder achieved, from protocol evidence.
+    #[serde(default)]
+    pub folder_share: crate::rdp::folder_share::status::ShareStatus,
 }
 
 /// Lightweight handle to a running session actor.
@@ -330,6 +333,8 @@ struct SessionActor {
     pending_resize: Option<(u32, u32)>,
     connect: ConnectFn,
     shared_frame: Option<Arc<SharedFrame>>,
+    /// The current connection's shared folder status (task 5.3).
+    share_status: crate::rdp::folder_share::status::ShareStatusCell,
 }
 
 impl SessionActor {
@@ -383,6 +388,7 @@ impl SessionActor {
             pending_resize: None,
             connect,
             shared_frame,
+            share_status: Default::default(),
         }
     }
 
@@ -444,6 +450,7 @@ impl SessionActor {
             reconnect_attempts: self.reconnect_attempts,
             max_reconnect_attempts: MAX_RECONNECT_ATTEMPTS,
             last_error: self.last_error.clone(),
+            folder_share: self.share_status.get(),
         }
     }
 
@@ -892,7 +899,9 @@ impl SessionActor {
                 framed,
                 codec_policy,
                 network_counters,
+                share,
             } => {
+                self.share_status = share;
                 self.network_counters = Some(network_counters);
                 Some((
                     *connection_result,
@@ -1927,7 +1936,9 @@ impl SessionActor {
                     framed,
                     codec_policy,
                     network_counters,
+                    share,
                 } => {
+                    self.share_status = share;
                     self.network_counters = Some(network_counters);
                     Some((
                         *connection_result,
@@ -2590,6 +2601,7 @@ impl SessionManager {
             reconnect_attempts: 0,
             max_reconnect_attempts: MAX_RECONNECT_ATTEMPTS,
             last_error: None,
+            folder_share: Default::default(),
         };
         let (info_tx, info_rx) = watch::channel(initial_info);
         let (clipboard_tx, clipboard_rx) = watch::channel(None);

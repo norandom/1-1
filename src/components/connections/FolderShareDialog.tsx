@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FolderShareDraft, FolderShareState, ShareMode } from '../../types';
 import { cancelFolderShare, confirmFolderShare, getFolderShare, revokeFolderShare, selectShareFolder } from '../../lib/tauri';
-import { SHARE_PREVIEW_NOTE, SHARE_TIMING_NOTE, folderShareSummary, isPortableShareName, shareModeLabel } from '../../lib/folder-share';
+import { SHARE_SESSION_NOTE, SHARE_TIMING_NOTE, folderShareSummary, isPortableShareName, shareModeLabel } from '../../lib/folder-share';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -131,7 +131,7 @@ export function FolderShareDialog({ id, name, onClose }: { id: string; name: str
                 <dt className="text-muted-foreground">Server key</dt><dd className="font-mono break-all">{state.grant.fingerprint}</dd>
               </dl>
             )}
-            {state?.supported && <p className="text-xs text-muted-foreground">{SHARE_PREVIEW_NOTE}</p>}
+            {state?.supported && <p className="text-xs text-muted-foreground">{SHARE_SESSION_NOTE}</p>}
           </div>
         )}
         <DialogFooter>

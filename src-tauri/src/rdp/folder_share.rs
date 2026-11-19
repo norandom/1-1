@@ -13,6 +13,7 @@
 
 #[cfg(windows)]
 pub(crate) mod attach;
+pub(crate) mod status;
 // Sessions start a worker only where folders can be shared (Windows); its
 // tests run everywhere.
 #[cfg(any(windows, test))]

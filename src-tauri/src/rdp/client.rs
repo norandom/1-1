@@ -93,6 +93,8 @@ pub enum ConnectionOutcome {
         /// handler attached during this connection reports into it and the
         /// session loop samples the upstream decode-failure counter.
         codec_policy: std::sync::Arc<crate::rdp::codec_policy::CodecErrorPolicy>,
+        /// What this connection's shared folder achieved (task 5.3).
+        share: crate::rdp::folder_share::status::ShareStatusCell,
     },
     /// Task 7.4 characterization seam: a real session over an in-memory
     /// framed transport. Identical actor semantics to [`ConnectionOutcome::RealSession`],
@@ -402,20 +404,34 @@ pub(crate) async fn attempt_rdp_connection_with_share(
     // An ordinary desktop permits self-signed hosts. Consumers of authenticated
     // identity call SignedTls::verify before releasing credentials or a share.
     // The drive channel is decided here, before the channel list is sent.
+    let share_status = crate::rdp::folder_share::status::ShareStatusCell::default();
     #[cfg(windows)]
     if let Some(grant) = share {
         let name = grant.share_name.clone();
-        match crate::rdp::folder_share::attach::drive_channel(&tls, &target.endpoint, grant).await {
+        match crate::rdp::folder_share::attach::drive_channel(
+            &tls,
+            &target.endpoint,
+            grant,
+            share_status.clone(),
+        )
+        .await
+        {
             Ok(rdpdr) => {
                 connector.attach_static_channel(rdpdr);
                 log::info!("Offering the shared folder {name:?} on this connection");
             }
-            Err(reason) => log::info!("Not offering the shared folder {name:?}: {reason}"),
+            Err(reason) => {
+                log::info!("Not offering the shared folder {name:?}: {reason}");
+                share_status.set(reason.state());
+            }
         }
     }
     #[cfg(not(windows))]
     if share.is_some() {
         log::info!("Folder sharing is available only in the Windows build");
+        share_status.set(crate::rdp::folder_share::status::ShareState::Unsupported {
+            reason: "Folder sharing is available only in the Windows build.".into(),
+        });
     }
     let (tls_stream, server_public_key) = tls.into_parts();
     let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
@@ -466,6 +482,7 @@ pub(crate) async fn attempt_rdp_connection_with_share(
         framed: Box::new(tls_framed),
         network_counters,
         codec_policy,
+        share: share_status,
     }
 }
 
