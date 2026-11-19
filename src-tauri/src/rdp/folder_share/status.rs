@@ -87,72 +87,93 @@ impl ShareStatusCell {
         self.lock().state = state;
     }
 
+    /// Apply a change and log it when the state moved, so the app log shows
+    /// how far the drive got.
+    #[cfg(any(windows, test))]
+    fn change(&self, apply: impl FnOnce(&mut ShareStatus)) {
+        let mut status = self.lock();
+        let before = status.state.clone();
+        apply(&mut status);
+        if status.state != before {
+            log::info!(
+                "Folder share {:?}: {:?} -> {:?}",
+                status.name.as_deref().unwrap_or_default(),
+                before,
+                status.state
+            );
+        }
+    }
+
     /// The drive this connection offers, before it is announced.
     #[cfg(any(windows, test))]
     pub(crate) fn negotiating(&self, name: &str, read_only: bool) {
-        let mut status = self.lock();
-        status.state = ShareState::Negotiating;
-        status.name = Some(name.to_owned());
-        status.read_only = Some(read_only);
+        self.change(|status| {
+            status.state = ShareState::Negotiating;
+            status.name = Some(name.to_owned());
+            status.read_only = Some(read_only);
+        });
     }
 
     /// The device list with the drive went out.
     #[cfg(any(windows, test))]
     pub(crate) fn offered(&self) {
-        let mut status = self.lock();
-        if status.state == ShareState::Negotiating {
-            status.state = ShareState::Offered;
-        }
+        self.change(|status| {
+            if status.state == ShareState::Negotiating {
+                status.state = ShareState::Offered;
+            }
+        });
     }
 
     /// The server's answer to the announcement.
     #[cfg(any(windows, test))]
     pub(crate) fn answered(&self, nt_status: u32) {
-        let mut status = self.lock();
-        if matches!(status.state, ShareState::Negotiating | ShareState::Offered) {
-            status.state = if nt_status == 0 {
-                ShareState::Accepted
-            } else {
-                ShareState::Refused {
-                    status: hex(nt_status),
-                }
-            };
-        }
+        self.change(|status| {
+            if matches!(status.state, ShareState::Negotiating | ShareState::Offered) {
+                status.state = if nt_status == 0 {
+                    ShareState::Accepted
+                } else {
+                    ShareState::Refused {
+                        status: hex(nt_status),
+                    }
+                };
+            }
+        });
     }
 
     /// A reply to a file request is on its way to the server.
     #[cfg(any(windows, test))]
     pub(crate) fn replied(&self, major_function: Option<u32>, nt_status: u32) {
-        let mut status = self.lock();
-        if nt_status == 0 {
-            if matches!(status.state, ShareState::Offered | ShareState::Accepted) {
-                status.state = ShareState::AccessObserved;
+        self.change(|status| {
+            if nt_status == 0 {
+                if matches!(status.state, ShareState::Offered | ShareState::Accepted) {
+                    status.state = ShareState::AccessObserved;
+                }
+            } else if is_failure(nt_status) {
+                status.last_failure = Some(ShareFailure {
+                    operation: operation_name(major_function).into(),
+                    status: hex(nt_status),
+                    description: describe(nt_status).into(),
+                });
             }
-        } else if is_failure(nt_status) {
-            status.last_failure = Some(ShareFailure {
-                operation: operation_name(major_function).into(),
-                status: hex(nt_status),
-                description: describe(nt_status).into(),
-            });
-        }
+        });
     }
 
     /// The channel that carried the drive is gone.
     #[cfg(any(windows, test))]
     pub(crate) fn ended(&self) {
-        let mut status = self.lock();
-        if matches!(
-            status.state,
-            ShareState::Negotiating
-                | ShareState::Offered
-                | ShareState::Accepted
-                | ShareState::AccessObserved
-        ) {
-            status.state = ShareState::Ended;
-        }
+        self.change(|status| {
+            if matches!(
+                status.state,
+                ShareState::Negotiating
+                    | ShareState::Offered
+                    | ShareState::Accepted
+                    | ShareState::AccessObserved
+            ) {
+                status.state = ShareState::Ended;
+            }
+        });
     }
 }
-
 #[cfg(any(windows, test))]
 fn hex(nt_status: u32) -> String {
     format!("0x{nt_status:08X}")

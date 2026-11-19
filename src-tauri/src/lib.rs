@@ -58,6 +58,8 @@ pub fn run() {
                 .level_for("wgpu_hal", log::LevelFilter::Warn)
                 .level_for("naga", log::LevelFilter::Warn)
                 .level_for("tao", log::LevelFilter::Warn)
+                // The drive channel's handshake, while folder sharing is new.
+                .level_for("ironrdp_rdpdr", log::LevelFilter::Debug)
                 // The 40 KB KeepOne default discards the previous run's
                 // lines, including the last ones before a crash.
                 .max_file_size(2_000_000)

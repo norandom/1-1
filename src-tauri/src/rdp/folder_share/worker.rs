@@ -393,6 +393,7 @@ impl RdpdrBackend for WorkerBackend {
     }
 
     fn reset(&mut self) -> PduResult<()> {
+        log::info!("Folder share: the server started the drive channel");
         // The server forgets outstanding requests on a channel reset.
         let reset = self.call(Box::new(|backend| backend.reset().map(|()| Vec::new())));
         let mut ledger = self.ledger();
