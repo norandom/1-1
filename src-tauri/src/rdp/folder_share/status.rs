@@ -88,6 +88,7 @@ impl ShareStatusCell {
     }
 
     /// The drive this connection offers, before it is announced.
+    #[cfg(any(windows, test))]
     pub(crate) fn negotiating(&self, name: &str, read_only: bool) {
         let mut status = self.lock();
         status.state = ShareState::Negotiating;
@@ -96,6 +97,7 @@ impl ShareStatusCell {
     }
 
     /// The device list with the drive went out.
+    #[cfg(any(windows, test))]
     pub(crate) fn offered(&self) {
         let mut status = self.lock();
         if status.state == ShareState::Negotiating {
@@ -104,6 +106,7 @@ impl ShareStatusCell {
     }
 
     /// The server's answer to the announcement.
+    #[cfg(any(windows, test))]
     pub(crate) fn answered(&self, nt_status: u32) {
         let mut status = self.lock();
         if matches!(status.state, ShareState::Negotiating | ShareState::Offered) {
@@ -118,6 +121,7 @@ impl ShareStatusCell {
     }
 
     /// A reply to a file request is on its way to the server.
+    #[cfg(any(windows, test))]
     pub(crate) fn replied(&self, major_function: Option<u32>, nt_status: u32) {
         let mut status = self.lock();
         if nt_status == 0 {
@@ -134,6 +138,7 @@ impl ShareStatusCell {
     }
 
     /// The channel that carried the drive is gone.
+    #[cfg(any(windows, test))]
     pub(crate) fn ended(&self) {
         let mut status = self.lock();
         if matches!(
@@ -148,10 +153,12 @@ impl ShareStatusCell {
     }
 }
 
+#[cfg(any(windows, test))]
 fn hex(nt_status: u32) -> String {
     format!("0x{nt_status:08X}")
 }
 
+#[cfg(any(windows, test))]
 /// Errors worth showing. Programs probe for missing files and read to the end
 /// all the time, and Explorer asks for controls a drive need not support.
 fn is_failure(nt_status: u32) -> bool {
@@ -167,6 +174,7 @@ fn is_failure(nt_status: u32) -> bool {
     nt_status >> 30 == 0b11 && !ROUTINE.contains(&nt_status)
 }
 
+#[cfg(any(windows, test))]
 fn describe(nt_status: u32) -> &'static str {
     match nt_status {
         0xC000_0022 => "Access denied",
@@ -184,6 +192,7 @@ fn describe(nt_status: u32) -> &'static str {
     }
 }
 
+#[cfg(any(windows, test))]
 fn operation_name(major_function: Option<u32>) -> &'static str {
     match major_function {
         Some(0x0) => "Open",
