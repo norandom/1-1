@@ -22,12 +22,11 @@ describe('SHORTCUT_SECTIONS', () => {
     ]);
   });
 
-  it('lists the seven advertised shortcuts with platform-neutral chords', () => {
+  it('lists the six advertised shortcuts with platform-neutral chords', () => {
     expect(descriptions()).toEqual([
       'Quick Connect',
       'New Connection',
       'Settings',
-      'Disconnect menu',
       'Performance HUD',
       'Fullscreen',
       'This help',
@@ -50,7 +49,7 @@ describe('SHORTCUT_SECTIONS', () => {
     }
     // The HUD chord is literal Ctrl on every platform: the handler binds
     // e.ctrlKey only (see matchKeyboardShortcut), so macOS shows Ctrl too.
-    expect(SHORTCUT_SECTIONS[1].shortcuts[1].keys).toEqual(['Ctrl', 'Shift', 'P']);
+    expect(SHORTCUT_SECTIONS[1].shortcuts[0].keys).toEqual(['Ctrl', 'Shift', 'P']);
   });
 
   it('advertises Settings (Mod+,) and Fullscreen (F11) which have no handlers_defect_b3_13', () => {

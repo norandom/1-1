@@ -7,18 +7,6 @@ const modifiers = [
 ] as const;
 const modifierCodes = new Set<string>(modifiers.flatMap(([, left, right]) => [left, right]));
 
-export function subscribeSessionEscape(target: EventTarget, openDisconnect: () => void): () => void {
-  const handleKey = (event: Event) => {
-    const e = event as KeyboardEvent;
-    if (e.key !== 'Escape' || isLocalInputTarget(e.target)) return;
-    if (e.defaultPrevented) return;
-    e.preventDefault();
-    openDisconnect();
-  };
-  target.addEventListener('keydown', handleKey);
-  return () => target.removeEventListener('keydown', handleKey);
-}
-
 /** Local UI includes portalled Radix menus and dialogs, not only form inputs. */
 export function isLocalInputTarget(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;
@@ -66,9 +54,9 @@ export function subscribeCanvasKeyboard(
     const e = event as KeyboardEvent;
     if (modifierCodes.has(e.code)) physicalModifiers.add(e.code);
     if (isLocalInputTarget(e.target)) { releaseKeys(); return; }
-    // Escape belongs to the session prompt or the currently open local menu.
-    // Do not consume it here: the session listener must work in either order.
-    if (e.key === 'Escape' || e.defaultPrevented || matchKeyboardShortcut(e)) {
+    // Escape goes to the remote (vim, terminals). A local menu or dialog that
+    // dismissed itself on Escape has already consumed it (defaultPrevented).
+    if (e.defaultPrevented || matchKeyboardShortcut(e)) {
       releaseKeys();
       return;
     }

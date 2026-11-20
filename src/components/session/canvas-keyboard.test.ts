@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { matchKeyboardShortcut } from '../../lib/shortcuts';
 import { subscribeClipboardInput } from '../../lib/clipboard-input';
-import { subscribeCanvasKeyboard, subscribeSessionEscape } from './canvas-keyboard';
+import { subscribeCanvasKeyboard } from './canvas-keyboard';
 
 class Key extends Event {
   code = '';
@@ -230,35 +230,30 @@ it.each(['menu', 'dialog', 'tablist', 'tree'])('isolates portalled/local %s desc
   cleanup();
 });
 
-it('does not open disconnect for menu-consumed Escape even when its target is BODY', () => {
+it('sends Escape to the remote so vim and terminals receive it', () => {
+  vi.stubGlobal('KeyboardEvent', Key);
+  const target = Object.assign(new EventTarget(), { tagName: 'CANVAS' });
+  const down = vi.fn();
+  const up = vi.fn();
+  const cleanup = subscribeCanvasKeyboard(target, null, down, up);
+  const escape = new Key('keydown', { key: 'Escape', code: 'Escape' });
+  target.dispatchEvent(escape);
+  target.dispatchEvent(new Key('keyup', { key: 'Escape', code: 'Escape' }));
+  expect(escape.defaultPrevented).toBe(true);
+  expect(down.mock.calls.map(([e]) => e.code)).toEqual(['Escape']);
+  expect(up.mock.calls.map(([e]) => e.code)).toEqual(['Escape']);
+  cleanup();
+});
+
+it('leaves an Escape that a local menu consumed to that menu', () => {
+  vi.stubGlobal('KeyboardEvent', Key);
   const target = Object.assign(new EventTarget(), { tagName: 'BODY' });
-  const open = vi.fn();
-  const cleanup = subscribeSessionEscape(target, open);
+  const down = vi.fn();
+  const cleanup = subscribeCanvasKeyboard(target, null, down, vi.fn());
   const escape = new Key('keydown', { key: 'Escape', code: 'Escape' });
   // Radix handles dismissal on document capture, before window listeners.
   escape.preventDefault();
   target.dispatchEvent(escape);
-  expect(open).not.toHaveBeenCalled();
-  cleanup();
-});
-
-it.each([true, false])('unconsumed canvas Escape opens one local prompt, never remote input (session first: %s)', (sessionFirst) => {
-  vi.stubGlobal('KeyboardEvent', Key);
-  const target = Object.assign(new EventTarget(), { tagName: 'CANVAS' });
-  const open = vi.fn();
-  const down = vi.fn();
-  const up = vi.fn();
-  let sessionCleanup = () => {};
-  if (sessionFirst) sessionCleanup = subscribeSessionEscape(target, open);
-  const canvasCleanup = subscribeCanvasKeyboard(target, null, down, up);
-  if (!sessionFirst) sessionCleanup = subscribeSessionEscape(target, open);
-  target.dispatchEvent(new Key('keydown', { key: 'Escape', code: 'Escape' }));
-  target.dispatchEvent(new Key('keyup', { key: 'Escape', code: 'Escape' }));
-  expect(open).toHaveBeenCalledOnce();
   expect(down).not.toHaveBeenCalled();
-  expect(up).not.toHaveBeenCalled();
-  sessionCleanup();
-  canvasCleanup();
-  target.dispatchEvent(new Key('keydown', { key: 'Escape', code: 'Escape' }));
-  expect(open).toHaveBeenCalledOnce();
+  cleanup();
 });

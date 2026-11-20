@@ -14,7 +14,6 @@ import { ctrlAltDelSequence } from '../../lib/input-mapper';
 import { normalizeHostProfile } from '../../lib/host-profile';
 import { onSessionViewReturn } from '../../lib/idle-preview';
 import { desktopScale, remoteViewport } from '../../lib/viewport-size';
-import { subscribeSessionEscape } from './canvas-keyboard';
 import { resolveSessionView, sessionForConnection } from '../../lib/session-route';
 import {
   createConnectController,
@@ -297,12 +296,6 @@ function SessionContent() {
     },
     [sessionId, profile.resizeMode]
   );
-
-  // Escape key to show disconnect confirm
-  useEffect(() => {
-    if (status !== 'connected') return;
-    return subscribeSessionEscape(window, () => setShowDisconnectConfirm(true));
-  }, [status]);
 
   // Resolved through the session (D1): the route id never names the
   // connection directly once a session exists.

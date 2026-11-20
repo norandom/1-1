@@ -42,7 +42,6 @@ export const SHORTCUT_SECTIONS: ShortcutSection[] = [
   {
     title: 'Session',
     shortcuts: [
-      { keys: ['Esc'], description: 'Disconnect menu' },
       { keys: ['Ctrl', 'Shift', 'P'], description: 'Performance HUD' },
       { keys: ['F11'], description: 'Fullscreen' },
     ],
