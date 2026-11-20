@@ -194,6 +194,8 @@ npx tsc --noEmit       # type check
 cargo check
 ```
 
+To find out where a running Linux build spends its CPU time (input lag, busy idle), see [Profiling 1-1 on Linux](docs/profiling-linux.md).
+
 ### Building the Windows installer locally
 
 ```powershell
