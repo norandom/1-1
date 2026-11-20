@@ -39,7 +39,8 @@ async fn start_session_with_frame_sizes(
             let mut result = crate::rdp::baseline::synthetic_connection_result(W, H);
             result.suppress_output_support = true;
             result.enable_server_pointer = true;
-            result.pointer_software_rendering = true;
+            // Production: the pointer is the local cursor (rdp/remote_pointer.rs).
+            result.pointer_software_rendering = false;
             let policy = Arc::new(CodecErrorPolicy::new());
             crate::rdp::egfx::attach_to_stage_channels(
                 &mut result.static_channels,
@@ -109,7 +110,7 @@ async fn next_frame(peer: &mut TokioFramed<DuplexStream>) -> Vec<u8> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn remote_pointer_tracks_local_motion_on_a_quiet_paused_desktop() {
+async fn remote_pointer_is_the_local_cursor_and_motion_costs_no_frame() {
     use super::super::real_session_reactivation::{
         bitmap_wire_frames, demand_active_frame_for, reactivation_script_frames, settle_actor,
     };
@@ -159,28 +160,28 @@ async fn remote_pointer_tracks_local_motion_on_a_quiet_paused_desktop() {
         wire.extend(body);
         wire
     };
-    let cursor_hidden =
-        |info: SessionInfo| serde_json::to_value(info).unwrap()["hideLocalCursor"].clone();
-    assert_eq!(
-        cursor_hidden(manager.get_session_info(&id).await.unwrap()),
-        false
-    );
-    for (kind, data, hidden) in [
-        (UpdateCode::NewPointer, pointer.as_slice(), true),
-        (UpdateCode::DefaultPointer, &[][..], false),
-        (UpdateCode::HiddenPointer, &[][..], true),
-        (UpdateCode::CachedPointer, &[2, 0][..], true),
+    let cursor = |info: SessionInfo| {
+        let json = serde_json::to_value(info).unwrap();
+        (json["hideLocalCursor"].as_bool().unwrap(), json["pointer"]["url"].is_string())
+    };
+    assert_eq!(cursor(manager.get_session_info(&id).await.unwrap()), (false, false));
+    // (hidden, shape shown as the cursor)
+    for (kind, data, expected) in [
+        (UpdateCode::NewPointer, pointer.as_slice(), (false, true)),
+        (UpdateCode::DefaultPointer, &[][..], (false, false)),
+        (UpdateCode::HiddenPointer, &[][..], (true, false)),
+        (UpdateCode::CachedPointer, &[2, 0][..], (false, true)),
     ] {
         peer.write_all(&wire(kind, data)).await.unwrap();
         settle_actor().await;
-        assert_eq!(
-            cursor_hidden(manager.get_session_info(&id).await.unwrap()),
-            hidden
-        );
+        assert_eq!(cursor(manager.get_session_info(&id).await.unwrap()), expected, "{kind:?}");
     }
+    let shape = manager.get_session_info(&id).await.unwrap().pointer.unwrap();
+    assert_eq!((shape.width, shape.height, shape.hotspot_x, shape.hotspot_y), (2, 2, 0, 0));
+    // The shape is not composited into the desktop.
+    let desktop = shared.publish().unwrap();
+    assert_eq!(&desktop.data[..3], &[0; 3]);
     let before_move = frame_sizes.lock().unwrap().len();
-    let cursor_pixel = shared.publish().unwrap().data[..3].to_vec();
-    assert!(cursor_pixel.iter().all(|channel| *channel > 200));
     manager.set_display_paused(&id, true).await.unwrap();
     expect_display(&mut peer, DisplayAction::Suppress).await;
     let desktop_age = manager
@@ -204,31 +205,24 @@ async fn remote_pointer_tracks_local_motion_on_a_quiet_paused_desktop() {
         decode::<FastPathInput>(&sent).unwrap().input_events(),
         [FastPathInputEvent::MouseEvent(_)]
     ));
-    let frame = shared
-        .publish()
-        .expect("local movement must deliver cursor pixels without server redraw");
-    assert_eq!(&frame.data[..3], &[0; 3]);
-    let position = (8 * usize::from(W) + 12) * 4;
-    assert_eq!(&frame.data[position..position + 3], cursor_pixel.as_slice());
-    assert_eq!(frame_sizes.lock().unwrap().len(), before_move + 1);
+    settle_actor().await;
+    assert!(shared.publish().is_none(), "moving the mouse must not deliver a frame");
+    assert_eq!(frame_sizes.lock().unwrap().len(), before_move);
     tokio::time::advance(Duration::from_secs(1)).await;
     settle_actor().await;
     let info = manager.get_session_info(&id).await.unwrap();
     assert!(info.display_paused);
     assert_eq!(info.idle_preview_updated_at, Some(desktop_age));
 
-    // Reactivation at the same size retains the backing desktop. Its first
-    // repaint is elsewhere, so it cannot erase a stale cursor by accident.
+    // Reactivation at the same size retains the backing desktop and returns
+    // to the default arrow until the new share sends a shape.
     let mut reactivation = reactivation_script_frames();
     reactivation[1] = demand_active_frame_for(W, H);
     for pdu in reactivation {
         peer.write_all(&pdu).await.unwrap();
     }
     settle_actor().await;
-    assert_eq!(
-        cursor_hidden(manager.get_session_info(&id).await.unwrap()),
-        false
-    );
+    assert_eq!(cursor(manager.get_session_info(&id).await.unwrap()), (false, false));
     let rect = ironrdp_pdu::geometry::InclusiveRectangle {
         left: 30,
         top: 30,
@@ -244,6 +238,7 @@ async fn remote_pointer_tracks_local_motion_on_a_quiet_paused_desktop() {
         (repaint.width, repaint.height),
         (u32::from(W), u32::from(H))
     );
+    let position = (8 * usize::from(W) + 12) * 4;
     assert_eq!(&repaint.data[position..position + 3], &[0; 3]);
     let retained = (42 * usize::from(W) + 42) * 4;
     assert_ne!(&repaint.data[retained..retained + 3], &[0; 3]);

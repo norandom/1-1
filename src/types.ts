@@ -1,3 +1,4 @@
+import type { PointerImage } from './lib/remote-cursor';
 export interface ServerIdentityReview {
   selection: string;
   endpoint: string;
@@ -122,6 +123,8 @@ export interface SessionInfo {
   displayStalled?: boolean;
   /** The remote desktop supplies the pointer image or requests an invisible pointer. */
   hideLocalCursor?: boolean;
+  /** The remote pointer shape shown as the local cursor; absent: the default arrow. */
+  pointer?: PointerImage | null;
   id: string;
   connectionId: string;
   connectionName: string;

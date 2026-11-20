@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Loader2, WifiOff } from 'lucide-react';
+import { Plug, RefreshCw, WifiOff } from 'lucide-react';
 
 import { parseFramePacket } from '../../lib/frame-protocol';
 import { physicalViewport, sessionPixelRatio, type DisplayScaling } from '../../lib/viewport-size';
@@ -15,6 +15,7 @@ import {
   type CanvasSurface,
 } from '../../lib/canvas-compositor';
 import type { SessionStatus } from '../../types';
+import { remoteCursor, type PointerImage } from '../../lib/remote-cursor';
 import { subscribeCanvasWheel } from './canvas-wheel';
 import { createHeldButtons } from '../../lib/mouse-capture';
 
@@ -31,6 +32,8 @@ interface Props {
   /** How remote pixels map to this display's density. */
   scaling?: DisplayScaling;
   hideLocalCursor?: boolean;
+  /** The remote pointer shape, drawn by the system as the cursor. */
+  pointer?: PointerImage | null;
   inputBlocked?: boolean;
   isDisplayPaused?: () => boolean;
   overlays?: React.ReactNode;
@@ -57,6 +60,7 @@ export function SessionCanvas({
   displayMode = 'fit',
   scaling = 'automatic',
   hideLocalCursor = false,
+  pointer = null,
   inputBlocked = false,
   isDisplayPaused = liveDisplay,
   overlays,
@@ -92,6 +96,25 @@ export function SessionCanvas({
     width: surfaceWidth,
     height: surfaceHeight,
   }));
+
+  // The remote pointer is the system cursor: moving the mouse repaints nothing.
+  const cursorScale = surfaceWidth > 0 ? displaySize.width / surfaceWidth : 1;
+  const [shapeCursor, setShapeCursor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pointer) {
+      setShapeCursor(null);
+      return;
+    }
+    let current = true;
+    remoteCursor(pointer, cursorScale).then(
+      (css) => { if (current) setShapeCursor(css); },
+      () => { if (current) setShapeCursor(null); },
+    );
+    return () => { current = false; };
+    // The url identifies the shape; the info object is replaced on every update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pointer?.url, cursorScale]);
+  const cursor = hideLocalCursor ? 'none' : (pointer && shapeCursor) || 'default';
 
   const ensureSurface = useCallback((width: number, height: number, source: 'session-info' | 'frame') => {
     const surface = prepareCanvasSurface(surfaceRef.current, width, height, source);
@@ -390,12 +413,9 @@ export function SessionCanvas({
   if (status === 'connecting') {
     return (
       <div className="flex flex-col items-center justify-center h-full bg-[var(--color-surface-0)]">
-        <motion.div
-          animate={{ rotate: 360 }}
-          transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-        >
-          <Loader2 size={36} className="text-[var(--color-accent)]" />
-        </motion.div>
+        {/* Static on purpose: on Linux every animation frame repaints the
+            whole GTK window in software (see .kiro/handover.md, CPU). */}
+        <Plug size={36} className="text-[var(--color-accent)]" aria-hidden="true" />
         <p className="text-sm text-[var(--color-text-secondary)] mt-4">
           Establishing connection...
         </p>
@@ -436,7 +456,7 @@ export function SessionCanvas({
             tabIndex={0}
             className="absolute outline-none"
             style={{
-              cursor: hideLocalCursor ? 'none' : 'default',
+              cursor,
               left: displaySize.left,
               top: displaySize.top,
               imageRendering: displayMode === 'native' ? 'pixelated' : 'auto',
@@ -459,16 +479,11 @@ export function SessionCanvas({
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+              className="absolute inset-0 flex items-center justify-center bg-black/80"
             >
               <div className="text-center">
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-                  className="inline-block"
-                >
-                  <Loader2 size={28} className="text-[var(--color-warning)]" />
-                </motion.div>
+                {/* No spinner or blur: either one repaints the whole window every frame. */}
+                <RefreshCw size={28} className="inline-block text-[var(--color-warning)]" aria-hidden="true" />
                 <p className="text-sm text-white mt-3">
                   Reconnecting...{reconnectAttempts > 0 && ` (attempt ${reconnectAttempts}/${maxReconnectAttempts})`}
                 </p>

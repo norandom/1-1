@@ -70,6 +70,9 @@ impl PerformanceMetrics {
 pub struct SessionInfo {
     #[serde(default)]
     pub hide_local_cursor: bool,
+    /// The remote pointer shape shown as the local cursor (none: the default arrow).
+    #[serde(default)]
+    pub pointer: Option<crate::rdp::remote_pointer::PointerImage>,
     #[serde(default)]
     pub idle_preview_state: IdlePreviewState,
     pub idle_preview_updated_at: Option<DateTime<Utc>>,
@@ -347,7 +350,7 @@ impl SessionEventSink {
 /// It receives commands via an mpsc channel and publishes session info via a watch channel.
 /// Frames are streamed to the frontend via a Tauri channel.
 struct SessionActor {
-    hide_local_cursor: bool,
+    pointer: crate::rdp::remote_pointer::RemotePointer,
     idle_preview: IdlePreview,
     idle_preview_updated_at: Option<DateTime<Utc>>,
     clipboard_epoch: String,
@@ -407,7 +410,7 @@ impl SessionActor {
 
         Self {
             id,
-            hide_local_cursor: false,
+            pointer: Default::default(),
             idle_preview: IdlePreview::new(false, false, tokio::time::Instant::now()),
             idle_preview_updated_at: None,
             config,
@@ -470,7 +473,8 @@ impl SessionActor {
         let connected = self.state == SessionState::Connected;
         let unavailable = self.idle_preview.pause_unavailable_reason();
         SessionInfo {
-            hide_local_cursor: connected && self.hide_local_cursor,
+            hide_local_cursor: connected && self.pointer.is_hidden(),
+            pointer: self.pointer.image().filter(|_| connected).cloned(),
             display_paused: connected && self.idle_preview.is_manually_paused(),
             display_pause_available: connected && unavailable.is_none(),
             display_pause_unavailable_reason: unavailable.filter(|_| connected).map(str::to_owned),
@@ -1374,7 +1378,7 @@ impl SessionActor {
                     }
 
                     let mut updated_regions = Vec::new();
-                    let mut hide_local_cursor = self.hide_local_cursor;
+                    let pointer_before = self.pointer.key();
                     let mut deactivate_all = false;
                     for out in outputs {
                         match out {
@@ -1423,10 +1427,10 @@ impl SessionActor {
                                 deactivate_all = true;
                                 break;
                             }
-                            ActiveStageOutput::PointerDefault => hide_local_cursor = false,
-                            // IronRDP emits this for both a hidden pointer and a shape
-                            // that it has composited into the decoded desktop.
-                            ActiveStageOutput::PointerHidden => hide_local_cursor = true,
+                            ActiveStageOutput::PointerDefault => self.pointer.show_default(),
+                            // A cached shape arrives as PointerHidden then PointerBitmap.
+                            ActiveStageOutput::PointerHidden => self.pointer.hide(),
+                            ActiveStageOutput::PointerBitmap(shape) => self.pointer.show(shape),
                             _ => {}
                         }
                     }
@@ -1479,8 +1483,7 @@ impl SessionActor {
                         }
                     }
 
-                    if self.hide_local_cursor != hide_local_cursor {
-                        self.hide_local_cursor = hide_local_cursor;
+                    if self.pointer.key() != pointer_before {
                         self.publish_info();
                     }
                     let surface = (image.width(), image.height());
@@ -1918,13 +1921,6 @@ impl SessionActor {
                     ..
                 } => {
                     let size = (desktop_size.width, desktop_size.height);
-                    if self.hide_local_cursor
-                        && size == (image.width(), image.height())
-                        && let Err(error) = reset_software_pointer(active_stage, image)
-                    {
-                        log::warn!("Session {} could not reset its pointer: {}", self.id, error);
-                        return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
-                    }
                     let rearmed = active_stage.reactivate(
                         factory.io_channel_id(),
                         factory.user_channel_id(),
@@ -1951,7 +1947,7 @@ impl SessionActor {
                             desktop_size.height,
                         );
                     }
-                    self.hide_local_cursor = false;
+                    self.pointer = Default::default();
                     self.width = new_width;
                     self.height = new_height;
 
@@ -1981,7 +1977,7 @@ impl SessionActor {
         let mut attempt = 0u32;
 
         while attempt < MAX_RECONNECT_ATTEMPTS {
-            self.hide_local_cursor = false;
+            self.pointer = Default::default();
             self.reset_idle_preview(false);
             self.network_counters = None;
             self.network = None;
@@ -2302,33 +2298,6 @@ enum ReactivationOutcome {
     Stop(DisconnectReason),
 }
 
-/// Reactivation replaces IronRDP's pointer cache. When retaining the old
-/// desktop pixels, let its current processor restore the background beneath
-/// its pointer before discarding the cache. This update stays local.
-fn reset_software_pointer(
-    stage: &mut ironrdp_session::ActiveStage,
-    image: &mut ironrdp_session::image::DecodedImage,
-) -> ironrdp_session::SessionResult<()> {
-    use ironrdp_core::encode_vec;
-    use ironrdp_pdu::fast_path::{
-        EncryptionFlags, FastPathHeader, FastPathUpdatePdu, Fragmentation, UpdateCode,
-    };
-    use ironrdp_session::{SessionError, SessionErrorExt as _};
-    let update = encode_vec(&FastPathUpdatePdu {
-        fragmentation: Fragmentation::Single,
-        update_code: UpdateCode::DefaultPointer,
-        compression_flags: None,
-        compression_type: None,
-        data: &[],
-    })
-    .map_err(SessionError::encode)?;
-    let mut frame = encode_vec(&FastPathHeader::new(EncryptionFlags::empty(), update.len()))
-        .map_err(SessionError::encode)?;
-    frame.extend(update);
-    stage.process(image, ironrdp_pdu::Action::FastPath, &frame, None)?;
-    Ok(())
-}
-
 /// Where to cut `frame` so that the first part is whole TPKT packets of at
 /// most `max` bytes (at least one packet). Input written between two slices
 /// then never lands inside a packet. Anything that is not TPKT stays whole.
@@ -2438,7 +2407,7 @@ fn share_ready(stage: &mut ironrdp_session::ActiveStage) -> Option<Arc<tokio::sy
         .map(|worker| worker.ready())
 }
 
-/// No folder is shared outside the Windows build.
+/// No folder is shared on platforms without the native drive backend.
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos", test)))]
 fn share_ready(_stage: &mut ironrdp_session::ActiveStage) -> Option<Arc<tokio::sync::Notify>> {
     None
@@ -2767,6 +2736,7 @@ impl SessionManager {
         // Build initial info for the watch channel
         let initial_info = SessionInfo {
             hide_local_cursor: false,
+            pointer: None,
             display_paused: false,
             display_pause_available: false,
             display_pause_unavailable_reason: None,

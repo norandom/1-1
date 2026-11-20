@@ -263,7 +263,8 @@ pub(crate) fn build_connector_config(
         autologon: false,
         enable_audio_playback: false,
         enable_audio_capture: false,
-        pointer_software_rendering: true,
+        // The pointer is the local cursor (rdp/remote_pointer.rs), not part of frames.
+        pointer_software_rendering: false,
         performance_flags,
         hardware_id: None,
         license_cache: None,

@@ -319,6 +319,7 @@ function SessionContent() {
           displayMode={profile.displayMode}
           scaling={profile.scaling}
           hideLocalCursor={sessionResolution?.hideLocalCursor}
+          pointer={sessionResolution?.pointer}
           isDisplayPaused={isDisplayPaused}
           inputBlocked={showDisconnectConfirm}
           lastError={sessionResolution?.lastError}
