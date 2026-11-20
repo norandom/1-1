@@ -1,0 +1,18 @@
+# Spike: hardware H.264 decoding on Linux through GStreamer, behind the
+# upstream `ironrdp_egfx::decode::H264Decoder` trait. Throwaway; not part of
+# any CI tier (every tier pins `--manifest-path src-tauri/Cargo.toml`).
+# See README.md for the questions it answers and how to run it.
+
+[package]
+name = "probe-gst-h264-decode"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[dependencies]
+# Same pin as src-tauri; no openh264 features: decoding comes from GStreamer.
+ironrdp-egfx = { version = "=0.5.0", default-features = false }
+gstreamer = "0.25.4"
+gstreamer-app = "0.25.2"
+gstreamer-video = "0.25.4"
