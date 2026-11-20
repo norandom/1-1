@@ -119,3 +119,31 @@ Task 1 delivers the server identity check shared with session actions. Task 2 pr
   - _Requirements: 3.4, 4.4_
 
 Kiro task-graph review passed independently on 18 November 2026. All 19 acceptance criteria are covered. Task approval is tracked in [spec.json](spec.json).
+
+## Linux and macOS clients (amendment approved 20 November 2026)
+
+- [ ] 7. Share folders from the Linux and macOS builds
+- [x] 7.1 Make the drive channel portable
+  - Move `ironrdp-rdpdr-native` and `ironrdp-rdpsnd` to all targets; attach the drive and silent audio channels on Linux and macOS; compile the worker and attach module everywhere. Remove the "Windows build only" status and messages.
+  - _Requirements: 5.1_
+- [x] 7.2 Bind the chosen directory by descriptor
+  - `inspect` and `UnixBoundRoot::bind` as in the design; `file_base` through `/proc/self/fd` or `/dev/fd`. Tests: link in the chosen path, replaced folder, renamed folder still served, deleted folder fails, identity mismatch leaves the folder out.
+  - _Depends: 7.1_
+  - _Requirements: 5.2, 5.3_
+- [x] 7.3 Enforce the share policy on Unix
+  - Portable `ShareBackend`: read-only rule, hard-link rule through the held descriptor, privilege rule, root protection, separator normalization. Tests: the task 4.2 mutation matrix and the task 4.3 operations against the real `NixRdpdrBackend`, with bytes, names and metadata unchanged after refusals.
+  - _Depends: 7.2_
+  - _Requirements: 5.4, 5.5, 2.1, 2.2, 2.3_
+- [x] 7.4 Route several folders
+  - `DriveRouter` by device ID. Test two folders: neither drive reaches the other's files; both copy correctly.
+  - _Depends: 7.3_
+  - _Requirements: 5.6_
+  - Done 20 November 2026 on Linux: clippy `-D warnings`, `cargo nextest run` (461 passed), `cargo test --doc`, `npm test` (624 passed). The macOS build is not compiled yet. Drives attach statically (`Rdpdr::with_drives`); the upstream Nix backend has no dynamic `add_drive`. On Linux, `O_NOFOLLOW|O_DIRECTORY` on a symbolic link fails with `ENOTDIR`, so `open_folder` checks the name with `fstatat` to report a link.
+- [ ] 7.5 Native picker and macOS privacy handling
+  - `tauri-plugin-dialog` 2.8.4 on Linux and macOS; `EPERM` names the macOS privacy pane. Update UI text and `docs/user-guide/`.
+  - _Depends: 7.2_
+  - _Requirements: 5.1, 5.7_
+- [ ] 7.6 Verify from the Linux client on real hosts
+  - Windows and xrdp: read-only denial, read/write copies with hashes in both directions, several folders, typing while copying. Record in `validation.md`. A macOS check follows when the MacBook is available.
+  - _Depends: 7.4, 7.5_
+  - _Requirements: 5.1, 4.1, 4.2_

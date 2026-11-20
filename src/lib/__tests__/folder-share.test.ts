@@ -9,7 +9,7 @@ describe('folder share helpers', () => {
 
   it('summarizes the committed state without implying a grant that is not saved', () => {
     expect(folderShareSummary(null)).toBe('Checking folder sharing…');
-    expect(folderShareSummary({ supported: false, folders: [], error: null })).toContain('Windows build');
+    expect(folderShareSummary({ supported: false, folders: [], error: null })).toContain('Windows, Linux and macOS builds');
     expect(folderShareSummary({ supported: true, folders: [], error: null })).toBe('No folder is shared with this host.');
     expect(folderShareSummary({ supported: true, folders: [], error: 'The saved folder shares are invalid, so folder sharing is off.' }))
       .toContain('sharing is off');

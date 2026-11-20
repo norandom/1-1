@@ -164,7 +164,7 @@ fn a_component_held_open_for_rename_is_reported_busy() {
 
 mod links {
     use super::super::ShareBackend;
-    use super::super::windows_policy::{link_count, mutates};
+    use super::super::policy::{link_count, mutates};
     use super::real_dir;
     use ironrdp_pdu::PduResult;
     use ironrdp_rdpdr::backend::RdpdrBackend;

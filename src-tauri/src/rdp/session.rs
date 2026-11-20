@@ -2389,7 +2389,7 @@ impl SharePerf {
             return;
         }
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
-        #[cfg(any(windows, test))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
         let worker = stage
             .get_svc_processor::<crate::rdp::folder_share::channel::DriveChannel>()
             .and_then(|channel| {
@@ -2399,7 +2399,7 @@ impl SharePerf {
             })
             .map(|worker| worker.take_perf())
             .unwrap_or_default();
-        #[cfg(any(windows, test))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
         log::info!(
             "Session {session} folder share, last {:.1}s: {} replies, wait avg {:.1} ms max {:.1} ms, disk {:.0} ms max {:.1} ms; loop sent {} batches {} KiB, encode {:.0} ms max {:.1} ms, write {:.0} ms max {:.1} ms; received {} PDUs in {:.0} ms max {:.1} ms",
             since.elapsed().as_secs_f64(),
@@ -2422,14 +2422,14 @@ impl SharePerf {
             ms(self.process),
             ms(self.process_max),
         );
-        #[cfg(not(any(windows, test)))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos", test)))]
         let _ = (session, stage, ms);
         *self = Self::default();
     }
 }
 
 /// The ready signal of this connection's shared folder worker, if any.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 fn share_ready(stage: &mut ironrdp_session::ActiveStage) -> Option<Arc<tokio::sync::Notify>> {
     stage
         .get_svc_processor::<crate::rdp::folder_share::channel::DriveChannel>()?
@@ -2439,7 +2439,7 @@ fn share_ready(stage: &mut ironrdp_session::ActiveStage) -> Option<Arc<tokio::sy
 }
 
 /// No folder is shared outside the Windows build.
-#[cfg(not(any(windows, test)))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos", test)))]
 fn share_ready(_stage: &mut ironrdp_session::ActiveStage) -> Option<Arc<tokio::sync::Notify>> {
     None
 }

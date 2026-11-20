@@ -54,7 +54,12 @@ pub fn run() {
         .manage(commands::credential_check::CredentialChecks::default())
         .manage(commands::folder_share::FolderShareDrafts::default())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(commands::native_clipboard::NativeClipboardState::default())
+        .manage(commands::native_clipboard::NativeClipboardState::default());
+    // The folder picker on Linux and macOS (rdp-folder-sharing task 7.5);
+    // Windows uses the shell's dialog directly.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let app = app.plugin(tauri_plugin_dialog::init());
+    let app = app
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)

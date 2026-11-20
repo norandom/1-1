@@ -46,7 +46,7 @@ pub(crate) struct GrantView {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FolderShareView {
-    /// Only the Windows build can share a folder.
+    /// Whether this build can share a folder (Windows, Linux and macOS).
     supported: bool,
     /// In the order they were added; each is one drive on the remote.
     folders: Vec<GrantView>,
@@ -466,12 +466,70 @@ mod native_paths {
     }
 }
 
-#[cfg(not(windows))]
+/// Linux and macOS (rdp-folder-sharing task 7.5): the dialog plugin's folder
+/// picker, and the device and inode of a folder reached without links.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod native {
+    use crate::rdp::folder_share::unix;
+    use std::{io, path::Path, path::PathBuf};
+    use tauri_plugin_dialog::DialogExt;
+
+    pub(super) const SUPPORTED: bool = true;
+    pub(super) const UNSUPPORTED: &str = "";
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct FolderIdentity {
+        pub(super) volume_id: u64,
+        pub(super) file_id: [u8; 16],
+    }
+
+    pub(super) fn owner_window(window: &tauri::WebviewWindow) -> Option<tauri::WebviewWindow> {
+        Some(window.clone())
+    }
+
+    /// Blocks until the user chooses or cancels; call it off the async runtime.
+    pub(super) fn pick_folder(owner: Option<tauri::WebviewWindow>) -> io::Result<Option<PathBuf>> {
+        let window = owner.ok_or_else(|| io::Error::other("no window to attach the picker to"))?;
+        let picked = window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("Choose a folder to share")
+            .blocking_pick_folder();
+        match picked {
+            None => Ok(None),
+            Some(path) => path.into_path().map(Some).map_err(io::Error::other),
+        }
+    }
+
+    /// A local folder reached without symbolic links, with the device and
+    /// inode the grant binds to.
+    pub(super) fn inspect(path: &Path) -> Result<FolderIdentity, String> {
+        if path.parent().is_none() {
+            return Err("Choose a folder, not the whole file system.".into());
+        }
+        let folder = unix::open_folder(path).map_err(|error| error.to_string())?;
+        if unix::on_network_file_system(&folder)
+            .map_err(|e| format!("Could not read the folder's file system: {e}"))?
+        {
+            return Err(
+                "Choose a folder on a local disk. Network folders cannot be shared.".into(),
+            );
+        }
+        let stat = nix::sys::stat::fstat(&folder)
+            .map_err(|e| format!("Could not read the folder: {e}"))?;
+        let (volume_id, file_id) = unix::identity(&stat);
+        Ok(FolderIdentity { volume_id, file_id })
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod native {
     use std::{io, path::Path, path::PathBuf};
 
     pub(super) const SUPPORTED: bool = false;
-    pub(super) const UNSUPPORTED: &str = "Folder sharing is available in the Windows build.";
+    pub(super) const UNSUPPORTED: &str =
+        "Folder sharing is available in the Windows, Linux and macOS builds.";
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) struct FolderIdentity {

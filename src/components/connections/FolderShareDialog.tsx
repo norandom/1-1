@@ -120,7 +120,7 @@ export function FolderShareDialog({ id, name, onClose }: { id: string; name: str
         ) : (
           <div className="grid gap-2 text-sm">
             {!state && <p role="status">Checking folder sharing…</p>}
-            {state && !state.supported && <p role="status">Folder sharing is available in the Windows build.</p>}
+            {state && !state.supported && <p role="status">Folder sharing is available in the Windows, Linux and macOS builds.</p>}
             {state?.error && <p role="status">{state.error}</p>}
             {state?.supported && !state.error && folders.length === 0 && <p role="status">No folder is shared with this host.</p>}
             {folders.length > 0 && (

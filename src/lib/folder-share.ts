@@ -17,7 +17,7 @@ export const SHARE_SESSION_NOTE = 'The bottom bar shows whether each session off
 /** One line for the saved-host editor and the dialog's committed state. */
 export function folderShareSummary(state: FolderShareState | null): string {
   if (!state) return 'Checking folder sharing…';
-  if (!state.supported) return 'Folder sharing is available in the Windows build.';
+  if (!state.supported) return 'Folder sharing is available in the Windows, Linux and macOS builds.';
   if (state.error) return state.error;
   if (state.folders.length === 0) return 'No folder is shared with this host.';
   return state.folders

@@ -40,3 +40,15 @@ The first release covers a selected folder and normal file copies. Client settin
 2. When exercising the Windows workstation and the FreeRDP-based and IronRDP-based Linux lab targets, the report shall distinguish successful access, explicit policy rejection, unavailable support and inconclusive results. The Linux case shall exercise the mount from a shell using ordinary file tools.
 3. When evaluating the ordinary share under load, the report shall record elapsed time, payload size, transferred session bytes and typing response compared with a session with no file transfer for one large file and a tree of small source files at fixed resolution and network conditions. The report shall identify direction, application, cache conditions and observed number of outstanding requests.
 4. If segmented copy is proposed after that baseline, the evaluation shall compare one range in flight with bounded parallel ranges on the same file and connection, verify identical destination contents and record throughput, transferred bytes and typing latency. Ship decisions shall use those measurements.
+
+### 5. Linux and macOS clients (amendment approved 20 November 2026)
+
+The maintainer's main workstation runs Linux. Requirements 1 to 4 apply unchanged to the Linux and macOS builds. In addition:
+
+1. When the Linux or macOS build connects to a host with a folder grant, 1-1 shall offer the same grant, picker, per-folder status and stop controls as the Windows build, and the remote shall see the same drive names.
+2. While a share is active, 1-1 shall serve requests only from the directory the user chose, identified by device and inode at selection. If the folder or an ancestor is renamed or moved locally, requests shall keep reaching that directory or fail; they shall never reach another directory that takes its name.
+3. If the chosen path contains a symbolic link, or the directory is no longer the one chosen, 1-1 shall leave the folder out with a reason and ask the user to choose it again.
+4. While a read-only share is active, 1-1 shall refuse every request that could create, change, rename or delete an entry or change its metadata, before the request reaches the filesystem, with the same status the Windows build returns.
+5. Files with more than one hard link shall be read-only through the share, as in the Windows build. Directories are not affected by this rule.
+6. When a host shares several folders, each drive shall resolve only beneath its own folder.
+7. If macOS privacy controls deny access to the folder, 1-1 shall leave it out and name the System Settings pane that grants access.

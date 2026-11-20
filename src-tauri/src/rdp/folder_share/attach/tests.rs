@@ -82,13 +82,40 @@ async fn connect(
     }
 }
 
-fn movable(root: &std::path::Path) -> bool {
+/// Whether a session holds `root`. Windows: its guards keep the folder from
+/// being renamed. Linux: a descriptor of this process names it. macOS has no
+/// cheap way to list descriptors by path, so `None` there skips the check.
+#[cfg(windows)]
+fn held(root: &std::path::Path) -> Option<bool> {
     let moved = root.with_file_name("moved");
     let ok = fs::rename(root, &moved).is_ok();
     if ok {
         fs::rename(&moved, root).unwrap();
     }
-    ok
+    Some(!ok)
+}
+
+#[cfg(target_os = "linux")]
+fn held(root: &std::path::Path) -> Option<bool> {
+    Some(
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+            .any(|target| target == root),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn held(_root: &std::path::Path) -> Option<bool> {
+    None
+}
+
+fn is_held(root: &std::path::Path) -> bool {
+    held(root).unwrap_or(true)
+}
+
+fn is_released(root: &std::path::Path) -> bool {
+    held(root).is_none_or(|held| !held)
 }
 
 fn eventually(mut check: impl FnMut() -> bool) -> bool {
@@ -158,7 +185,7 @@ async fn the_reviewed_server_gets_the_folder_and_holds_it_in_place_until_the_cha
     let mut rdpdr = connect(ADDRESS, SELF_SIGNED, OTHER_KEY, s.grant.clone())
         .await
         .unwrap();
-    assert!(!movable(&s.root), "bound while the channel lives");
+    assert!(is_held(&s.root), "bound while the channel lives");
 
     // The channel's own start activates the drive; then files can be created.
     let worker = rdpdr.downcast_backend_mut::<WorkerBackend>().unwrap();
@@ -175,7 +202,7 @@ async fn the_reviewed_server_gets_the_folder_and_holds_it_in_place_until_the_cha
 
     drop(rdpdr);
     assert!(
-        eventually(|| movable(&s.root)),
+        eventually(|| is_released(&s.root)),
         "released after the channel ends"
     );
 }
@@ -200,15 +227,7 @@ async fn the_session_status_follows_the_drive_from_setup_to_its_end() {
     let worker = rdpdr.downcast_backend_mut::<WorkerBackend>().unwrap();
     worker.reset().unwrap();
     worker.restore_drive(FIRST_SHARE_DEVICE_ID).unwrap();
-    let mut raw = ironrdp_rdpdr::Rdpdr::new(
-        Box::new(
-            ironrdp_rdpdr_native::WindowsRdpdrBackendFactory::new(
-                ironrdp_rdpdr_native::RedirectedDrive::new(9, "Other", &s.root, true).unwrap(),
-            )
-            .build(),
-        ),
-        "x".into(),
-    );
+    let mut raw = ironrdp_rdpdr::Rdpdr::new(Box::new(ironrdp_rdpdr::NoopRdpdrBackend), "x".into());
     worker.handle_user_logged_on(&mut raw).unwrap();
     assert_eq!(status.get().state, ShareState::Offered);
     worker
@@ -285,7 +304,7 @@ async fn another_address_or_server_key_gets_no_folder() {
     assert_eq!(moved.unwrap_err(), NotOffered::AddressChanged.state());
     let rotated = connect(ADDRESS, SERVER, SERVER_KEY, s.grant.clone()).await;
     assert_eq!(rotated.unwrap_err(), NotOffered::IdentityChanged.state());
-    assert!(movable(&s.root), "nothing was bound");
+    assert!(is_released(&s.root), "nothing was bound");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -317,9 +336,9 @@ async fn two_sessions_can_share_the_same_folder_independently() {
         .unwrap();
     drop(first);
     std::thread::sleep(Duration::from_millis(100));
-    assert!(!movable(&s.root), "the other session still holds it");
+    assert!(is_held(&s.root), "the other session still holds it");
     drop(second);
-    assert!(eventually(|| movable(&s.root)));
+    assert!(eventually(|| is_released(&s.root)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -356,7 +375,7 @@ async fn several_folders_become_separate_drives_and_a_missing_one_is_left_out() 
     ));
     assert_eq!(states[1].name.as_deref(), Some("Docs"));
     assert!(
-        !movable(&s.root) && !movable(&second),
+        is_held(&s.root) && is_held(&second),
         "both folders are bound"
     );
 
@@ -378,5 +397,5 @@ async fn several_folders_become_separate_drives_and_a_missing_one_is_left_out() 
     assert!(!s.root.join("notes.txt").exists());
 
     drop(rdpdr);
-    assert!(eventually(|| movable(&s.root) && movable(&second)));
+    assert!(eventually(|| is_released(&s.root) && is_released(&second)));
 }

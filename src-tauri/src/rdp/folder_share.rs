@@ -11,17 +11,22 @@
 //! mismatch, link or unavailable folder fails closed and the drive is not
 //! offered.
 
-#[cfg(windows)]
+/// Folder sharing runs where the native drive backend exists.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub(crate) mod attach;
 pub(crate) mod channel;
 pub(crate) mod status;
-// Sessions start a worker only where folders can be shared (Windows); its
-// tests run everywhere.
-#[cfg(any(windows, test))]
+// Sessions start a worker only where folders can be shared; its tests run
+// everywhere.
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 pub(crate) mod worker;
+// Linux and macOS: binding by descriptor, link counts and per-folder routing
+// (rdp-folder-sharing tasks 7.2 to 7.4).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod unix;
 
-#[cfg(windows)]
-pub(crate) use windows_policy::ShareBackend;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub(crate) use policy::{ShareBackend, ShareRoot};
 #[cfg(all(windows, test))]
 pub(crate) use windows_root::BindError;
 #[cfg(windows)]
@@ -40,8 +45,13 @@ pub(crate) use windows_root::{BoundRoot, resolves_to};
 /// multiply linked file is refused too. Remote hard-link creation
 /// (FileLinkInformation) never reaches the backend: ironrdp-rdpdr 0.9 does not
 /// decode that class, so such a request fails before it.
-#[cfg(windows)]
-mod windows_policy {
+///
+/// On Linux and macOS the native backend has no read-only mode, so
+/// [`ShareBackend`] enforces it (task 7.3) with the status the Windows native
+/// backend returns. Unix names cannot carry a stream, and a directory always
+/// counts as one link.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+mod policy {
     use ironrdp_pdu::PduResult;
     use ironrdp_rdpdr::Rdpdr;
     use ironrdp_rdpdr::backend::RdpdrBackend;
@@ -50,23 +60,36 @@ mod windows_policy {
         AnyIoCtlCode, Boolean, ClientDriveQuerySecurityResponse, ClientDriveSetInformationResponse,
         ClientDriveSetSecurityResponse, CreateDisposition, CreateOptions,
         DecodedDeviceControlRequest, DesiredAccess, DeviceControlRequest, DeviceCreateRequest,
-        DeviceCreateResponse, DeviceIoRequest, DeviceIoResponse, FileInformationClass, Information,
-        NtStatus, PrinterIoRequest, SecurityInformation, ServerDeviceAnnounceResponse,
-        ServerDriveIoRequest,
+        DeviceCreateResponse, DeviceIoRequest, DeviceIoResponse, DeviceWriteResponse,
+        FileInformationClass, Information, NtStatus, PrinterIoRequest, SecurityInformation,
+        ServerDeviceAnnounceResponse, ServerDriveIoRequest,
     };
     use ironrdp_rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
     use ironrdp_rdpdr::pdu::esp::PortIoRequest;
     use ironrdp_svc::SvcMessage;
+    use std::collections::{HashMap, HashSet};
+    use std::io;
+    #[cfg(windows)]
     use std::{
-        io, mem,
+        mem,
         os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
         path::{Path, PathBuf},
     };
+    #[cfg(windows)]
     use windows::Win32::Foundation::HANDLE;
+    #[cfg(windows)]
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
         FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
     };
+
+    /// What the hard-link rule resolves a remote path from: the bound folder's
+    /// path on Windows (its guards keep the path in place), the held directory
+    /// descriptor on Linux and macOS.
+    #[cfg(windows)]
+    pub(crate) type ShareRoot = PathBuf;
+    #[cfg(not(windows))]
+    pub(crate) type ShareRoot = std::sync::Arc<std::os::fd::OwnedFd>;
 
     /// The access the native backend's read-only mode also refuses, plus
     /// ACCESS_SYSTEM_SECURITY.
@@ -98,9 +121,18 @@ mod windows_policy {
             .contains(&request.create_disposition)
     }
 
+    /// The link count of the entry a remote path names below `root`.
+    /// `Ok(None)` means nothing exists there yet; any other failure is an
+    /// error, so callers fail closed.
+    #[cfg(not(windows))]
+    pub(super) fn link_count(root: &ShareRoot, remote_path: &str) -> io::Result<Option<u32>> {
+        super::unix::link_count(root, remote_path)
+    }
+
     /// The link count of the entry a remote path names below `root`. A stream
     /// name counts the file it belongs to. `Ok(None)` means nothing exists
     /// there yet; any other failure is an error, so callers fail closed.
+    #[cfg(windows)]
     pub(super) fn link_count(root: &Path, remote_path: &str) -> io::Result<Option<u32>> {
         let relative = remote_path.trim_start_matches(['\\', '/']);
         // NTFS names cannot contain ':', so the first one starts a stream name.
@@ -168,7 +200,7 @@ mod windows_policy {
     }
 
     /// A change is safe only for a new entry or one with a single name.
-    fn may_change(root: &Path, remote_path: &str) -> bool {
+    fn may_change(root: &ShareRoot, remote_path: &str) -> bool {
         matches!(link_count(root, remote_path), Ok(None | Some(0 | 1)))
     }
 
@@ -233,15 +265,19 @@ mod windows_policy {
     }
 
     /// The share's policy in front of the native backend: no privileges, and no
-    /// change to a multiply linked file. Read-only mode is the native backend's
-    /// own (`RedirectedDrive::new(.., read_only)`); everything else is forwarded.
+    /// change to a multiply linked file. On Windows, read-only mode is the
+    /// native backend's own (`RedirectedDrive::new(.., read_only)`); on Linux
+    /// and macOS this policy enforces it. Everything else is forwarded.
     #[derive(Debug)]
     pub(crate) struct ShareBackend {
         inner: Box<dyn RdpdrBackend>,
         /// Each drive device's bound folder.
-        roots: std::collections::HashMap<u32, PathBuf>,
+        roots: HashMap<u32, ShareRoot>,
         /// The folder of every device, for a single-drive backend.
-        root: Option<PathBuf>,
+        root: Option<ShareRoot>,
+        /// Devices this policy keeps read-only. Empty on Windows, where the
+        /// native backend's own read-only mode applies.
+        read_only: HashSet<u32>,
     }
 
     ironrdp_core::impl_as_any!(ShareBackend);
@@ -249,25 +285,95 @@ mod windows_policy {
     impl ShareBackend {
         /// One drive: `root` must be the path of a [`super::BoundRoot`] held
         /// for the backend's lifetime.
-        #[cfg_attr(not(test), allow(dead_code, reason = "sessions use with_roots"))]
-        pub(crate) fn new(inner: Box<dyn RdpdrBackend>, root: PathBuf) -> Self {
+        #[cfg_attr(
+            not(all(test, windows)),
+            allow(dead_code, reason = "sessions use with_roots")
+        )]
+        pub(crate) fn new(inner: Box<dyn RdpdrBackend>, root: ShareRoot) -> Self {
             Self {
                 inner,
                 roots: Default::default(),
                 root: Some(root),
+                read_only: Default::default(),
             }
         }
 
         /// Several drives, each device ID with its bound folder.
         pub(crate) fn with_roots(
             inner: Box<dyn RdpdrBackend>,
-            roots: std::collections::HashMap<u32, PathBuf>,
+            roots: HashMap<u32, ShareRoot>,
         ) -> Self {
             Self {
                 inner,
                 roots,
                 root: None,
+                read_only: Default::default(),
             }
+        }
+
+        /// Refuse every change on these devices before the backend sees it
+        /// (Linux and macOS; the native backend there has no read-only mode).
+        #[cfg_attr(
+            windows,
+            allow(dead_code, reason = "Windows uses the native read-only mode")
+        )]
+        pub(crate) fn with_read_only(mut self, devices: impl IntoIterator<Item = u32>) -> Self {
+            self.read_only.extend(devices);
+            self
+        }
+
+        /// The reply refusing `req` on a read-only device, if it could change
+        /// anything: an open that could write, create, replace or delete, and
+        /// every write, set-information and set-security request. The status is
+        /// the one the Windows native backend's read-only mode returns.
+        fn read_only_refusal(&self, req: &ServerDriveIoRequest) -> PduResult<Option<SvcMessage>> {
+            let protected = |io: &DeviceIoRequest| self.read_only.contains(&io.device_id);
+            let status = NtStatus::MEDIA_WRITE_PROTECTED;
+            let reply = match req {
+                ServerDriveIoRequest::ServerCreateDriveRequest(create)
+                    if protected(&create.device_io_request)
+                        && (mutates(create)
+                            || create.create_disposition != CreateDisposition::FILE_OPEN) =>
+                {
+                    RdpdrPdu::DeviceCreateResponse(DeviceCreateResponse {
+                        device_io_reply: DeviceIoResponse::new(
+                            create.device_io_request.clone(),
+                            status,
+                        ),
+                        file_id: 0,
+                        information: Information::empty(),
+                    })
+                }
+                ServerDriveIoRequest::DeviceWriteRequest(write)
+                    if protected(&write.device_io_request) =>
+                {
+                    RdpdrPdu::DeviceWriteResponse(DeviceWriteResponse {
+                        device_io_reply: DeviceIoResponse::new(
+                            write.device_io_request.clone(),
+                            status,
+                        ),
+                        length: 0,
+                    })
+                }
+                ServerDriveIoRequest::ServerDriveSetInformationRequest(set)
+                    if protected(&set.device_io_request) =>
+                {
+                    RdpdrPdu::ClientDriveSetInformationResponse(
+                        ClientDriveSetInformationResponse::new(set, status)
+                            .map_err(|e| ironrdp_pdu::encode_err!(e))?,
+                    )
+                }
+                ServerDriveIoRequest::ServerDriveSetSecurityRequest(set)
+                    if protected(&set.device_io_request) =>
+                {
+                    RdpdrPdu::ClientDriveSetSecurityResponse(
+                        ClientDriveSetSecurityResponse::new(set, status)
+                            .map_err(|e| ironrdp_pdu::encode_err!(e))?,
+                    )
+                }
+                _ => return Ok(None),
+            };
+            Ok(Some(SvcMessage::from(reply)))
         }
 
         /// A device without a known folder is refused any change.
@@ -327,6 +433,9 @@ mod windows_policy {
         ) -> PduResult<Vec<SvcMessage>> {
             normalize_separators(&mut req);
             if let Some(refusal) = privilege_refusal(&req)? {
+                return Ok(vec![refusal]);
+            }
+            if let Some(refusal) = self.read_only_refusal(&req)? {
                 return Ok(vec![refusal]);
             }
             if let ServerDriveIoRequest::ServerCreateDriveRequest(create) = &req
@@ -636,3 +745,10 @@ mod windows_root {
 
 #[cfg(all(test, windows))]
 pub(crate) use windows_root::identity_of;
+
+/// For tests: the identity a grant would record for `path`.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn identity_of(path: &std::path::Path) -> (u64, [u8; 16]) {
+    let folder = unix::open_folder(path).unwrap();
+    unix::identity(&nix::sys::stat::fstat(&folder).unwrap())
+}

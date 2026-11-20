@@ -416,7 +416,7 @@ pub(crate) async fn attempt_rdp_connection_with_share(
     // An ordinary desktop permits self-signed hosts. Consumers of authenticated
     // identity call SignedTls::verify before releasing credentials or a share.
     // The drive channel is decided here, before the channel list is sent.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     let share_status = if share.is_empty() {
         Vec::new()
     } else {
@@ -433,20 +433,18 @@ pub(crate) async fn attempt_rdp_connection_with_share(
         }
         statuses
     };
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     let share_status: Vec<_> = share
         .iter()
         .map(|_| {
             let status = crate::rdp::folder_share::status::ShareStatusCell::default();
             status.set(crate::rdp::folder_share::status::ShareState::Unsupported {
-                reason: "Folder sharing is available only in the Windows build.".into(),
+                reason: "Folder sharing is available in the Windows, Linux and macOS builds."
+                    .into(),
             });
             status
         })
         .collect();
-    if !share_status.is_empty() && cfg!(not(windows)) {
-        log::info!("Folder sharing is available only in the Windows build");
-    }
     let (tls_stream, server_public_key) = tls.into_parts();
     let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
     let mut tls_framed = TokioFramed::new(tls_stream);
