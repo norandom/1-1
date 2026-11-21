@@ -17,6 +17,7 @@ Right-click the host in the sidebar (or press Shift+F10) and choose **Copy as co
 
 - Each setting is one flag, named after the setting (`--full-window-drag`, `--bottom-bar`, …).
 - The keyboard settings are `--keyboard-layout` (`automatic`, `serverDefault`, or a Windows layout ID as eight hex digits, for example `00000407` for German), `--keyboard-keys` (`automatic` or `physical`) and `--super-as-ctrl` (`true` or `false`).
+- `--security` is `automatic` (TLS, with NLA where offered) or `legacy` for hosts that accept only Standard RDP Security ([what that costs](legacy-security.md)).
 - `--add-to-lib` names the library the host belongs to.
 - `--fingerprint` is included when the host's server key has been confirmed (see [server identity](server-identity.md)). Without a confirmed key it is left out.
 

@@ -191,6 +191,18 @@ pub enum KeyboardKeys {
     Physical,
 }
 
+/// How the connection is secured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SecurityLayer {
+    /// TLS, with NLA where the server offers it.
+    #[default]
+    Automatic,
+    /// Standard RDP Security (RC4) for hosts that refuse TLS and NLA. The
+    /// server is not authenticated; see `rdp/legacy_security.rs`.
+    Legacy,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HostProfile {
@@ -222,6 +234,7 @@ pub struct HostProfile {
     /// Super chords reach the remote as Ctrl chords; Super alone stays the
     /// Windows key.
     pub super_as_ctrl: bool,
+    pub security: SecurityLayer,
     /// The desktop scale factor (100–500%) requested for the running session,
     /// measured by the window at connect and resize. Runtime only, never saved.
     #[serde(skip)]
@@ -252,6 +265,7 @@ impl Default for HostProfile {
             keyboard_layout: KeyboardLayoutChoice::AUTOMATIC,
             keyboard_keys: KeyboardKeys::Automatic,
             super_as_ctrl: true,
+            security: SecurityLayer::Automatic,
             desktop_scale: None,
         }
     }
@@ -551,6 +565,17 @@ mod tests {
             serde_json::from_value::<HostProfile>(serde_json::json!({"keyboardLayout": "qwerty"}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn security_defaults_to_automatic_and_legacy_is_a_saved_choice() {
+        let old: HostProfile = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.security, SecurityLayer::Automatic);
+        assert_eq!(serde_json::to_value(&old).unwrap()["security"], "automatic");
+        let legacy: HostProfile = serde_json::from_str(r#"{"security":"legacy"}"#).unwrap();
+        assert_eq!(legacy.security, SecurityLayer::Legacy);
+        assert_eq!(serde_json::to_value(&legacy).unwrap()["security"], "legacy");
+        assert!(serde_json::from_str::<HostProfile>(r#"{"security":"none"}"#).is_err());
     }
 
     #[test]

@@ -80,6 +80,16 @@ export function HostProfileFields({ profile, fontSmoothing, onChange }: Props) {
       <p id="transfer-pace-help" className="text-xs text-muted-foreground">{TRANSFER_PACE_HELP}</p>
     </fieldset>
     <KeyboardFields profile={profile} onChange={(next) => onChange(next, fontSmoothing)} />
+    <fieldset className="grid gap-2">
+      <legend className="mb-2 text-sm font-medium">Security</legend>
+      <label className="flex items-center justify-between gap-3 text-sm">Security
+        <select className={selectClass} aria-describedby="security-help" value={profile.security} onChange={(e) => onChange({ ...profile, security: e.target.value as HostProfile['security'] }, fontSmoothing)}>
+          <option value="automatic">Automatic (TLS, NLA)</option>
+          <option value="legacy">Legacy (RC4, host not verified)</option>
+        </select>
+      </label>
+      <p id="security-help" className="text-xs text-muted-foreground">{SECURITY_HELP}</p>
+    </fieldset>
     <details className="rounded border p-3">
       <summary className="cursor-pointer text-sm font-medium">Visual effects and connection</summary>
       <div className="mt-3 grid gap-3">
@@ -104,6 +114,8 @@ export function HostProfileFields({ profile, fontSmoothing, onChange }: Props) {
     </details>
   </div>;
 }
+
+const SECURITY_HELP = 'Automatic encrypts with TLS and signs in with NLA where the host offers it. Legacy is for hosts that refuse both: RC4 encryption that is easy to break and no check that the host is the right one, so someone on the network path could read the session and the password. Use it only on a network you trust; shared folders stay off.';
 
 const KEYS_HELP = 'Automatic sends typed characters as characters, so they match your layout whatever the remote uses; shortcuts and named keys go as keys. Physical keys sends every key by its position, as older versions did; use it for servers that ignore character input.';
 

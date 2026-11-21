@@ -99,6 +99,13 @@ raw-window-handle = "0.6"
 # same-directory staging, atomic replace and failure preservation
 # (src/store/atomic_write.rs). Not a second writer crate.
 tempfile = "3"
+# Legacy RDP security (rdp/legacy_security): RC4 session keys from MD5 and
+# SHA-1, and the RSA step of the Security Exchange. The versions ironrdp-pdu
+# already resolves for licensing.
+md-5 = "0.10"
+sha1 = "0.11"
+num-bigint = "0.4"
+getrandom = "0.3"
 
 # Folder sharing (rdp-folder-sharing): the native drive backend exists for
 # Windows, Linux and macOS.

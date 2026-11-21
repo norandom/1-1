@@ -37,6 +37,7 @@ const PROFILE: Record<keyof HostProfile, Kind> = {
   keyboardLayout: 'layout',
   keyboardKeys: ['automatic', 'physical'],
   superAsCtrl: 'bool',
+  security: ['automatic', 'legacy'],
 };
 
 const kebab = (key: string) => key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);

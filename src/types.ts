@@ -77,6 +77,8 @@ export interface HostProfile {
   keyboardKeys: 'automatic' | 'physical';
   /** Super chords reach the remote as Ctrl chords; Super alone stays the Windows key. */
   superAsCtrl: boolean;
+  /** Automatic is TLS with NLA where offered; Legacy is RC4 for hosts that refuse both, without server authentication. */
+  security: 'automatic' | 'legacy';
 }
 
 // Task 6.6 (Req 10.1/10.19): `libraryId`/`folderId`/`mock` mirror the v2

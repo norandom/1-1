@@ -24,6 +24,7 @@ pub mod frame_spy;
 pub mod frame_transport;
 pub mod idle_preview;
 pub mod input;
+pub mod legacy_security;
 pub mod network_metrics;
 pub(crate) mod peer_identity;
 pub mod remote_pointer;

@@ -90,6 +90,11 @@ impl std::error::Error for RdpError {}
 /// The framed TLS stream type used after TLS upgrade.
 pub type TlsFramed = TokioFramed<ironrdp_tls::TlsStream<MeasuredStream<TcpStream>>>;
 
+/// The framed stream of a legacy-security session: RC4 over plain TCP
+/// (`rdp/legacy_security.rs`).
+pub type LegacyFramed =
+    TokioFramed<crate::rdp::legacy_security::LegacyStream<MeasuredStream<TcpStream>>>;
+
 /// Outcome of the RDP connection attempt.
 pub enum ConnectionOutcome {
     /// Real IronRDP connection established.
@@ -102,6 +107,16 @@ pub enum ConnectionOutcome {
         /// session loop samples the upstream decode-failure counter.
         codec_policy: std::sync::Arc<crate::rdp::codec_policy::CodecErrorPolicy>,
         /// What each of this connection's shared folders achieved (task 5.3).
+        share: Vec<crate::rdp::folder_share::status::ShareStatusCell>,
+    },
+    /// A session under Standard RDP Security, for a host whose Security
+    /// setting is Legacy. The server is not authenticated, so no folder is
+    /// shared with it.
+    RealSessionLegacy {
+        connection_result: Box<ConnectionResult>,
+        framed: Box<LegacyFramed>,
+        network_counters: std::sync::Arc<NetworkCounters>,
+        codec_policy: std::sync::Arc<crate::rdp::codec_policy::CodecErrorPolicy>,
         share: Vec<crate::rdp::folder_share::status::ShareStatusCell>,
     },
     /// Task 7.4 characterization seam: a real session over an in-memory
@@ -162,6 +177,8 @@ pub(crate) fn build_connector_config(
     };
 
     let profile = &config.host_profile;
+    // Legacy hosts refuse a request that names TLS or NLA at all.
+    let legacy = profile.security == crate::store::connections::SecurityLayer::Legacy;
     let desktop_scale = profile
         .desktop_scale
         .map(ironrdp_displaycontrol::pdu::MonitorLayoutEntry::adjust_desktop_scale_factor);
@@ -226,9 +243,9 @@ pub(crate) fn build_connector_config(
             password: password.to_string(),
         },
         domain,
-        enable_tls: true,
-        enable_credssp: true,
-        enable_standard_rdp_security: false,
+        enable_tls: !legacy,
+        enable_credssp: !legacy,
+        enable_standard_rdp_security: legacy,
         keyboard_type: KeyboardType::IBM_ENHANCED,
         keyboard_subtype: 0,
         // The session resolves Automatic before it connects (keyboard::report);
@@ -273,7 +290,10 @@ pub(crate) fn build_connector_config(
         platform: MajorPlatformType::UNSPECIFIED,
         enable_server_pointer: true,
         request_data: None,
-        autologon: false,
+        // With NLA the sign-in happens before the session. Without it the
+        // host signs in with the sent password only when asked to; a host
+        // set to always prompt shows its sign-in screen all the same.
+        autologon: legacy && !password.is_empty(),
         enable_audio_playback: false,
         enable_audio_capture: false,
         // The pointer is the local cursor (rdp/remote_pointer.rs), not part of frames.
@@ -342,6 +362,101 @@ pub async fn attempt_rdp_connection(
     attempt_rdp_connection_with_share(config, password, width, height, Vec::new()).await
 }
 
+/// What the user reads when X.224 negotiation fails. A server that refuses
+/// TLS and NLA is named with the setting that reaches it.
+fn negotiation_failure_text(error: &connector::ConnectorError) -> String {
+    use ironrdp_pdu::nego::FailureCode;
+
+    let refuses_tls = matches!(
+        error.kind(),
+        connector::ConnectorErrorKind::Negotiation(failure)
+            if failure.code() == FailureCode::SSL_NOT_ALLOWED_BY_SERVER
+    );
+    if refuses_tls {
+        "This host accepts only legacy RDP security, without TLS or NLA. To connect anyway, set \
+         Security to Legacy in the host's settings: the encryption is weak and the host is not \
+         authenticated."
+            .to_owned()
+    } else {
+        format!("RDP negotiation begin failed: {error}")
+    }
+}
+
+/// The rest of a connection under Standard RDP Security: no TLS upgrade, the
+/// RC4 layer of `rdp/legacy_security.rs` between the library and the socket.
+async fn finish_legacy_connection(
+    config: &ConnectionConfig,
+    mut connector: ClientConnector,
+    tcp_stream: TcpStream,
+    network_counters: std::sync::Arc<NetworkCounters>,
+    codec_policy: std::sync::Arc<crate::rdp::codec_policy::CodecErrorPolicy>,
+    share: Vec<crate::store::share_grants::ShareGrant>,
+) -> ConnectionOutcome {
+    log::warn!(
+        "Connecting to {} with legacy RDP security: weak encryption, host not authenticated",
+        config.host
+    );
+    let stream = crate::rdp::legacy_security::LegacyStream::new(MeasuredStream::new(
+        tcp_stream,
+        network_counters.clone(),
+    ));
+    let mut framed = TokioFramed::new(stream);
+    let should_upgrade = match ironrdp_tokio::connect_begin(&mut framed, &mut connector).await {
+        Ok(su) => su,
+        Err(e) => {
+            log::warn!("RDP negotiation begin failed: {:?}", e);
+            return ConnectionOutcome::Failed(format!("RDP negotiation begin failed: {e}"));
+        }
+    };
+    // Nothing to upgrade: the security exchange happens inside the stream.
+    let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
+    let mut network_client = ReqwestNetworkClient::new();
+    let connection_result = match ironrdp_tokio::connect_finalize(
+        upgraded,
+        connector,
+        &mut framed,
+        &mut network_client,
+        ServerName::new(config.host.clone()),
+        Vec::new(),
+        None,
+    )
+    .await
+    .and_then(|outcome| outcome.into_connected())
+    {
+        Ok(result) => result,
+        Err(e) => {
+            log::warn!("RDP connection finalize failed: {:?}", e);
+            return ConnectionOutcome::Failed(format!("RDP connection finalize failed: {e}"));
+        }
+    };
+    log::info!(
+        "RDP connection established with legacy security. Desktop size: {}x{}",
+        connection_result.desktop_size.width,
+        connection_result.desktop_size.height
+    );
+    // A folder goes only to a server whose identity was checked, and this
+    // mode has none to check.
+    let share = share
+        .iter()
+        .map(|_| {
+            let status = crate::rdp::folder_share::status::ShareStatusCell::default();
+            status.set(crate::rdp::folder_share::status::ShareState::Unverified {
+                reason: "Folders are not shared over legacy RDP security: the host is not \
+                         authenticated."
+                    .into(),
+            });
+            status
+        })
+        .collect();
+    ConnectionOutcome::RealSessionLegacy {
+        connection_result: Box::new(connection_result),
+        framed: Box::new(framed),
+        network_counters,
+        codec_policy,
+        share,
+    }
+}
+
 /// [`attempt_rdp_connection`], offering each folder in `share` as a drive when
 /// the server and folder still match it (rdp-folder-sharing task 5.2).
 pub(crate) async fn attempt_rdp_connection_with_share(
@@ -401,13 +516,24 @@ pub(crate) async fn attempt_rdp_connection_with_share(
     crate::rdp::egfx::attach_to_connector(&mut connector, &codec_policy);
 
     let network_counters = std::sync::Arc::new(NetworkCounters::default());
+    if config.host_profile.security == crate::store::connections::SecurityLayer::Legacy {
+        return finish_legacy_connection(
+            config,
+            connector,
+            tcp_stream,
+            network_counters,
+            codec_policy,
+            share,
+        )
+        .await;
+    }
     let mut framed = TokioFramed::new(MeasuredStream::new(tcp_stream, network_counters.clone()));
 
     let should_upgrade = match ironrdp_tokio::connect_begin(&mut framed, &mut connector).await {
         Ok(su) => su,
         Err(e) => {
             log::warn!("RDP negotiation begin failed: {:?}", e);
-            return ConnectionOutcome::Failed(format!("RDP negotiation begin failed: {}", e));
+            return ConnectionOutcome::Failed(negotiation_failure_text(&e));
         }
     };
 
@@ -666,6 +792,53 @@ mod tests {
             assert_eq!(connector.desktop_scale_factor, desktop);
             assert_eq!(connector.device_scale_factor, Some(device));
         }
+    }
+
+    /// A legacy host answers a request that names TLS or NLA with a
+    /// failure, so the request names neither; every other host keeps both.
+    #[test]
+    fn connector_config_requests_standard_security_only_for_a_legacy_host() {
+        let mut saved = serde_json::json!({
+            "id": "legacy", "name": "Legacy", "host": "127.0.0.1",
+            "port": 3389, "username": "user", "domain": "", "tags": [],
+            "createdAt": "2026-11-21T00:00:00Z", "updatedAt": "2026-11-21T00:00:00Z"
+        });
+        let automatic: ConnectionConfig = serde_json::from_value(saved.clone()).unwrap();
+        saved["hostProfile"] = serde_json::json!({"security": "legacy"});
+        let legacy: ConnectionConfig = serde_json::from_value(saved).unwrap();
+
+        let automatic = build_connector_config(&automatic, "pw", 1280, 720);
+        assert!(automatic.enable_tls && automatic.enable_credssp);
+        assert!(!automatic.enable_standard_rdp_security);
+        assert!(!automatic.autologon, "NLA signs in before the session");
+        let asked = build_connector_config(&legacy, "", 1280, 720);
+        assert!(!asked.autologon, "no password, nothing to sign in with");
+        let legacy = build_connector_config(&legacy, "pw", 1280, 720);
+        assert!(!legacy.enable_tls && !legacy.enable_credssp);
+        assert!(legacy.enable_standard_rdp_security);
+        assert!(legacy.autologon);
+    }
+
+    #[test]
+    fn a_host_that_refuses_tls_is_named_with_the_setting_that_reaches_it() {
+        use ironrdp_pdu::nego::FailureCode;
+
+        let refused = connector::ConnectorError::new(
+            "negotiation failure",
+            connector::ConnectorErrorKind::Negotiation(
+                FailureCode::SSL_NOT_ALLOWED_BY_SERVER.into(),
+            ),
+        );
+        let text = negotiation_failure_text(&refused);
+        assert!(text.contains("Security to Legacy"), "{text}");
+        let other = connector::ConnectorError::new(
+            "negotiation failure",
+            connector::ConnectorErrorKind::Negotiation(
+                FailureCode::HYBRID_REQUIRED_BY_SERVER.into(),
+            ),
+        );
+        let text = negotiation_failure_text(&other);
+        assert!(text.starts_with("RDP negotiation begin failed"), "{text}");
     }
 
     #[test]

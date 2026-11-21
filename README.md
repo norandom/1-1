@@ -127,6 +127,7 @@ Most of my work in this fork went into ClearCodec. I made it the preferred codec
 **Connecting**
 
 - RDP to Windows machines on port 3389, with TLS plus NLA/CredSSP authentication via IronRDP
+- Hosts that accept only legacy RDP security (RC4, no TLS or NLA) connect with a per-host setting; weak, for trusted networks only ([guide](docs/user-guide/legacy-security.md))
 - Verified against three server classes: Windows RDP Server (Windows 11, NLA mandatory), FreeRDP/xfreerdp servers on Linux, and IronRDP-based Rust servers on Linux
 - Keyboard, mouse, and trackpad scroll forwarding; configurable resolution and quality per host
 - Up to 10 simultaneous sessions in tabs, with auto-reconnect and exponential backoff on connection loss

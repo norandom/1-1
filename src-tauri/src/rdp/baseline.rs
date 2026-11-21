@@ -843,6 +843,8 @@ impl log::Log for TranscriptLogger {
 
 #[cfg(test)]
 mod idle_preview_probe;
+#[cfg(test)]
+mod legacy_security_probe;
 
 fn smoke_config(
     n: &str,
@@ -1140,6 +1142,9 @@ async fn smoke_host(
         ConnectionOutcome::RealSessionLocal { .. } => {
             unreachable!("smoke runs against real servers only (RealSessionLocal is a test seam)")
         }
+        ConnectionOutcome::RealSessionLegacy { .. } => {
+            unreachable!("the smoke measures TLS sessions; no smoke host is set to legacy security")
+        }
         ConnectionOutcome::Failed(reason) => {
             if report.error.is_none() {
                 report.error = Some(reason.clone());
@@ -1256,6 +1261,9 @@ async fn smoke_host(
         }
         ConnectionOutcome::RealSessionLocal { .. } => {
             unreachable!("smoke runs against real servers only (RealSessionLocal is a test seam)")
+        }
+        ConnectionOutcome::RealSessionLegacy { .. } => {
+            unreachable!("the smoke measures TLS sessions; no smoke host is set to legacy security")
         }
     }
     report.reconnect_cycle = Some(cycle2);

@@ -1022,6 +1022,21 @@ impl SessionActor {
                     codec_policy,
                 ))
             }
+            ConnectionOutcome::RealSessionLegacy {
+                connection_result,
+                framed,
+                codec_policy,
+                network_counters,
+                share,
+            } => {
+                self.share_status = share;
+                self.network_counters = Some(network_counters);
+                Some((
+                    *connection_result,
+                    SessionTransport::Legacy(framed),
+                    codec_policy,
+                ))
+            }
             ConnectionOutcome::RealSessionLocal {
                 connection_result,
                 framed,
@@ -1108,6 +1123,17 @@ impl SessionActor {
         // stream and the in-memory duplex both satisfy.
         match transport {
             SessionTransport::Tls(framed) => {
+                let (reader, writer) = ironrdp_tokio::split_tokio_framed(*framed);
+                self.run_framed_session_loop(
+                    activation_factory,
+                    active_stage,
+                    reader,
+                    writer,
+                    codec_policy,
+                )
+                .await
+            }
+            SessionTransport::Legacy(framed) => {
                 let (reader, writer) = ironrdp_tokio::split_tokio_framed(*framed);
                 self.run_framed_session_loop(
                     activation_factory,
@@ -2139,6 +2165,21 @@ impl SessionActor {
                         codec_policy,
                     ))
                 }
+                ConnectionOutcome::RealSessionLegacy {
+                    connection_result,
+                    framed,
+                    codec_policy,
+                    network_counters,
+                    share,
+                } => {
+                    self.share_status = share;
+                    self.network_counters = Some(network_counters);
+                    Some((
+                        *connection_result,
+                        SessionTransport::Legacy(framed),
+                        codec_policy,
+                    ))
+                }
                 ConnectionOutcome::RealSessionLocal {
                     connection_result,
                     framed,
@@ -2396,13 +2437,16 @@ enum DisconnectReason {
 
 /// The framed transport a real session runs over.
 ///
-/// Production sessions ride the TLS stream from [`attempt_rdp_connection`];
+/// Production sessions ride the TLS stream from [`attempt_rdp_connection`],
+/// or the legacy-security stream for a host set to it;
 /// the `Local` arm is the task 7.4 characterization seam (an in-memory tokio
 /// duplex wrapped in the same upstream `Framed` API) so deterministic tests
 /// can drive the real session loop — including the Deactivation-Reactivation
 /// Sequence — without network I/O.
 enum SessionTransport {
     Tls(Box<crate::rdp::client::TlsFramed>),
+    /// Standard RDP Security: RC4 over plain TCP (`rdp/legacy_security.rs`).
+    Legacy(Box<crate::rdp::client::LegacyFramed>),
     Local(Box<ironrdp_tokio::TokioFramed<tokio::io::DuplexStream>>),
 }
 

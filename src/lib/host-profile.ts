@@ -16,6 +16,7 @@ export const DEFAULT_HOST_PROFILE: Readonly<HostProfile> = Object.freeze({
   keyboardLayout: 'automatic',
   keyboardKeys: 'automatic',
   superAsCtrl: true,
+  security: 'automatic',
 });
 
 /** Defaults missing legacy fields without losing explicit false preferences. */
@@ -43,6 +44,7 @@ export function normalizeHostProfile(profile?: Partial<HostProfile> | null): Hos
     keyboardLayout: profile?.keyboardLayout ?? DEFAULT_HOST_PROFILE.keyboardLayout,
     keyboardKeys: profile?.keyboardKeys ?? DEFAULT_HOST_PROFILE.keyboardKeys,
     superAsCtrl: profile?.superAsCtrl ?? DEFAULT_HOST_PROFILE.superAsCtrl,
+    security: profile?.security ?? DEFAULT_HOST_PROFILE.security,
   };
 }
 

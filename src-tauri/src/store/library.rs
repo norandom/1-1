@@ -5499,7 +5499,8 @@ mod connection_crud_tests {
             "networkHint":"satellite", "colorDepth":"16", "bulkCompression":"rdp61", "clipboardDirection":"remoteToLocal", "idlePreview":true,
             "bottomBar":"withToolbar", "scaling":"custom", "scalePercent":150,
             "savePassword":false, "transferPace":"balanced",
-            "keyboardLayout":1031, "keyboardKeys":"physical", "superAsCtrl":false
+            "keyboardLayout":1031, "keyboardKeys":"physical", "superAsCtrl":false,
+            "security":"legacy"
         });
         let mut value = serde_json::to_value(sample("Profile", "profile.invalid")).unwrap();
         value["hostProfile"] = profile.clone();
