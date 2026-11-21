@@ -1,4 +1,5 @@
-import { Channel } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
+import { isNativeDisplay as nativeDisplay } from './display-path';
 import { listen } from '@tauri-apps/api/event';
 import type { SessionInfo, SessionInfoWire } from '../types';
 import { useSessionStore } from '../stores/sessionStore';
@@ -188,7 +189,18 @@ async function startSession(connectionId: string, existing?: SessionInfo, initia
     const info = await tauri.getSessionInfo(id);
     if (info && !eventReceived) applyInfo(info);
     if (runtime.disposed) return id;
+    // On the native path no frames reach the canvas: count the GPU layer's
+    // presents instead (spec rdp-native-renderer).
+    let presented: number | null = null;
     runtime.timer = setInterval(() => {
+      if (nativeDisplay()) {
+        void invoke<number>('native_frames', { sessionId: id }).then((total) => {
+          const fps = presented === null ? 0 : Math.max(0, total - presented);
+          presented = total;
+          useSessionStore.getState().updateSession(sessionId, { fps });
+        }).catch(() => {});
+        return;
+      }
       useSessionStore.getState().updateSession(sessionId, { fps: runtime.frames });
       runtime.frames = 0;
     }, 1000);

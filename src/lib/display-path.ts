@@ -20,10 +20,18 @@ export const DISPLAY_PATH_EVENT = 'display-path';
 const CANVAS: DisplayPathInfo = { path: 'canvas', reason: 'not reported' };
 
 let current: Promise<DisplayPathInfo> | null = null;
+let known: DisplayPathInfo = CANVAS;
 
 export function getDisplayPath(): Promise<DisplayPathInfo> {
-  current ??= invoke<DisplayPathInfo>('get_display_path').catch(() => CANVAS);
+  current ??= invoke<DisplayPathInfo>('get_display_path')
+    .catch(() => CANVAS)
+    .then((info) => (known = info));
   return current;
+}
+
+/** The last known path, without waiting (canvas until the backend answers). */
+export function isNativeDisplay(): boolean {
+  return known.path === 'native';
 }
 
 export function useDisplayPath(): DisplayPathInfo {
@@ -33,6 +41,7 @@ export function useDisplayPath(): DisplayPathInfo {
     void getDisplayPath().then((value) => { if (live) setInfo(value); });
     const unlisten = listen<DisplayPathInfo>(DISPLAY_PATH_EVENT, (event) => {
       current = Promise.resolve(event.payload);
+      known = event.payload;
       if (live) setInfo(event.payload);
     }).catch(() => () => {});
     return () => {
@@ -56,6 +65,7 @@ export function syncDisplayPathClass(
   void getDisplayPath().then(apply);
   void listen<DisplayPathInfo>(DISPLAY_PATH_EVENT, (event) => {
     current = Promise.resolve(event.payload);
+    known = event.payload;
     apply(event.payload);
   }).catch(() => {});
 }

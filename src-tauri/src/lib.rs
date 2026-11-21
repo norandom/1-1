@@ -194,6 +194,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             renderer::display_path::get_display_path,
             renderer::gpu::native_view,
+            renderer::gpu::native_frames,
             // Connection commands (task 6.6: unified v2 store)
             commands::connection::list_connections,
             commands::connection::get_connection,

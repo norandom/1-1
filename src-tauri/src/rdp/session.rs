@@ -1591,7 +1591,7 @@ impl SessionActor {
                                     .elapsed();
                                 let fps =
                                     self.metrics.frames_sent as f64 / elapsed.as_secs_f64();
-                                log::info!(
+                                log::debug!(
                                     "[Session {}] RDP frames received: {} (avg {:.1} fps) | {} regions this PDU",
                                     self.id, self.metrics.frames_sent, fps, updated_regions.len()
                                 );

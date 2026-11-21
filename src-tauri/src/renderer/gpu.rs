@@ -47,6 +47,8 @@ pub struct View {
 pub struct RenderShared {
     view: Mutex<View>,
     stores: Arc<FrameStores>,
+    /// Frames presented per session, for the Performance HUD's FPS.
+    presented: Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl RenderShared {
@@ -54,6 +56,7 @@ impl RenderShared {
         Arc::new(Self {
             view: Mutex::new(View::default()),
             stores,
+            presented: Mutex::default(),
         })
     }
 
@@ -70,6 +73,25 @@ impl RenderShared {
     fn view(&self) -> View {
         self.view.lock().unwrap().clone()
     }
+
+    fn count_present(&self, session: &str) {
+        *self
+            .presented
+            .lock()
+            .unwrap()
+            .entry(session.to_owned())
+            .or_default() += 1;
+    }
+
+    /// Frames presented for a session so far.
+    pub fn presented(&self, session: &str) -> u64 {
+        self.presented
+            .lock()
+            .unwrap()
+            .get(session)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 /// The page reports what it shows over the native layer (task 4.2): the
@@ -77,6 +99,13 @@ impl RenderShared {
 #[tauri::command]
 pub fn native_view(view: Option<View>, shared: tauri::State<'_, Arc<RenderShared>>) {
     shared.set_view(view.unwrap_or_default());
+}
+
+/// Frames the native layer presented for a session; the HUD's FPS on the
+/// native path, where no frames reach the canvas.
+#[tauri::command]
+pub fn native_frames(session_id: String, shared: tauri::State<'_, Arc<RenderShared>>) -> u64 {
+    shared.presented(&session_id)
 }
 
 /// Uniforms for `native_layer.wgsl`.
@@ -364,6 +393,9 @@ impl Renderer {
             match self.draw(&view, geometry, store.is_some()) {
                 Ok(()) => {
                     failures = 0;
+                    if let (Some(session), Some(_)) = (view.session.as_deref(), &store) {
+                        shared.count_present(session);
+                    }
                     drawn_view = Some(view);
                 }
                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
