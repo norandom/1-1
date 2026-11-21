@@ -24,3 +24,22 @@ describe('keyboard layout in the status bar', () => {
       .toContain('no Windows layout for Klingon');
   });
 });
+
+describe('keyboard section of the host editor', () => {
+  it('describes the detected layout', async () => {
+    const { describeLocalLayout } = await import('../keyboard-status');
+    const german = { klid: 0x407, short: 'DE', name: 'German' };
+    expect(describeLocalLayout({ displayName: 'German (Macintosh, no dead keys)', windows: german, matched: 'closest' }))
+      .toBe('German (Macintosh, no dead keys) → German, closest match');
+    expect(describeLocalLayout({ displayName: 'German', windows: german, matched: 'exact' })).toBe('German → German');
+    expect(describeLocalLayout({ displayName: 'Klingon', windows: null, matched: null })).toContain('no Windows layout');
+    expect(describeLocalLayout(null)).toContain('could not be detected');
+  });
+
+  it('round-trips the layout choice through the select value', async () => {
+    const { layoutChoiceFrom, layoutChoiceValue } = await import('../keyboard-status');
+    for (const choice of ['automatic', 'serverDefault', 0x407] as const) {
+      expect(layoutChoiceFrom(layoutChoiceValue(choice))).toBe(choice);
+    }
+  });
+});

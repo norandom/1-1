@@ -198,6 +198,12 @@ pub fn detect_keyboard_layout() -> Option<LocalLayout> {
     current()
 }
 
+/// The Windows layouts a host can be fixed to.
+#[tauri::command]
+pub fn keyboard_layouts() -> Vec<Layout> {
+    klid::LAYOUTS.to_vec()
+}
+
 #[cfg(target_os = "linux")]
 pub use platform::watch_wayland;
 

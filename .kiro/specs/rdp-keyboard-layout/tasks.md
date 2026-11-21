@@ -10,10 +10,11 @@ Task 1 builds the data and settings (layout table, host profile). Task 2 detects
   - `KeyboardProfile { layout: Automatic | ServerDefault | Fixed(klid), keys: Automatic | Physical, super_as_ctrl }` in `HostProfile` with serde defaults (Automatic, Automatic, on); TypeScript types and normalization; import, export and duplicate keep it. Tests for defaults and old profiles.
   - _Requirements: 1.4, 4.1, 4.3, 7.3_
   - Done 21 November 2026 with 1.1 (`src-tauri/src/keyboard/klid.rs`). Flat profile fields like the others: `keyboardLayout` (`"automatic"`, `"serverDefault"` or a KLID number), `keyboardKeys` (`"automatic"`, `"physical"`), `superAsCtrl`. "Copy as command line" carries them (`--keyboard-layout 00000407`, Windows's eight-digit hex form).
-- [ ] 1.3 Keyboard section in the host editor
+- [x] 1.3 Keyboard section in the host editor
   - `HostProfileFields`: Layout (Automatic, a list of common layouts, Server default), Keys (Automatic, Physical keys, with the note about servers without Unicode input), Super as Ctrl. Shows the detected local layout (`detect_keyboard_layout`, from 2.x).
   - _Depends: 1.2_
   - _Requirements: 4.1, 4.2, 5.2, 7.1_
+  - Done 21 November 2026: a "Keyboard" section after "Shared folders" in `HostProfileFields` (Layout with every known Windows layout from `keyboard_layouts`, Keys with the Physical keys note, Super as Ctrl), and the detected layout under the choice (`detect_keyboard_layout`).
 
 - [ ] 2. Detect the local layout
 - [x] 2.1 Wayland keymap

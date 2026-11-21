@@ -2,6 +2,9 @@ import type { HostProfile } from '../../types';
 import { IDLE_PREVIEW_HELP, IDLE_PREVIEW_LABEL } from '../../lib/idle-preview';
 import { TRANSFER_PACE_HELP, TRANSFER_PACE_OPTIONS, SCALE_PERCENT_OPTIONS, SCALING_HELP, SCALING_OPTIONS, CLIPBOARD_OPTIONS, CLIPBOARD_HELP, COLOR_DEPTH_HELP, COLOR_DEPTH_OPTIONS, COMPRESSION_HELP, COMPRESSION_OPTIONS, COMPOSITION_HELP, EXPERIENCE_HELP, NETWORK_HELP, NETWORK_OPTIONS, PRESETS, VISUAL_OPTIONS, experiencePreset, presetName, type ExperiencePreset } from '../../lib/host-experience';
 import { Switch } from '@/components/ui/switch';
+import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { describeLocalLayout, layoutChoiceFrom, layoutChoiceValue, type KeyboardLayout, type LocalLayout } from '../../lib/keyboard-status';
 
 interface Props {
   profile: HostProfile;
@@ -76,6 +79,7 @@ export function HostProfileFields({ profile, fontSmoothing, onChange }: Props) {
       </label>
       <p id="transfer-pace-help" className="text-xs text-muted-foreground">{TRANSFER_PACE_HELP}</p>
     </fieldset>
+    <KeyboardFields profile={profile} onChange={(next) => onChange(next, fontSmoothing)} />
     <details className="rounded border p-3">
       <summary className="cursor-pointer text-sm font-medium">Visual effects and connection</summary>
       <div className="mt-3 grid gap-3">
@@ -100,3 +104,42 @@ export function HostProfileFields({ profile, fontSmoothing, onChange }: Props) {
     </details>
   </div>;
 }
+
+const KEYS_HELP = 'Automatic sends typed characters as characters, so they match your layout whatever the remote uses; shortcuts and named keys go as keys. Physical keys sends every key by its position, as older versions did; use it for servers that ignore character input.';
+
+/** Spec rdp-keyboard-layout, task 1.3. */
+function KeyboardFields({ profile, onChange }: { profile: HostProfile; onChange: (profile: HostProfile) => void }) {
+  const [layouts, setLayouts] = useState<KeyboardLayout[]>([]);
+  const [local, setLocal] = useState<LocalLayout | null | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    invoke<KeyboardLayout[]>('keyboard_layouts').then((list) => { if (live) setLayouts(list); }).catch(() => {});
+    invoke<LocalLayout | null>('detect_keyboard_layout').then((found) => { if (live) setLocal(found); }).catch(() => { if (live) setLocal(null); });
+    return () => { live = false; };
+  }, []);
+  return <fieldset className="grid gap-2">
+    <legend className="mb-2 text-sm font-medium">Keyboard</legend>
+    <label className="flex items-center justify-between gap-3 text-sm">Layout
+      <select className={selectClass} aria-describedby="keyboard-layout-help" value={layoutChoiceValue(profile.keyboardLayout)} onChange={(e) => onChange({ ...profile, keyboardLayout: layoutChoiceFrom(e.target.value) })}>
+        <option value="automatic">Automatic (this computer's layout)</option>
+        <option value="serverDefault">Server default</option>
+        {layouts.map((layout) => <option key={layout.klid} value={layoutChoiceValue(layout.klid)}>{layout.name}</option>)}
+      </select>
+    </label>
+    <p id="keyboard-layout-help" className="text-xs text-muted-foreground">
+      {local === undefined ? 'Detecting this computer\'s layout…' : `Detected: ${describeLocalLayout(local)}`}
+    </p>
+    <label className="flex items-center justify-between gap-3 text-sm">Keys
+      <select className={selectClass} aria-describedby="keyboard-keys-help" value={profile.keyboardKeys} onChange={(e) => onChange({ ...profile, keyboardKeys: e.target.value as HostProfile['keyboardKeys'] })}>
+        <option value="automatic">Automatic</option>
+        <option value="physical">Physical keys</option>
+      </select>
+    </label>
+    <p id="keyboard-keys-help" className="text-xs text-muted-foreground">{KEYS_HELP}</p>
+    <div className="flex items-center justify-between gap-3">
+      <label htmlFor="host-superAsCtrl" className="text-sm">Super as Ctrl (Super+C copies; Super alone opens Start)</label>
+      <Switch id="host-superAsCtrl" checked={profile.superAsCtrl} onCheckedChange={(superAsCtrl) => onChange({ ...profile, superAsCtrl })} />
+    </div>
+  </fieldset>;
+}
+

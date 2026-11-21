@@ -34,3 +34,35 @@ export function keyboardDescription(layout: ReportedLayout): string {
       return `No layout reported: ${layout.local ? `no Windows layout for ${layout.local}` : 'the local layout could not be detected'}; the remote uses its own`;
   }
 }
+
+/** A Windows layout a host can be fixed to. */
+export interface KeyboardLayout {
+  klid: number;
+  short: string;
+  name: string;
+}
+
+/** The local layout as the backend detects it right now. */
+export interface LocalLayout {
+  displayName: string;
+  windows: KeyboardLayout | null;
+  matched: 'exact' | 'closest' | null;
+}
+
+/** "German (Macintosh, no dead keys) → German, closest match" for the host editor. */
+export function describeLocalLayout(local: LocalLayout | null): string {
+  if (!local) return 'The local layout could not be detected; Automatic reports none.';
+  if (!local.windows) return `${local.displayName}: no Windows layout; Automatic reports none.`;
+  const match = local.matched === 'closest' ? ', closest match' : '';
+  return `${local.displayName} → ${local.windows.name}${match}`;
+}
+
+/** The host profile's layout choice as a <select> value, and back. */
+export function layoutChoiceValue(choice: 'automatic' | 'serverDefault' | number): string {
+  return typeof choice === 'number' ? `klid:${choice}` : choice;
+}
+
+export function layoutChoiceFrom(value: string): 'automatic' | 'serverDefault' | number {
+  if (value.startsWith('klid:')) return Number(value.slice(5));
+  return value === 'serverDefault' ? 'serverDefault' : 'automatic';
+}
