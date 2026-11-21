@@ -1,3 +1,4 @@
+import type { ReportedLayout } from './lib/keyboard-status';
 import type { PointerImage } from './lib/remote-cursor';
 export interface ServerIdentityReview {
   selection: string;
@@ -131,6 +132,8 @@ export interface SessionInfo {
   hideLocalCursor?: boolean;
   /** The remote pointer shape shown as the local cursor; absent: the default arrow. */
   pointer?: PointerImage | null;
+  /** The keyboard layout the connection reported (spec rdp-keyboard-layout). */
+  keyboard?: ReportedLayout | null;
   id: string;
   connectionId: string;
   connectionName: string;

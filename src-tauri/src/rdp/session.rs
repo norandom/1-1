@@ -73,6 +73,9 @@ pub struct SessionInfo {
     /// The remote pointer shape shown as the local cursor (none: the default arrow).
     #[serde(default)]
     pub pointer: Option<crate::rdp::remote_pointer::PointerImage>,
+    /// The keyboard layout the connection reported (spec rdp-keyboard-layout).
+    #[serde(default)]
+    pub keyboard: Option<crate::keyboard::report::ReportedLayout>,
     #[serde(default)]
     pub idle_preview_state: IdlePreviewState,
     pub idle_preview_updated_at: Option<DateTime<Utc>>,
@@ -351,6 +354,8 @@ impl SessionEventSink {
 /// Frames are streamed to the frontend via a Tauri channel.
 struct SessionActor {
     pointer: crate::rdp::remote_pointer::RemotePointer,
+    /// The keyboard layout this connection reported (spec rdp-keyboard-layout).
+    keyboard: Option<crate::keyboard::report::ReportedLayout>,
     idle_preview: IdlePreview,
     idle_preview_updated_at: Option<DateTime<Utc>>,
     clipboard_epoch: String,
@@ -411,6 +416,7 @@ impl SessionActor {
         Self {
             id,
             pointer: Default::default(),
+            keyboard: None,
             idle_preview: IdlePreview::new(false, false, tokio::time::Instant::now()),
             idle_preview_updated_at: None,
             config,
@@ -475,6 +481,7 @@ impl SessionActor {
         SessionInfo {
             hide_local_cursor: connected && self.pointer.is_hidden(),
             pointer: self.pointer.image().filter(|_| connected).cloned(),
+            keyboard: self.keyboard.clone().filter(|_| connected),
             display_paused: connected && self.idle_preview.is_manually_paused(),
             display_pause_available: connected && unavailable.is_none(),
             display_pause_unavailable_reason: unavailable.filter(|_| connected).map(str::to_owned),
@@ -921,12 +928,24 @@ impl SessionActor {
         if self.mock_enabled() {
             return Some(ConnectionOutcome::Synthetic);
         }
-        let mut connect = (self.connect)(
-            self.config.clone(),
-            self.password.clone(),
-            self.width,
-            self.height,
+        // Spec rdp-keyboard-layout: resolve the layout once per connect, show
+        // it, and connect with it fixed.
+        let choice = self.config.host_profile.keyboard_layout;
+        let local = (choice == crate::store::connections::KeyboardLayoutChoice::AUTOMATIC)
+            .then(crate::keyboard::detect::current)
+            .flatten();
+        let reported = crate::keyboard::report::resolve(choice, local);
+        log::info!(
+            "Session {} reports keyboard layout {:08X} ({}, {:?})",
+            self.id,
+            reported.klid,
+            reported.name,
+            reported.source
         );
+        let mut config = self.config.clone();
+        config.host_profile.keyboard_layout = reported.as_choice();
+        self.keyboard = Some(reported);
+        let mut connect = (self.connect)(config, self.password.clone(), self.width, self.height);
         // Preserve initial-connect ownership; reconnect cancellation must
         // remain responsive even while the next handshake is pending.
         if self.state == SessionState::Connecting {
@@ -2779,6 +2798,7 @@ impl SessionManager {
         let initial_info = SessionInfo {
             hide_local_cursor: false,
             pointer: None,
+            keyboard: None,
             display_paused: false,
             display_pause_available: false,
             display_pause_unavailable_reason: None,

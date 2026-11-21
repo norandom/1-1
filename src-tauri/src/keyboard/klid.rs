@@ -97,6 +97,7 @@ const XKB: &[(&str, Option<&str>, u32)] = &[
 /// macOS input source IDs (`com.apple.keylayout.` + this) to KLID. Every
 /// Mac layout differs from its Windows twin in some keys, so all are closest
 /// matches.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code, reason = "macOS detection"))]
 const MAC: &[(&str, u32)] = &[
     ("US", 0x0000_0409),
     ("ABC", 0x0000_0409),
@@ -157,6 +158,7 @@ pub fn from_xkb(name: &str, variant: Option<&str>) -> Option<(Layout, Match)> {
 
 /// A macOS input source ID (`com.apple.keylayout.German`) to the Windows
 /// layout.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code, reason = "macOS detection"))]
 pub fn from_mac_source(id: &str) -> Option<(Layout, Match)> {
     let name = id.strip_prefix("com.apple.keylayout.")?;
     MAC.iter()
@@ -167,6 +169,7 @@ pub fn from_mac_source(id: &str) -> Option<(Layout, Match)> {
 
 /// A Windows KLID string as `GetKeyboardLayoutNameW` returns it
 /// (`"00000407"`).
+#[cfg_attr(not(windows), allow(dead_code, reason = "Windows detection"))]
 pub fn from_windows_name(name: &str) -> Option<(Layout, Match)> {
     let klid = u32::from_str_radix(name.trim(), 16).ok()?;
     Some(match by_klid(klid) {

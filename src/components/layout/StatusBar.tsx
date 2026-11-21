@@ -13,6 +13,7 @@ import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
 import { ClipboardStatus } from './ClipboardStatus';
 import { FolderShareStatus } from './FolderShareStatus';
+import { KeyboardStatus } from './KeyboardStatus';
 import { DisplayPauseControl } from './DisplayPauseControl';
 import { sessionRouteIdFromPath } from '../../lib/session-route';
 import { bottomBarFollowsToolbar, buildStatusBarText, sessionCountLabel, statusBarIndicator, liveSessionCount } from '../../lib/status-bar';
@@ -123,6 +124,7 @@ export function StatusBar() {
       <Separator orientation="vertical" className="h-3.5" />
 
       <DisplayPauseControl session={selectedSession} />
+      <KeyboardStatus />
       <ClipboardStatus onOpenChange={(open) => hold('bar-menu', open)} />
       <FolderShareStatus onOpenChange={(open) => hold('bar-menu', open)} />
       {viewedHostId && (

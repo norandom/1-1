@@ -187,6 +187,9 @@ pub fn run() {
             #[cfg(not(target_os = "linux"))]
             let _ = &main_window;
             app.manage(display_path);
+            // Spec rdp-keyboard-layout: follow the local layout (Wayland).
+            #[cfg(target_os = "linux")]
+            keyboard::detect::watch_wayland();
             app.manage(frame_stores);
             app.manage(render_shared);
 
@@ -195,6 +198,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             renderer::display_path::get_display_path,
             renderer::gpu::native_view,
+            keyboard::detect::detect_keyboard_layout,
             renderer::gpu::native_frames,
             // Connection commands (task 6.6: unified v2 store)
             commands::connection::list_connections,

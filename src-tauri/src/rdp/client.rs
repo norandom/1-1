@@ -226,7 +226,12 @@ pub(crate) fn build_connector_config(
         enable_standard_rdp_security: false,
         keyboard_type: KeyboardType::IBM_ENHANCED,
         keyboard_subtype: 0,
-        keyboard_layout: 0,
+        // The session resolves Automatic before it connects (keyboard::report);
+        // here the setting is either a fixed layout or nothing.
+        keyboard_layout: match config.host_profile.keyboard_layout {
+            crate::store::connections::KeyboardLayoutChoice::Fixed(klid) => klid,
+            crate::store::connections::KeyboardLayoutChoice::Named(_) => 0,
+        },
         keyboard_functional_keys_count: 12,
         connection_type,
         ime_file_name: String::new(),
@@ -782,6 +787,32 @@ mod tests {
             !built.pointer_software_rendering,
             "but not drawn into the frames"
         );
+    }
+
+    /// Spec rdp-keyboard-layout 1.1: the connection reports the layout the
+    /// session resolved; Automatic is resolved before this point.
+    #[test]
+    fn the_resolved_keyboard_layout_is_reported() {
+        use crate::store::connections::{KeyboardLayoutChoice, KeyboardLayoutName};
+        let mut config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "kb", "name": "Kb", "host": "kb.invalid", "port": 3389,
+            "createdAt": "2026-11-21T00:00:00Z", "updatedAt": "2026-11-21T00:00:00Z"
+        }))
+        .unwrap();
+        for (choice, reported) in [
+            (KeyboardLayoutChoice::Fixed(0x407), 0x407),
+            (
+                KeyboardLayoutChoice::Named(KeyboardLayoutName::ServerDefault),
+                0,
+            ),
+            (KeyboardLayoutChoice::AUTOMATIC, 0),
+        ] {
+            config.host_profile.keyboard_layout = choice;
+            assert_eq!(
+                build_connector_config(&config, "", 800, 600).keyboard_layout,
+                reported
+            );
+        }
     }
 
     #[test]

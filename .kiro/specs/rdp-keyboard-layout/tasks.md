@@ -16,7 +16,7 @@ Task 1 builds the data and settings (layout table, host profile). Task 2 detects
   - _Requirements: 4.1, 4.2, 5.2, 7.1_
 
 - [ ] 2. Detect the local layout
-- [ ] 2.1 Wayland keymap
+- [x] 2.1 Wayland keymap
   - `src-tauri/src/keyboard/detect.rs`: bind `wl_seat` and `wl_keyboard` on a queue over GDK's connection, read the keymap's `xkb_symbols` include line and the active group from `wl_keyboard.modifiers`; dispatch from GTK's main loop. Parser tests with real Hyprland keymaps (one layout, two layouts and a switch, variants).
   - _Depends: 1.1_
   - _Requirements: 6.1_
@@ -26,14 +26,15 @@ Task 1 builds the data and settings (layout table, host profile). Task 2 detects
   - _Requirements: 6.2, 6.3, 6.4, 6.5_
 
 - [ ] 3. Report and show the layout
-- [ ] 3.1 Report at connect
+- [x] 3.1 Report at connect
   - Resolve `ReportedLayout { klid, name, source }` from the host's setting and the detection; `build_connector_config` sets `keyboard_layout`; log once; store it in `SessionInfo.keyboard`. Tests for every source (detected, closest, override, server default, not detected).
   - _Depends: 1.2, 2.1_
   - _Requirements: 1.1, 1.2, 1.3, 4.2_
-- [ ] 3.2 Status bar and HUD
+- [x] 3.2 Status bar and HUD
   - A compact status bar item (for example `DE`) for the connected session, with the full name and source on hover, hidden without a session; one HUD line with the layout and key mode. Frontend tests for the item's text and tooltip.
   - _Depends: 3.1_
   - _Requirements: 5.1, 5.3_
+  - Done 21 November 2026 with 2.1 and 3.1. 2.1: `keyboard/detect.rs` reads the compiled keymap the compositor sends; on Hyprland its `xkb_symbols` line is `pc_de(mac_nodeadkeys)_us_2_inet(evdev)_…` (layouts with variants in parentheses, `_N` for later groups, option files mixed in), with display names in `name[N]` lines; the active group comes from `wl_keyboard.modifiers`. The X11 part of 2.2 (`setxkbmap -query`) is in too. 3.1: the session resolves the layout once per connect (`keyboard/report.rs`), keeps it for `SessionInfo.keyboard` and connects with it fixed, so `build_connector_config` never detects anything and tests stay machine-independent. 3.2: `KeyboardStatus` next to the clipboard status, and a HUD line.
 
 - [ ] 4. Characters as characters
 - [ ] 4.1 Key decision

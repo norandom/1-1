@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { formatBandwidth, fpsLevel, latencyLevel } from '../../lib/hud-format';
 import { useDisplayPath } from '../../lib/display-path';
+import { keyboardDescription, keyboardLabel } from '../../lib/keyboard-status';
 import type { GraphicsObservation, NetworkMetrics } from '../../types';
 
 interface Props {
@@ -19,6 +20,7 @@ interface Props {
 export function PerformanceHUD({ fps, latency, network, graphics, resolution }: Props) {
   const show = useSessionStore((s) => s.showPerformanceHud);
   const displayPath = useDisplayPath();
+  const keyboard = useSessionStore((s) => (s.activeSessionId ? s.sessions.get(s.activeSessionId)?.keyboard : undefined));
 
   const fpsTrend = fpsLevel(fps);
 
@@ -82,6 +84,7 @@ export function PerformanceHUD({ fps, latency, network, graphics, resolution }: 
                 <div>Channel: {graphics?.channels.join(', ') || 'Unknown'}</div>
                 <div>Codecs: {graphics?.codecs.join(', ') || 'Unknown'}</div>
                 <div title={displayPath.reason}>Renderer: {displayPath.path === 'native' ? 'native layer' : 'web canvas'}</div>
+                {keyboard && <div title={keyboardDescription(keyboard)}>Keyboard: {keyboardLabel(keyboard)} ({keyboard.source === 'closestMatch' ? 'closest match' : keyboard.source})</div>}
               </div>
               <div className="text-[9px] text-white/50" title="Includes RDP negotiation and TLS overhead. Excludes TCP/IP headers, retransmissions and separate authentication sockets. Totals reset on reconnect.">
                 TCP payload · includes TLS
