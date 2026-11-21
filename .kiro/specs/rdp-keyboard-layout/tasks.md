@@ -59,8 +59,9 @@ Task 1 builds the data and settings (layout table, host profile). Task 2 detects
   - _Requirements: 3.1, 3.2, 3.3_
   - Done 21 November 2026 with 4.1 and 4.2 (`src/lib/keyboard-input.ts`: `decideKey` and `createKeyTranslator`, fed by the canvas's key events in `SessionView`; `send_text` / `SessionCommand::SendText`). Decisions beyond the design: Space and the numeric keypad stay scancodes; Alt with a key's own letter or digit is a shortcut (scancode) while Alt producing another character (Option+L is `@` on a Mac layout) is text; a repeated key keeps the path of its first press. Synthetic releases (`isTrusted` false, from focus leaving the session) release a Ctrl chord but never tap the Windows key.
 
-- [ ] 6. Verify with the maintainer
-- [ ] 6.1 Windows and xrdp
+- [x] 6. Verify with the maintainer
+- [x] 6.1 Windows and xrdp
   - On the reference machine (Hyprland, German Macintosh) against the Windows host and an xrdp host, Automatic and Physical keys: the layout the remote starts with, a line of symbols in an editor, Super+C/V, Ctrl+Z, vim in a terminal, the status bar item. Record in `validation.md`.
   - _Depends: 3.2, 4.3, 5.1_
   - _Requirements: 7.2_
+  - Closed 21 November 2026 on the maintainer's report ("all works") from sessions to the Windows host; see `validation.md`. xrdp and Physical keys were not reported separately.
