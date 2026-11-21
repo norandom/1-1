@@ -13,7 +13,7 @@ describe('createTrailingResizeScheduler (Req 3.3)', () => {
     vi.useRealTimers();
   });
 
-  it('debounces at the pinned 200 ms window', () => {
+  it('debounces at the pinned 1 s window', () => {
     const emit = vi.fn();
     const scheduler = createTrailingResizeScheduler(emit);
 
@@ -22,13 +22,13 @@ describe('createTrailingResizeScheduler (Req 3.3)', () => {
 
     // Literals pin the absolute window; referencing the constant would
     // let a timing regression pass unnoticed.
-    vi.advanceTimersByTime(199);
+    vi.advanceTimersByTime(999);
     expect(emit).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(1);
     expect(emit).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith(640, 480);
-    expect(RESIZE_DEBOUNCE_MS).toBe(200);
+    expect(RESIZE_DEBOUNCE_MS).toBe(1000);
   });
 
   it('coalesces bursts: only the latest size is emitted, once', () => {
@@ -36,13 +36,13 @@ describe('createTrailingResizeScheduler (Req 3.3)', () => {
     const scheduler = createTrailingResizeScheduler(emit);
 
     scheduler.schedule(800, 600);
-    vi.advanceTimersByTime(120);
+    vi.advanceTimersByTime(600);
     scheduler.schedule(1024, 768);
-    vi.advanceTimersByTime(120);
+    vi.advanceTimersByTime(600);
     scheduler.schedule(1280, 720);
 
-    // Each call resets the window; 200 ms after the LAST call…
-    vi.advanceTimersByTime(200);
+    // Each call resets the window; 1 s after the LAST call…
+    vi.advanceTimersByTime(1000);
     expect(emit).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith(1280, 720);
   });
@@ -52,9 +52,9 @@ describe('createTrailingResizeScheduler (Req 3.3)', () => {
     const scheduler = createTrailingResizeScheduler(emit);
 
     scheduler.schedule(640, 480);
-    vi.advanceTimersByTime(200);
+    vi.advanceTimersByTime(1000);
     scheduler.schedule(800, 600);
-    vi.advanceTimersByTime(200);
+    vi.advanceTimersByTime(1000);
 
     expect(emit).toHaveBeenCalledTimes(2);
     expect(emit).toHaveBeenNthCalledWith(1, 640, 480);
@@ -67,9 +67,30 @@ describe('createTrailingResizeScheduler (Req 3.3)', () => {
 
     scheduler.schedule(640, 480);
     scheduler.cancel();
-    vi.advanceTimersByTime(400);
+    vi.advanceTimersByTime(2000);
 
     expect(emit).not.toHaveBeenCalled();
+  });
+
+  it('a panel sliding in and out again costs no remote resize', () => {
+    const emit = vi.fn();
+    const scheduler = createTrailingResizeScheduler(emit);
+    scheduler.schedule(1600, 900);
+    vi.advanceTimersByTime(1000);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(1600, 900);
+
+    // The status bar slides in (the area shrinks) and out again in time.
+    scheduler.schedule(1600, 872);
+    vi.advanceTimersByTime(700);
+    scheduler.schedule(1600, 900);
+    vi.advanceTimersByTime(5000);
+    expect(emit).toHaveBeenCalledTimes(1);
+
+    // A bar that stays shown does resize, once, after the quiet second.
+    scheduler.schedule(1600, 872);
+    vi.advanceTimersByTime(1000);
+    expect(emit).toHaveBeenLastCalledWith(1600, 872);
+    expect(emit).toHaveBeenCalledTimes(2);
   });
 
   it('seeds a newly installed scheduler without relying on another observer notification', () => {
