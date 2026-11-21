@@ -8,6 +8,8 @@ mod rdp;
 mod renderer;
 mod store;
 mod utils;
+#[cfg(target_os = "linux")]
+mod webkit_exit;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -280,5 +282,22 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|_, _| {});
+    app.run(|_, event| {
+        // End WebKit's web process before its own exit crashes (see
+        // webkit_exit.rs): when the main window is about to close, and when
+        // the app is asked to exit some other way.
+        #[cfg(target_os = "linux")]
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. }
+                | tauri::RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::CloseRequested { .. },
+                    ..
+                }
+        ) {
+            webkit_exit::end_web_processes();
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = event;
+    });
 }

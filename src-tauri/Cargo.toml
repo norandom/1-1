@@ -111,7 +111,7 @@ ironrdp-rdpsnd = "=0.11.0"
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # Binding the shared folder by descriptor (task 7.2); the same version the
 # native drive backend uses.
-nix = { version = "=0.31.4", features = ["fs", "dir"] }
+nix = { version = "=0.31.4", features = ["fs", "dir", "signal"] }
 # The folder picker: the XDG desktop portal or GTK on Linux, NSOpenPanel on
 # macOS (task 7.5). Windows keeps IFileOpenDialog.
 tauri-plugin-dialog = "=2.8.4"
