@@ -25,6 +25,7 @@ The probe is a minimal Tauri app with 1-1's stack (versions from
 - `PROBE_MODE=canvas`: the page draws the same pattern into a canvas with two
   full-size `putImageData` calls per frame, the current 1-1 path without IPC.
 - `PROBE_UPLOAD=full` (default), `strip` or `clear`, as in the Linux probe.
+- `PROBE_THREAD=render`: the render thread configures and commits instead of the main thread, as 1-1 does. The layer shows either way (checked 21 November 2026), so DirectComposition calls only need serializing, not the creating thread.
 
 ```powershell
 cd probes/windows-dcomp

@@ -99,7 +99,15 @@ mod win {
     struct Frame {
         size: (u32, u32),
         pattern: Vec<u8>,
+        /// The size the surface is configured to.
+        configured: (u32, u32),
     }
+
+    /// PROBE_THREAD=render: the render thread configures and commits, as
+    /// 1-1 does; otherwise the main thread does (the first run).
+    struct SendDevice(IDCompositionDesktopDevice);
+    unsafe impl Send for SendDevice {}
+    unsafe impl Sync for SendDevice {}
 
     struct Gpu {
         device: wgpu::Device,
@@ -108,6 +116,7 @@ mod win {
         format: wgpu::TextureFormat,
         copy: bool,
         frame: Mutex<Frame>,
+        render_configures: Option<SendDevice>,
     }
 
     pub struct Layer {
@@ -174,7 +183,10 @@ mod win {
                 surface,
                 format,
                 copy,
-                frame: Mutex::new(Frame { size: (0, 0), pattern: Vec::new() }),
+                frame: Mutex::new(Frame { size: (0, 0), pattern: Vec::new(), configured: (0, 0) }),
+                render_configures: std::env::var("PROBE_THREAD")
+                    .is_ok_and(|v| v == "render")
+                    .then(|| SendDevice(device.clone())),
             });
             let render_gpu = Arc::clone(&gpu);
             std::thread::Builder::new()
@@ -196,10 +208,17 @@ mod win {
             {
                 let mut frame = self.gpu.frame.lock().unwrap();
                 if frame.size != size {
-                    self.gpu.surface.configure(&self.gpu.device, &config(self.gpu.format, self.gpu.copy, size));
+                    if self.gpu.render_configures.is_none() {
+                        self.gpu.surface.configure(&self.gpu.device, &config(self.gpu.format, self.gpu.copy, size));
+                        frame.configured = size;
+                    }
                     frame.pattern = make_pattern(size, self.gpu.format == wgpu::TextureFormat::Bgra8Unorm);
                     frame.size = size;
                 }
+            }
+            if self.gpu.render_configures.is_some() {
+                eprintln!("render thread configures {}x{} (no main-thread commit)", size.0, size.1);
+                return;
             }
             let (x, y) = ((hole.x * self.scale).round(), (hole.y * self.scale).round());
             // SAFETY: main thread, objects owned by `self`.
@@ -239,6 +258,17 @@ mod win {
             if size == (0, 0) {
                 drop(frame);
                 std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            if let Some(dcomp) = &gpu.render_configures
+                && frame.configured != size
+            {
+                gpu.surface.configure(&gpu.device, &config(gpu.format, gpu.copy, size));
+                // SAFETY: only this thread uses the device in this mode.
+                let committed = unsafe { dcomp.0.Commit() };
+                eprintln!("render thread configured {}x{}, commit {committed:?}", size.0, size.1);
+                drop(frame);
+                gpu.frame.lock().unwrap().configured = size;
                 continue;
             }
             let Ok(texture) = gpu.surface.get_current_texture() else { continue };

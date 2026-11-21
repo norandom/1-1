@@ -61,3 +61,15 @@ Reading:
 - **No endless animation:** idle stays near zero (requirement 5.1).
 - **Drawing is cheap; moving frames is not.** WebView2's GPU process stays at about 3%. The browser process and 1-1's main thread together cost as much as the renderer. Frames reach the page through a Tauri `ipc::Channel`, whose large messages the page fetches back over the IPC custom protocol; on Windows every fetch is a WebView2 resource request served by the browser process and answered on 1-1's main thread. Key events take the same IPC route, one call per key down, key up or typed character.
 - **Against the Linux native layer** (about 6% of one core with the remote screen changing, [validation](../.kiro/specs/rdp-native-renderer/validation.md)), typing and the drag cost well over twice as much, so requirement 5.3's rule is met for Windows. The cost sits mostly in the transport, not in drawing.
+
+## 21 November 2026, GPU layer
+
+Same machine and host, after the Windows native layer (spec amendment 5a). Whole app, average of 30 s:
+
+| Scenario | Canvas | GPU layer | Main thread, canvas → layer |
+| --- | --- | --- | --- |
+| Scrolling terminal | 6.4% | 6.1% | 0.8% → 0.4% |
+| Typing with echo | 27.9% | 15.4% | 5.2% → 1.6% |
+| Window drag | 68.4% | 26.7% | 14.3% → 1.5% |
+
+Frames no longer travel through the Tauri channel, so WebView2's browser process and 1-1's main thread drop out of the frame path. What remains while typing is the key-event IPC.

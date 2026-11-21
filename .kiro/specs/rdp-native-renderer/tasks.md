@@ -112,14 +112,14 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
 ## Windows native layer (amendment 5a, approved 21 November 2026)
 
 - [ ] 10. Windows native layer
-- [ ] 10.1 Choose the path on Windows
+- [x] 10.1 Choose the path on Windows
   - `display_path`: Windows facts (DirectComposition device and target, DX12 adapter for the visual's surface), the reason `CompositionFailed(text)`, Automatic chooses the layer on Windows. Unit tests for every branch without a GPU; the Settings text names the Windows path.
   - _Requirements: 5a.1, 1.2, 1.4, 1.5, 6.4_
-- [ ] 10.2 The DirectComposition layer
+- [x] 10.2 The DirectComposition layer
   - `renderer/native_layer/dcomp.rs`: device, non-topmost target on the main window, root visual, wgpu DX12 surface from it; the DirectComposition lock around `configure` and `Commit`; client size from `Resized`, scale from `ScaleFactorChanged`; release with the window. The window becomes transparent on this path through the existing builder code.
   - _Depends: 10.1_
   - _Requirements: 5a.1, 5a.3, 4.3_
-- [ ] 10.3 The render thread on Windows
+- [x] 10.3 The render thread on Windows
   - Reuse `renderer/gpu.rs` (persistent texture, damage uploads, the quad with source and destination rectangles, present only on change). Reconfigure and commit under the lock on a size change; stop presenting when minimized or without a view; `Lost`/`Outdated`, device removal and three failures in a row as on Linux, `ONE_ONE_RENDERER_FAIL_AFTER` included.
   - _Depends: 10.2_
   - _Requirements: 5a.2, 1.3, 3.1, 3.5, 4.4_
@@ -127,7 +127,9 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - With the maintainer: picture, overlays, dialogs and HUD above it; tabs, dashboard, reconnect and error screens; fit and native mode with scrolling; window resize, maximize, snap, minimize; a move between monitors of different scale (or a scale change in Settings); several sessions; runtime fallback with `ONE_ONE_RENDERER_FAIL_AFTER`. Record in `validation.md`.
   - _Depends: 10.3_
   - _Requirements: 5a.2, 5a.3, 2.1–2.7, 4.1–4.4_
-- [ ] 10.5 Measure both paths
+  - Started 21 November 2026: sessions, overlays and an in-place reactivation work (maintainer). Open: snap, a monitor with another scale, several sessions, the injected fallback.
+- [x] 10.5 Measure both paths
   - `scripts/windows/Measure-AppCpu.ps1`, 30 s per scenario and path (idle, scrolling terminal, typing with echo, window drag), plus the HUD's frame rate. Targets of 5a.4; record in `validation.md` and `docs/profiling-windows.md`.
   - _Depends: 10.4_
   - _Requirements: 5a.4, 6.2_
+  - Done 21 November 2026: main thread at most 1.6% in every scenario; whole app 26.7% instead of 68.4% for a window drag, 15.4% instead of 27.9% for typing (the rest is key-event IPC). [Validation](validation.md)
