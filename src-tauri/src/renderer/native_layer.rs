@@ -88,21 +88,37 @@ impl Wake {
     }
 }
 
+/// Where the render thread's surface comes from.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+pub enum SurfaceSource {
+    /// Wayland: our subsurface on GDK's connection.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "Wayland only"))]
+    Raw(RawDisplayHandle, RawWindowHandle),
+    /// Windows: the layer's DirectComposition visual (amendment 5a).
+    #[cfg(windows)]
+    Composition(Arc<dcomp::Composition>),
+}
+
 /// What the render thread needs to draw into the layer.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub struct LayerTarget {
-    pub display: RawDisplayHandle,
-    pub surface: RawWindowHandle,
+    pub surface: SurfaceSource,
     pub geometry: Arc<Mutex<Geometry>>,
     pub wake: Arc<Wake>,
 }
 
-// SAFETY: the handles name libwayland objects owned by the layer for the
-// window's lifetime; libwayland proxies may be used from any thread.
+// SAFETY: the raw handles name libwayland objects owned by the layer for the
+// window's lifetime, and libwayland proxies may be used from any thread; the
+// Windows composition is `Send` on its own.
 unsafe impl Send for LayerTarget {}
 
 #[cfg(target_os = "linux")]
 pub use linux::attach;
+
+#[cfg(windows)]
+pub mod dcomp;
+#[cfg(windows)]
+pub use dcomp::attach;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -132,7 +148,7 @@ mod linux {
         wp_viewport::WpViewport, wp_viewporter::WpViewporter,
     };
 
-    use super::{Geometry, LayerTarget, Scaling, Wake};
+    use super::{Geometry, LayerTarget, Scaling, SurfaceSource, Wake};
 
     /// Events for our queue: only the preferred fractional scale matters.
     #[derive(Default)]
@@ -255,12 +271,14 @@ mod linux {
         queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
 
         let target = LayerTarget {
-            display: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-                NonNull::new(wl_display).ok_or("null wl_display")?,
-            )),
-            surface: RawWindowHandle::Wayland(WaylandWindowHandle::new(
-                NonNull::new(child.id().as_ptr() as *mut c_void).ok_or("null wl_surface")?,
-            )),
+            surface: SurfaceSource::Raw(
+                RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+                    NonNull::new(wl_display).ok_or("null wl_display")?,
+                )),
+                RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                    NonNull::new(child.id().as_ptr() as *mut c_void).ok_or("null wl_surface")?,
+                )),
+            ),
             geometry: Arc::new(Mutex::new(Geometry::default())),
             wake,
         };

@@ -15,7 +15,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::frame_stores::FrameStores;
-use super::native_layer::{Geometry, LayerTarget, Wake};
+use super::native_layer::{Geometry, LayerTarget, SurfaceSource, Wake};
 use super::shared_frame::Damage;
 use super::yuv::{FrameSource, YuvConverter};
 
@@ -198,6 +198,10 @@ struct Renderer {
     yuv: Option<YuvConverter>,
     configured: Geometry,
     shown: Option<String>,
+    /// Windows: `configure` reaches the DirectComposition visual, so it runs
+    /// under the composition's lock and is committed (amendment 5a).
+    #[cfg(windows)]
+    composition: Option<Arc<super::native_layer::dcomp::Composition>>,
 }
 
 /// Consecutive failed frames before the layer gives up (design, errors).
@@ -206,15 +210,24 @@ const FAILURES_BEFORE_FALLBACK: u32 = 3;
 impl Renderer {
     fn new(target: &LayerTarget) -> Result<Self, String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends: super::display_path::layer_backends(),
             ..Default::default()
         });
-        // SAFETY: the layer keeps both objects alive for the window's lifetime.
+        // SAFETY: the layer keeps the Wayland objects and the visual alive for
+        // the window's lifetime; wgpu takes its own reference to the visual.
         let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: target.display,
-                raw_window_handle: target.surface,
-            })
+            match &target.surface {
+                SurfaceSource::Raw(display, window) => {
+                    instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: *display,
+                        raw_window_handle: *window,
+                    })
+                }
+                #[cfg(windows)]
+                SurfaceSource::Composition(composition) => instance.create_surface_unsafe(
+                    wgpu::SurfaceTargetUnsafe::CompositionVisual(composition.visual()),
+                ),
+            }
         }
         .map_err(|e| format!("surface: {e}"))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -355,6 +368,11 @@ impl Renderer {
             yuv: None,
             configured: Geometry::default(),
             shown: None,
+            #[cfg(windows)]
+            composition: match &target.surface {
+                SurfaceSource::Composition(composition) => Some(Arc::clone(composition)),
+                SurfaceSource::Raw(..) => None,
+            },
         })
     }
 
@@ -437,19 +455,24 @@ impl Renderer {
     }
 
     fn configure(&mut self, geometry: Geometry) {
-        self.surface.configure(
-            &self.device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: self.format,
-                width: geometry.buffer_width,
-                height: geometry.buffer_height,
-                present_mode: wgpu::PresentMode::Fifo,
-                desired_maximum_frame_latency: 2,
-                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-                view_formats: vec![],
-            },
-        );
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: self.format,
+            width: geometry.buffer_width,
+            height: geometry.buffer_height,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+        };
+        let configure = || self.surface.configure(&self.device, &config);
+        #[cfg(windows)]
+        match &self.composition {
+            Some(composition) => composition.apply(configure),
+            None => configure(),
+        }
+        #[cfg(not(windows))]
+        configure();
         self.configured = geometry;
     }
 

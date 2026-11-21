@@ -54,7 +54,28 @@ impl Override {
     }
 }
 
-/// The kind of display GDK opened.
+/// Where 1-1 runs. The native layer exists for Linux Wayland and for Windows
+/// (DirectComposition, amendment 5a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Linux,
+    Windows,
+    Other,
+}
+
+impl Platform {
+    pub fn current() -> Self {
+        if cfg!(target_os = "linux") {
+            Self::Linux
+        } else if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// The kind of display GDK opened (Linux only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Display {
     Wayland,
@@ -74,12 +95,14 @@ pub enum GpuFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Facts {
     pub requested: Override,
-    pub linux: bool,
+    pub platform: Platform,
+    /// Linux only; ignored elsewhere.
     pub display: Display,
     /// The first required Wayland global the compositor does not advertise.
     pub missing_interface: Option<&'static str>,
-    /// A compositor the native layer was verified on (Hyprland). Automatic
-    /// mode keeps the canvas elsewhere (maintainer decision, 21 November 2026).
+    /// A Linux compositor the native layer was verified on (Hyprland).
+    /// Automatic mode keeps the canvas elsewhere on Linux (maintainer
+    /// decision, 21 November 2026). Windows needs no such fact (amendment 5a).
     pub supported_compositor: bool,
     pub gpu: Option<Result<(), GpuFailure>>,
 }
@@ -89,13 +112,17 @@ pub enum Reason {
     Available,
     ForcedNative,
     ForcedCanvas,
-    NotLinux,
+    /// Neither Linux nor Windows (macOS keeps the canvas, task 9.2).
+    UnsupportedPlatform,
     X11Display,
     OtherDisplay,
     MissingWaylandInterface(&'static str),
     /// Automatic mode on a compositor nobody has verified the layer on.
     UntestedCompositor,
     NoAdapter,
+    /// Windows: the DirectComposition device or target for the main window
+    /// could not be created.
+    CompositionFailed(String),
     SurfaceFailed(String),
     /// Set when the layer fails while sessions run (requirement 1.3).
     RuntimeFailure(String),
@@ -111,7 +138,10 @@ impl fmt::Display for Reason {
                 f,
                 "the native layer is tested on Hyprland only; choose it in Settings to try"
             ),
-            Self::NotLinux => write!(f, "the native layer exists only on Linux"),
+            Self::UnsupportedPlatform => {
+                write!(f, "the native layer exists on Linux and Windows only")
+            }
+            Self::CompositionFailed(error) => write!(f, "DirectComposition failed: {error}"),
             Self::X11Display => write!(f, "X11 or XWayland display"),
             Self::OtherDisplay => write!(f, "not a Wayland display"),
             Self::MissingWaylandInterface(name) => write!(f, "the compositor lacks {name}"),
@@ -132,19 +162,24 @@ fn precondition(facts: &Facts) -> Option<Reason> {
     if facts.requested == Override::Canvas {
         return Some(Reason::ForcedCanvas);
     }
-    if !facts.linux {
-        return Some(Reason::NotLinux);
+    match facts.platform {
+        Platform::Other => Some(Reason::UnsupportedPlatform),
+        // Every Windows 10 and 11 has DirectComposition; what can fail is
+        // found when the layer is built (CompositionFailed, SurfaceFailed).
+        Platform::Windows => None,
+        Platform::Linux => {
+            match facts.display {
+                Display::Wayland => {}
+                Display::X11 => return Some(Reason::X11Display),
+                Display::Other => return Some(Reason::OtherDisplay),
+            }
+            if let Some(name) = facts.missing_interface {
+                return Some(Reason::MissingWaylandInterface(name));
+            }
+            (facts.requested == Override::Auto && !facts.supported_compositor)
+                .then_some(Reason::UntestedCompositor)
+        }
     }
-    match facts.display {
-        Display::Wayland => {}
-        Display::X11 => return Some(Reason::X11Display),
-        Display::Other => return Some(Reason::OtherDisplay),
-    }
-    if let Some(name) = facts.missing_interface {
-        return Some(Reason::MissingWaylandInterface(name));
-    }
-    (facts.requested == Override::Auto && !facts.supported_compositor)
-        .then_some(Reason::UntestedCompositor)
 }
 
 /// The display path for these facts, and why.
@@ -170,10 +205,22 @@ mod tests {
     fn wayland() -> Facts {
         Facts {
             requested: Override::Auto,
-            linux: true,
+            platform: Platform::Linux,
             display: Display::Wayland,
             missing_interface: None,
             supported_compositor: true,
+            gpu: Some(Ok(())),
+        }
+    }
+
+    /// What `decide` collects on Windows: no display or compositor facts.
+    fn windows() -> Facts {
+        Facts {
+            requested: Override::Auto,
+            platform: Platform::Windows,
+            display: Display::Other,
+            missing_interface: None,
+            supported_compositor: false,
             gpu: Some(Ok(())),
         }
     }
@@ -182,6 +229,38 @@ mod tests {
     fn a_wayland_session_with_a_gpu_gets_the_native_layer() {
         assert_eq!(choose(&wayland()), (Path::Native, Reason::Available));
         assert!(worth_trying_gpu(&wayland()));
+    }
+
+    /// Amendment 5a: Automatic chooses the layer on Windows, where the Linux
+    /// display and compositor facts do not apply.
+    #[test]
+    fn windows_with_a_gpu_gets_the_native_layer_automatically() {
+        assert!(worth_trying_gpu(&windows()));
+        assert_eq!(choose(&windows()), (Path::Native, Reason::Available));
+        assert_eq!(
+            choose(&Facts {
+                requested: Override::Native,
+                ..windows()
+            }),
+            (Path::Native, Reason::ForcedNative)
+        );
+    }
+
+    #[test]
+    fn windows_falls_back_to_the_canvas() {
+        let forced = Facts {
+            requested: Override::Canvas,
+            ..windows()
+        };
+        assert!(!worth_trying_gpu(&forced));
+        assert_eq!(choose(&forced), (Path::Canvas, Reason::ForcedCanvas));
+        assert_eq!(
+            choose(&Facts {
+                gpu: Some(Err(GpuFailure::NoAdapter)),
+                ..windows()
+            }),
+            (Path::Canvas, Reason::NoAdapter)
+        );
     }
 
     #[test]
@@ -196,10 +275,10 @@ mod tests {
             ),
             (
                 Facts {
-                    linux: false,
+                    platform: Platform::Other,
                     ..wayland()
                 },
-                Reason::NotLinux,
+                Reason::UnsupportedPlatform,
             ),
             (
                 Facts {
@@ -257,7 +336,7 @@ mod tests {
                 ..wayland()
             },
             Facts {
-                linux: false,
+                platform: Platform::Other,
                 ..wayland()
             },
             Facts {
@@ -395,7 +474,7 @@ pub fn get_display_path(state: tauri::State<'_, DisplayPathState>) -> DisplayPat
 pub fn decide(setting: &str) -> (Path, Reason) {
     let mut facts = Facts {
         requested: Override::from_env_or(setting),
-        linux: cfg!(target_os = "linux"),
+        platform: Platform::current(),
         display: Display::Other,
         missing_interface: None,
         supported_compositor: std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
@@ -411,11 +490,21 @@ pub fn decide(setting: &str) -> (Path, Reason) {
     (path, reason)
 }
 
+/// The wgpu backends the layer uses: Vulkan (or GL) on Wayland, DX12 for a
+/// DirectComposition visual on Windows.
+pub fn layer_backends() -> wgpu::Backends {
+    if cfg!(windows) {
+        wgpu::Backends::DX12
+    } else {
+        wgpu::Backends::VULKAN | wgpu::Backends::GL
+    }
+}
+
 /// An adapter exists. The surface itself is checked when the layer is built
 /// (spec task 3.1); a failure there falls back like a runtime failure.
 fn try_gpu() -> Result<(), GpuFailure> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+        backends: layer_backends(),
         ..Default::default()
     });
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

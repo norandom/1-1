@@ -159,13 +159,15 @@ pub fn run() {
                     .ok_or("tauri.conf.json defines no window")?
                     .clone();
                 let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
-                #[cfg(target_os = "linux")]
+                // On Windows this also makes WebView2's default background
+                // transparent, so the layer below shows (amendment 5a).
+                #[cfg(any(target_os = "linux", windows))]
                 let builder = builder.transparent(path == renderer::display_path::Path::Native);
                 builder.build()?
             };
             let frame_stores = Arc::new(renderer::frame_stores::FrameStores::default());
             let render_shared = renderer::gpu::RenderShared::new(Arc::clone(&frame_stores));
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             if path == renderer::display_path::Path::Native {
                 let started = renderer::native_layer::attach(&main_window, frame_stores.wake())
                     .and_then(|target| {
@@ -181,10 +183,16 @@ pub fn run() {
                     });
                 if let Err(error) = started {
                     log::warn!("Native layer unavailable, using the web canvas: {error}");
-                    display_path.fall_back(renderer::display_path::Reason::SurfaceFailed(error));
+                    // On Windows, building the layer is the DirectComposition part;
+                    // the GPU surface is created on the render thread.
+                    #[cfg(windows)]
+                    let reason = renderer::display_path::Reason::CompositionFailed(error);
+                    #[cfg(not(windows))]
+                    let reason = renderer::display_path::Reason::SurfaceFailed(error);
+                    display_path.fall_back(reason);
                 }
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", windows)))]
             let _ = &main_window;
             app.manage(display_path);
             // Spec rdp-keyboard-layout: follow the local layout (Wayland), or
