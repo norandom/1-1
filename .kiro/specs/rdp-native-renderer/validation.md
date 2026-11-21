@@ -16,3 +16,11 @@ For comparison, the canvas path on 21 November in normal use: main thread 15% av
 Requirement 3.2 (main thread at most 5% during remote updates) holds in this run. A first 50-second run of normal use (connect, tabs, typing) averaged 10% on the main thread: page changes such as opening a session repaint the window as before, which is expected and outside 3.2.
 
 The four-scenario reference measurement (task 7.3) was skipped by the maintainer's decision on 21 November 2026; these runs are the evidence for turning the native layer on automatically on Hyprland.
+
+## 21 November 2026: Windows, task 9.1 and the 9.2 measurement
+
+Machine: the maintainer's Windows 11 workstation, preview build of `d25ea54`, canvas path. Method and full table: [Profiling on Windows](../../../docs/profiling-windows.md).
+
+- **9.1 (Windows):** the native pointer in WebView2 passes (size, hotspot, I-beam, hidden pointer; maintainer). Idle session: whole app 2.1% of one core, main thread 0.2%, so no endless animation.
+- **9.2 (Windows):** whole app, average of 30 s: idle 2.1%, scrolling terminal 6.4%, typing with echo 27.9%, window drag 68.4% (peak 129%). WebView2's GPU process stays near 3%; the browser process (19% in the drag) and 1-1's main thread (14%) carry the frame transport (Tauri channel data fetched over the IPC custom protocol, one WebView2 resource request per message).
+- **Rule of requirement 5.3:** met for typing and the drag (more than twice the Linux native layer's about 6%). The cost is mostly the transport, not drawing. Decision pending with the maintainer.

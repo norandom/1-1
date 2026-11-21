@@ -101,6 +101,7 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
 - [ ] 9. macOS and Windows
 - [ ] 9.1 Verify the 20 November fixes there
   - Native pointer on WKWebView and WebView2: size and hotspot on HiDPI, I-beam, hidden pointer; no endless animation in a quick profile.
+  - Windows done 21 November 2026 (maintainer: pointer fine; idle 2.1% of one core, [validation](validation.md)). macOS open.
   - _Requirements: 5.1_
 - [ ] 9.2 Measure the canvas path and decide
   - `docs/profiling-macos.md` (Instruments) and `docs/profiling-windows.md` (Windows Performance Recorder) with the scenarios of 7.3. Apply the rule of requirement 5.3; record the decision and numbers. A platform that qualifies gets a spec amendment for its `NativeLayer`.
