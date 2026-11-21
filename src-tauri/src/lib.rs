@@ -146,10 +146,39 @@ pub fn run() {
             app.manage(shared_frame.clone());
 
             // Spec rdp-native-renderer: native layer or web canvas. Decided
-            // once here; only a runtime failure changes it later.
-            let main_window = app.get_webview_window("main").unwrap();
-            let (path, reason) = renderer::display_path::decide(&main_window);
-            app.manage(renderer::display_path::DisplayPathState::new(path, reason));
+            // once here, before the main window exists, because only the
+            // native path makes the window transparent; only a failure
+            // changes it later.
+            let (path, reason) = renderer::display_path::decide();
+            let display_path = renderer::display_path::DisplayPathState::new(path, reason);
+            let main_window = {
+                let config = app
+                    .config()
+                    .app
+                    .windows
+                    .first()
+                    .ok_or("tauri.conf.json defines no window")?
+                    .clone();
+                let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
+                #[cfg(target_os = "linux")]
+                let builder = builder.transparent(path == renderer::display_path::Path::Native);
+                builder.build()?
+            };
+            #[cfg(target_os = "linux")]
+            if path == renderer::display_path::Path::Native {
+                let wake = Arc::new(renderer::native_layer::Wake::default());
+                match renderer::native_layer::attach(&main_window, wake) {
+                    // The render thread takes the target in spec task 4.1.
+                    Ok(_target) => {}
+                    Err(error) => {
+                        log::warn!("Native layer unavailable, using the web canvas: {error}");
+                        display_path.fall_back(renderer::display_path::Reason::SurfaceFailed(error));
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = &main_window;
+            app.manage(display_path);
             app.manage(renderer::frame_stores::FrameStores::default());
 
             // The web view's canvas draws remote frames from IPC. The native

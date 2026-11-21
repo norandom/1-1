@@ -124,6 +124,9 @@ gtk = "0.18"
 gdkwayland-sys = "0.18"
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
+# wp_fractional_scale_v1 (staging) and wp_viewporter: exact pixels at 1.6.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+webkit2gtk = "2.0"
 
 [target.'cfg(windows)'.dependencies]
 # The shell's IFileOpenDialog with FOS_PICKFOLDERS supplies the native folder picker;

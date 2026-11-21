@@ -22,19 +22,20 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - _Requirements: 1.3, 1.6, 3.1_
   - Done 21 November 2026. `SharedFrame` keeps its buffer authoritative and tracks damage (`take_damage`, `take_full`); this also fixes the pinned defect B3-10, where `publish()` swapped the buffer and lost earlier rects. `renderer/frame_stores.rs` registers each native session's store weakly. On the native path `present_image_update` writes only the store; `SessionCommand::UseCanvas` switches a session to the canvas with one full frame (also accepted while connecting or reconnecting). Session tests now run the canvas path by default, with native twins for the store checks and a switch test. The stall check for the native path moves to 4.2, since it needs the render thread. The old opt-in renderer (`ONE_ONE_NATIVE_RENDERER`) is no longer fed until 4.1 replaces it.
 
-- [ ] 3. The Wayland layer
-- [ ] 3.1 `NativeLayer` below the web view
+- [x] 3. The Wayland layer
+- [x] 3.1 `NativeLayer` below the web view
   - From the probe: GDK's `wl_display` and `wl_surface`, a desynchronized subsurface placed below, empty input region, full opaque region, buffer scale from GDK. Covers the web view: origin from `translate_coordinates`, size from the web view's `size-allocate`, `queue_draw` after each position change. Thread-local on GTK's main thread.
   - _Depends: 1.2_
   - _Requirements: 1.1, 2.2, 2.6_
-- [ ] 3.2 Transparent window only on the native path
+- [x] 3.2 Transparent window only on the native path
   - Create the main window with `WebviewWindowBuilder` in `setup` (from today's `tauri.conf.json` settings), `transparent(true)` only when the path is native. Check that Windows, macOS and the Linux canvas path create the same window as before.
   - _Depends: 1.2_
   - _Requirements: 1.2, 1.6_
-- [ ] 3.3 Fractional scale where offered
+- [x] 3.3 Fractional scale where offered
   - With `wp_fractional_scale_v1` and `wp_viewporter`: render at the exact fractional size, viewport destination at the logical size. Without them: integer buffer scale.
   - _Depends: 3.1_
   - _Requirements: 2.3_
+  - Done 21 November 2026 (`renderer/native_layer.rs`). The layer follows the web view through `size-allocate`, the window's `scale-factor` and a 500 ms check, and hands the render thread its raw handles, geometry and a `Wake` signal. The path is now decided before the main window exists (`tauri.conf.json` sets `"create": false`; `setup` builds the window from the same config, transparent only on the Linux native path). A layer that cannot be built records `SurfaceFailed` and keeps the canvas. Checked on the reference machine with an isolated test copy (own D-Bus session and data folder): the window opens on both paths, the native one is pixel-identical while the page is still opaque, and Hyprland offers fractional scaling. Windows and macOS window creation is checked by CI and in 9.1.
 
 - [ ] 4. The render thread
 - [ ] 4.1 Persistent texture, damage uploads, draw with rectangles

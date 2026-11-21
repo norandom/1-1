@@ -5141,6 +5141,8 @@ dependencies = [
  "uuid",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols",
+ "webkit2gtk",
  "wgpu",
  "windows 0.62.2",
  "x509-cert",

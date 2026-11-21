@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "1-1",
+        "create": false,
         "width": 1200,
         "height": 800,
         "minWidth": 900,

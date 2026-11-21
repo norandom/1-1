@@ -62,11 +62,6 @@ pub enum Display {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GpuFailure {
     NoAdapter,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built by the layer setup, spec task 3.1")
-    )]
-    Surface(String),
 }
 
 /// What startup learned. `gpu` is `None` while the GPU has not been tried,
@@ -156,9 +151,6 @@ pub fn choose(facts: &Facts) -> (Path, Reason) {
         Some(Ok(())) if facts.requested == Override::Native => (Path::Native, Reason::ForcedNative),
         Some(Ok(())) => (Path::Native, Reason::Available),
         Some(Err(GpuFailure::NoAdapter)) => (Path::Canvas, Reason::NoAdapter),
-        Some(Err(GpuFailure::Surface(error))) => {
-            (Path::Canvas, Reason::SurfaceFailed(error.clone()))
-        }
         None => (
             Path::Canvas,
             Reason::SurfaceFailed("the GPU was not tried".into()),
@@ -238,13 +230,6 @@ mod tests {
                     ..wayland()
                 },
                 Reason::NoAdapter,
-            ),
-            (
-                Facts {
-                    gpu: Some(Err(GpuFailure::Surface("no format".into()))),
-                    ..wayland()
-                },
-                Reason::SurfaceFailed("no format".into()),
             ),
             (
                 Facts {
@@ -366,6 +351,12 @@ impl DisplayPathState {
     pub fn path(&self) -> Path {
         self.0.lock().unwrap().0
     }
+
+    /// Records a fallback after startup (the layer could not be built, or
+    /// failed while running).
+    pub fn fall_back(&self, reason: Reason) {
+        *self.0.lock().unwrap() = (Path::Canvas, reason);
+    }
 }
 
 #[tauri::command]
@@ -373,8 +364,9 @@ pub fn get_display_path(state: tauri::State<'_, DisplayPathState>) -> DisplayPat
     state.info()
 }
 
-/// Collects the startup facts for the main window and chooses the path.
-pub fn decide(window: &tauri::WebviewWindow) -> (Path, Reason) {
+/// Collects the startup facts and chooses the path. Runs before the main
+/// window exists: the window is transparent only on the native path.
+pub fn decide() -> (Path, Reason) {
     let mut facts = Facts {
         requested: Override::from_env(),
         linux: cfg!(target_os = "linux"),
@@ -384,9 +376,7 @@ pub fn decide(window: &tauri::WebviewWindow) -> (Path, Reason) {
         gpu: None,
     };
     #[cfg(target_os = "linux")]
-    linux::collect(window, &mut facts);
-    #[cfg(not(target_os = "linux"))]
-    let _ = window;
+    linux::collect(&mut facts);
     if worth_trying_gpu(&facts) {
         facts.gpu = Some(try_gpu());
     }
@@ -436,11 +426,10 @@ mod linux {
         }
     }
 
-    pub(super) fn collect(window: &tauri::WebviewWindow, facts: &mut Facts) {
-        let Ok(gtk_window) = window.gtk_window() else {
+    pub(super) fn collect(facts: &mut Facts) {
+        let Some(display) = gtk::gdk::Display::default() else {
             return;
         };
-        let display = gtk_window.display();
         let kind = display.type_().name();
         facts.display = if kind.contains("Wayland") {
             Display::Wayland
