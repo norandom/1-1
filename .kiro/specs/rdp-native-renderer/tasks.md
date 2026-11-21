@@ -88,14 +88,15 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - Replaced 21 November 2026 by the maintainer's decision: GNOME, KDE and X11 are not supported and not tested; the reference machine is the test environment. Automatic mode chooses the native layer only on Hyprland (`Reason::UntestedCompositor` elsewhere, override with `ONE_ONE_RENDERER=native`); X11 and XWayland already keep the canvas.
   - _Requirements: 1.1, 1.2, 6.2_
 
-- [ ] 8. Leave room for H.264
-- [ ] 8.1 `FrameSource` with a YUV input
+- [x] 8. Leave room for H.264
+- [x] 8.1 `FrameSource` with a YUV input
   - `FrameSource::{Rgba, Yuv420}`; NV12 and I420 planes as R8 and RG8 textures, a conversion shader (BT.709 limited, full range optional). Unit test with a synthetic frame against the CPU conversion. No session produces `Yuv420`.
   - _Depends: 4.1_
   - _Requirements: 7.1, 7.3_
-- [ ] 8.2 Record the zero-copy route
+- [x] 8.2 Record the zero-copy route
   - Note in the H.264 spike branch: VA-API `vaExportSurfaceHandle`, Vulkan DMA-BUF import extensions, `wgpu-hal` `texture_from_raw` and `create_texture_from_hal`, and what wgpu version changes would simplify it.
   - _Requirements: 7.2_
+  - Done 21 November 2026. 8.1: `renderer/yuv.rs` and `yuv_convert.wgsl`: `FrameSource::{Rgba, Yuv420}`, I420 and NV12, two matrices. Correction to the design: MS-RDPEGFX AVC420 is full-range BT.709 ([MS-RDPEGFX] 3.3.8.3.1, as `ironrdp-egfx` implements it), not limited range; the converter uses that fixed-point transform and rounds down, and limited-range BT.601 for MS-RDPEVOR video. Tests: the CPU reference equals `ironrdp_egfx::decode::Yuv420Frame::to_rgba` exactly; NV12 equals I420; on the reference machine's GPU the shader equals the reference exactly for BT.709 and within one level for BT.601 (the GPU test skips on machines without an adapter). The render thread has one entry, `upload_source`, for both inputs; sessions still only send RGBA. 8.2: `probes/gst-h264-decode/ZERO-COPY.md` on `spike/h264-hw-decode` (`b27d9d8`).
 
 - [ ] 9. macOS and Windows
 - [ ] 9.1 Verify the 20 November fixes there

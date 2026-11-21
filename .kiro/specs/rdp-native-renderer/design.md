@@ -89,7 +89,7 @@ Both platforms keep `display_path`, `FrameSink`, the render thread and the front
 The render thread's input is a `FrameSource` enum rather than RGBA only (requirement 7.1):
 
 - `Rgba { damage }`: today's ClearCodec path, reading from `SharedFrame`.
-- `Yuv420 { format: Nv12 | I420, planes }`: planes uploaded as R8 and RG8 textures and converted by a second fragment shader (BT.709, limited range, with full range as an option). Defined and unit-tested with a synthetic frame against the CPU conversion in `ironrdp-graphics`; no session produces it until H.264 ships (requirement 7.3).
+- `Yuv420 { format: Nv12 | I420, planes }`: planes uploaded as R8 and RG8 textures and converted by a second fragment shader: full-range BT.709 in the fixed-point form of [MS-RDPEGFX] 3.3.8.3.1 for AVC420 (corrected 21 November 2026; the first draft said limited range), limited-range BT.601 for MS-RDPEVOR video. Defined and unit-tested with a synthetic frame against the CPU conversion in `ironrdp-graphics`; no session produces it until H.264 ships (requirement 7.3).
 
 Zero-copy import (requirement 7.2): VA-API exports a decoded surface as a DMA-BUF (`vaExportSurfaceHandle`). Importing it needs Vulkan's `VK_EXT_external_memory_dma_buf` and `VK_EXT_image_drm_format_modifier`. wgpu 24 has no public import API; the route is `wgpu-hal`'s Vulkan `Device::texture_from_raw` with an image created through `ash`, wrapped by `wgpu::Device::create_texture_from_hal`. That code belongs to the H.264 spec; this design only keeps the texture path open for it.
 

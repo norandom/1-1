@@ -17,6 +17,7 @@ use serde::Deserialize;
 use super::frame_stores::FrameStores;
 use super::native_layer::{Geometry, LayerTarget, Wake};
 use super::shared_frame::Damage;
+use super::yuv::{FrameSource, YuvConverter};
 
 /// A rectangle in floating point (CSS pixels or remote pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Default, Deserialize)]
@@ -192,6 +193,9 @@ struct Renderer {
     linear: wgpu::Sampler,
     uniforms: wgpu::Buffer,
     picture: Option<Picture>,
+    /// Created on the first YUV frame (H.264, not yet produced).
+    #[allow(dead_code, reason = "read once H.264 ships")]
+    yuv: Option<YuvConverter>,
     configured: Geometry,
     shown: Option<String>,
 }
@@ -348,6 +352,7 @@ impl Renderer {
             linear,
             uniforms,
             picture: None,
+            yuv: None,
             configured: Geometry::default(),
             shown: None,
         })
@@ -448,6 +453,32 @@ impl Renderer {
         self.configured = geometry;
     }
 
+    /// One entry for both inputs (requirement 7.1): RGBA damage, or a whole
+    /// YUV picture converted on the GPU into the same texture.
+    #[allow(
+        dead_code,
+        reason = "the RGBA path calls upload directly until H.264 ships"
+    )]
+    fn upload_source(&mut self, source: FrameSource) {
+        match source {
+            FrameSource::Rgba(damage) => self.upload(&damage),
+            FrameSource::Yuv420(frame) => {
+                let size = (frame.width, frame.height);
+                if size.0 == 0 || size.1 == 0 {
+                    return;
+                }
+                if self.picture.as_ref().is_none_or(|p| p.size != size) {
+                    self.picture = Some(self.create_picture(size));
+                }
+                let converter = self.yuv.get_or_insert_with(|| {
+                    YuvConverter::new(&self.device, wgpu::TextureFormat::Rgba8Unorm)
+                });
+                let picture = self.picture.as_ref().expect("created above");
+                converter.convert(&self.device, &self.queue, &frame, &picture.texture);
+            }
+        }
+    }
+
     /// Writes damaged pixels into the texture, recreating it for a full
     /// frame at a new size.
     fn upload(&mut self, damage: &Damage) {
@@ -499,7 +530,10 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            // RENDER_ATTACHMENT: the YUV converter renders into it.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
