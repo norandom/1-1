@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; font: 14px sans-serif; color: #eee; overflow: hidden; }
+  body { display: grid; grid-template-rows: 48px 1fr 32px; }
+  header, footer { background: #1d1f2b; display: flex; align-items: center; padding: 0 12px; gap: 16px; }
+  /* The hole: nothing is painted here, the GPU layer below shows through. */
+  #hole { position: relative; background: transparent; }
+  #hole canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  /* A floating control above the GPU layer, like 1-1's session toolbar. */
+  #overlay { position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+             background: rgba(29, 31, 43, 0.85); border-radius: 10px; padding: 8px 14px; }
+  button { font: inherit; }
+</style>
+</head>
+<body>
+  <header><b>native subsurface probe</b><span id="mode"></span><button id="poke">repaint UI</button></header>
+  <div id="hole"><div id="overlay">overlay above the remote desktop · <span id="clock"></span></div></div>
+  <footer><span id="stats">…</span></footer>
+<script>
+const { invoke } = window.__TAURI__.core;
+const hole = document.getElementById('hole');
+let mode = 'subsurface';
+
+function reportHole() {
+  const r = hole.getBoundingClientRect();
+  invoke('hole', { x: r.left, y: r.top, width: r.width, height: r.height }).catch(console.error);
+}
+new ResizeObserver(reportHole).observe(hole);
+
+// Repainting a UI element once a second, as a status bar would.
+setInterval(() => { document.getElementById('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
+document.getElementById('poke').onclick = () => { document.body.style.outline = document.body.style.outline ? '' : '1px solid #444'; };
+
+// Canvas mode: today's path, a full-size putImageData per frame.
+function startCanvas() {
+  const canvas = document.createElement('canvas');
+  hole.prepend(canvas);
+  const ctx = canvas.getContext('2d');
+  let image = null, frames = 0, offset = 0;
+  const resize = () => {
+    const r = hole.getBoundingClientRect(), dpr = window.devicePixelRatio;
+    canvas.width = Math.round(r.width * dpr); canvas.height = Math.round(r.height * dpr);
+    image = ctx.createImageData(canvas.width, canvas.height);
+    const d = image.data;
+    for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
+      const i = (y * canvas.width + x) * 4;
+      d[i] = (x * 255 / canvas.width) | 0; d[i + 1] = (y * 255 / canvas.height) | 0; d[i + 2] = ((x >> 5) & 1) * 200; d[i + 3] = 255;
+    }
+  };
+  new ResizeObserver(resize).observe(hole);
+  resize();
+  const draw = () => {
+    offset = (offset + 8) % canvas.width;
+    ctx.putImageData(image, offset, 0);
+    ctx.putImageData(image, offset - canvas.width, 0);
+    frames++;
+    requestAnimationFrame(draw);
+  };
+  requestAnimationFrame(draw);
+  setInterval(() => {
+    document.getElementById('stats').textContent = `canvas ${canvas.width}x${canvas.height} · ${frames} fps`;
+    invoke('fps', { source: 'canvas', fps: frames }).catch(() => {});
+    frames = 0;
+  }, 1000);
+}
+
+invoke('mode').then((m) => {
+  mode = m;
+  document.getElementById('mode').textContent = `mode: ${m}`;
+  if (m === 'canvas') startCanvas();
+  else document.getElementById('stats').textContent = 'GPU layer below the page (see terminal for fps)';
+});
+</script>
+</body>
+</html>
