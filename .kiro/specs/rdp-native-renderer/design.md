@@ -80,9 +80,30 @@ The 20 November fixes are shared code (no endless animations, native pointer as 
 2. **Measure** with the same scenarios as requirement 6.2: Instruments (Time Profiler, plus the WebContent process) on the MacBook, and Windows Performance Recorder with the CPU and GPU profiles on the Windows workstation. Steps go into `docs/profiling-macos.md` and `docs/profiling-windows.md`.
 3. **Decide** per platform against the rule in requirement 5.3. Sketches if a platform qualifies, for its own spec amendment:
    - **macOS:** a `CAMetalLayer` added below the WKWebView's layer in the window's content view, with `drawsBackground` off on the web view; wgpu renders to it through its Metal backend.
-   - **Windows:** WebView2 in windowed mode (what wry uses) draws into a child HWND that cannot show content behind it. The option is the composition-hosting controller (`CoreWebView2CompositionController`) with a DirectComposition tree: our swap chain visual below the web view's visual. wry does not expose this, so this is the largest step of the three platforms.
+   - **Windows:** superseded by the measured design below (the earlier sketch assumed WebView2's windowed child could not show content behind it, so it called for the composition controller that wry does not expose; the probe showed otherwise).
 
 Both platforms keep `display_path`, `FrameSink`, the render thread and the frontend contract; only `NativeLayer` is platform-specific.
+
+### Windows native layer (amendment of 21 November 2026, approved by the maintainer; requirement 5a)
+
+Probe: [`probes/windows-dcomp`](../../../probes/windows-dcomp/results-2026-11-21.md). A DirectComposition target created on the main window with `topmost = false` is composed by DWM **below** the window's child windows, and WebView2's windowed controller is a child window. With the window transparent, the page's transparent area shows the target's visual, and page overlays draw above it. No wry fork and no composition controller.
+
+**`NativeLayer` splits by platform.** `renderer/native_layer.rs` keeps the shared contract (create, resize, hide, release, the view state) and gains `native_layer/dcomp.rs` beside the Wayland code.
+
+- **Objects.** `DCompositionCreateDevice2(None)` gives an `IDCompositionDesktopDevice`; `CreateTargetForHwnd(main window, false)` the target; one visual is the target's root. wgpu creates its DX12 surface from that visual (`SurfaceTargetUnsafe::CompositionVisual`), which makes a composition swap chain and calls `SetContent`. wgpu never calls `Commit`; the layer does.
+- **Covers the whole client area**, as on Linux: the visual sits at (0, 0) and takes the client size, the render thread clears to the app's background and draws the session into the destination rectangle. Scrolling (native mode) and the session's position are therefore draw parameters, not visual offsets, and a page element left transparent by mistake shows the background color, not the desktop.
+- **Threading.** DirectComposition objects are not thread-safe. Every call that touches them (wgpu's `configure`, which calls `SetContent`, and `Commit`) runs under one lock owned by the layer. The render thread does resize work itself: on a new client size it reconfigures and commits under that lock, so the main thread only creates and drops the layer. The client size comes from Tauri's `Resized` window event (physical pixels), stored in the view state that wakes the render thread.
+- **Scale.** The swap chain is sized in physical pixels; destination rectangles from the page (CSS pixels) are multiplied by the window's current scale factor, updated on `ScaleFactorChanged`. A window moved to a monitor with another scale therefore re-renders at that scale (requirement 5a.3).
+- **Hidden and minimized.** A minimized window (client size 0 or `IsIconic`) and a `null` view stop presenting; nothing waits on FIFO meanwhile (requirement 4.4).
+- **Errors.** `Lost`/`Outdated` reconfigure under the lock; device removal or three failures in a row report `RuntimeFailure`, and the app switches every session to the canvas exactly as on Linux. `ONE_ONE_RENDERER_FAIL_AFTER` works the same.
+
+**`display_path` on Windows.** New facts: the platform is Windows, a DirectComposition device and target could be created for the main window, and a DX12 adapter is compatible with the visual's surface. New reasons: `CompositionFailed(text)` for the device or target, and the existing `NoAdapter` and `SurfaceFailed`. Automatic chooses the layer on Windows; Settings and `ONE_ONE_RENDERER` override it as on Linux. The decision stays a pure function with tests for every branch.
+
+**Window and page.** The window becomes transparent only on the native path, through the same `WebviewWindowBuilder` code as on Linux; on Windows that also makes WebView2's default background transparent. The frontend contract is unchanged (`native-layer` class, `native_view` reports): WebView2 and WebKitGTK get the same CSS.
+
+**What does not change on Windows.** Frames still go to `SharedFrame` and bypass `FrameDelivery`, so the Tauri channel and its WebView2 resource requests leave the frame path (the browser-process and main-thread share in the [measurement](../../../docs/profiling-windows.md)). Input still goes through IPC; batching key events is separate work.
+
+**Risks.** A transparent top-level window on Windows 11 keeps its frame and shadow in the probe, but snap layouts and Mica are untested. Some GPU drivers handle composition swap chains poorly on hybrid laptops; the fallback covers creation and runtime failures, not a slow present, so the measurement task checks frame pacing as well as CPU.
 
 ## Leaving room for H.264
 

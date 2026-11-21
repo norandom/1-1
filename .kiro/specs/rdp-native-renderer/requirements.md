@@ -57,6 +57,15 @@ The maintainer approved these requirements on 21 November 2026. This spec brings
 3. If that measurement shows the canvas path costs at least twice the CPU of the probe's native layer, or delays input noticeably, the spec shall be extended for that platform: a Metal layer below a transparent WKWebView on macOS, a DirectComposition visual below a transparent WebView2 on Windows. The choice and fallback rules of requirement 1 shall apply there too.
 4. If the measurement shows no such cost, the platform shall keep the canvas, and the measurement shall be recorded as the reason.
 
+### 5a. Windows: the native layer (amendment of 21 November 2026, approved by the maintainer)
+
+The Windows measurement ([profiling](../../../docs/profiling-windows.md)) met the rule of 5.3: typing costs 28% and a window drag 68% of one core on the canvas path, and the [DirectComposition probe](../../../probes/windows-dcomp/results-2026-11-21.md) drew the same full-frame stream for 9.9% where the canvas took 44%, before any IPC. CPU was measured with `scripts/windows/Measure-AppCpu.ps1` (per-process and main-thread processor time); Windows Performance Recorder is documented for call stacks but was not needed for the decision.
+
+1. When 1-1 starts on Windows and the layer can be created (a DX12 adapter, a DirectComposition device and target for the main window), 1-1 shall show the remote picture through a GPU layer below the web view, with the web view transparent over the session area. Automatic chooses the layer on Windows.
+2. Requirements 1.2 to 1.6, 2, 3.1, 3.5, 4 and 6.3 to 6.4 shall apply on Windows as on Linux: every failure to create the layer falls back to the canvas without a dialog, a runtime failure switches all sessions to the canvas without reconnecting, overlays stay above the picture, input stays with the web view, and a hidden session or a minimized window presents nothing.
+3. On displays with a scale other than 100%, and when the window moves between monitors with different scales, the picture shall be at least as sharp as the canvas path.
+4. The reference measurement of 6.2 shall be repeated on the maintainer's Windows workstation for both paths. Targets: main thread at most 5% during remote updates, and the whole app at most half of the canvas path for the same activity.
+
 ### 6. Measurement and regression guard
 
 1. The profiling tools for Linux (`scripts/linux/profile.sh`) and the equivalent steps for macOS and Windows shall be documented in `docs/`, so that each measurement can be repeated.

@@ -107,3 +107,27 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - `docs/profiling-macos.md` (Instruments) and `docs/profiling-windows.md` (Windows Performance Recorder) with the scenarios of 7.3. Apply the rule of requirement 5.3; record the decision and numbers. A platform that qualifies gets a spec amendment for its `NativeLayer`.
   - _Depends: 7.3, 9.1_
   - _Requirements: 5.2, 5.3, 5.4, 6.1_
+  - Windows done 21 November 2026: [profiling-windows.md](../../../docs/profiling-windows.md), rule met, maintainer chose the native layer; probe and amendment 5a below. macOS open.
+
+## Windows native layer (amendment 5a, approved 21 November 2026)
+
+- [ ] 10. Windows native layer
+- [ ] 10.1 Choose the path on Windows
+  - `display_path`: Windows facts (DirectComposition device and target, DX12 adapter for the visual's surface), the reason `CompositionFailed(text)`, Automatic chooses the layer on Windows. Unit tests for every branch without a GPU; the Settings text names the Windows path.
+  - _Requirements: 5a.1, 1.2, 1.4, 1.5, 6.4_
+- [ ] 10.2 The DirectComposition layer
+  - `renderer/native_layer/dcomp.rs`: device, non-topmost target on the main window, root visual, wgpu DX12 surface from it; the DirectComposition lock around `configure` and `Commit`; client size from `Resized`, scale from `ScaleFactorChanged`; release with the window. The window becomes transparent on this path through the existing builder code.
+  - _Depends: 10.1_
+  - _Requirements: 5a.1, 5a.3, 4.3_
+- [ ] 10.3 The render thread on Windows
+  - Reuse `renderer/gpu.rs` (persistent texture, damage uploads, the quad with source and destination rectangles, present only on change). Reconfigure and commit under the lock on a size change; stop presenting when minimized or without a view; `Lost`/`Outdated`, device removal and three failures in a row as on Linux, `ONE_ONE_RENDERER_FAIL_AFTER` included.
+  - _Depends: 10.2_
+  - _Requirements: 5a.2, 1.3, 3.1, 3.5, 4.4_
+- [ ] 10.4 Verify on the Windows workstation
+  - With the maintainer: picture, overlays, dialogs and HUD above it; tabs, dashboard, reconnect and error screens; fit and native mode with scrolling; window resize, maximize, snap, minimize; a move between monitors of different scale (or a scale change in Settings); several sessions; runtime fallback with `ONE_ONE_RENDERER_FAIL_AFTER`. Record in `validation.md`.
+  - _Depends: 10.3_
+  - _Requirements: 5a.2, 5a.3, 2.1–2.7, 4.1–4.4_
+- [ ] 10.5 Measure both paths
+  - `scripts/windows/Measure-AppCpu.ps1`, 30 s per scenario and path (idle, scrolling terminal, typing with echo, window drag), plus the HUD's frame rate. Targets of 5a.4; record in `validation.md` and `docs/profiling-windows.md`.
+  - _Depends: 10.4_
+  - _Requirements: 5a.4, 6.2_
