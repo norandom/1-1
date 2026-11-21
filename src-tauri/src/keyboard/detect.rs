@@ -401,10 +401,16 @@ mod platform {
 mod platform {
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW,
+        RegGetValueW, RegOpenKeyExW,
+    };
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
+    use windows::core::{PCWSTR, PWSTR, w};
 
-    use super::super::klid::{self, Match};
+    use super::super::klid;
     use super::LocalLayout;
 
     static UI_THREAD: AtomicU32 = AtomicU32::new(0);
@@ -414,27 +420,92 @@ mod platform {
         UI_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
     }
 
-    /// The UI thread's input locale. Its low word is the language; a high
-    /// word equal to it is that language's default layout (an exact KLID),
-    /// anything else a variant, reported as the language's layout.
+    /// The UI thread's keyboard layout: the high word of its input locale
+    /// (`klid::klid_from_hkl`), not the input language in the low word.
     pub fn detect_now() -> Option<LocalLayout> {
         // SAFETY: GetKeyboardLayout only reads the thread's input locale.
         let hkl = unsafe { GetKeyboardLayout(UI_THREAD.load(Ordering::Relaxed)) };
-        let value = hkl.0 as usize as u32;
-        let (language, device) = (value & 0xFFFF, value >> 16);
-        if language == 0 {
-            return None;
-        }
-        let (layout, _) = klid::from_windows_name(&format!("{language:08X}"))?;
+        let klid = klid::klid_from_hkl(hkl.0 as usize as u32, variant_klid)?;
+        let (layout, matched) = klid::from_windows_klid(klid);
         Some(LocalLayout {
             display_name: layout.name.to_string(),
             windows: Some(layout),
-            matched: Some(if device == language {
-                Match::Exact
-            } else {
-                Match::Closest
-            }),
+            matched: Some(matched),
         })
+    }
+
+    /// The KLID of a variant layout: the subkey of `Keyboard Layouts` whose
+    /// "Layout Id" value is `id` (for example "0002" for US Dvorak).
+    fn variant_klid(id: u16) -> Option<u32> {
+        let mut key = HKEY::default();
+        // SAFETY: a read-only open of a fixed path; the handle is closed below.
+        let opened = unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                w!(r"SYSTEM\CurrentControlSet\Control\Keyboard Layouts"),
+                None,
+                KEY_READ,
+                &mut key,
+            )
+        };
+        if opened != ERROR_SUCCESS {
+            return None;
+        }
+        let mut found = None;
+        for index in 0.. {
+            let mut name = [0u16; 16];
+            let mut len = name.len() as u32;
+            // SAFETY: `name` and `len` describe a writable buffer.
+            let status = unsafe {
+                RegEnumKeyExW(
+                    key,
+                    index,
+                    Some(PWSTR(name.as_mut_ptr())),
+                    &mut len,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
+            if status == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if status != ERROR_SUCCESS {
+                continue;
+            }
+            let mut value = [0u16; 8];
+            let mut size = std::mem::size_of_val(&value) as u32;
+            // SAFETY: `name` is NUL-terminated by RegEnumKeyExW; `value` and
+            // `size` describe a writable buffer.
+            let read = unsafe {
+                RegGetValueW(
+                    key,
+                    PCWSTR(name.as_ptr()),
+                    w!("Layout Id"),
+                    RRF_RT_REG_SZ,
+                    None,
+                    Some(value.as_mut_ptr().cast()),
+                    Some(&mut size),
+                )
+            };
+            if read != ERROR_SUCCESS {
+                continue;
+            }
+            let text = |chars: &[u16]| {
+                let end = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
+                String::from_utf16_lossy(&chars[..end])
+            };
+            if u16::from_str_radix(text(&value).trim(), 16) == Ok(id) {
+                found = u32::from_str_radix(&text(&name[..len as usize]), 16).ok();
+                break;
+            }
+        }
+        // SAFETY: `key` was opened above.
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+        found
     }
 }
 

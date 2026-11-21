@@ -167,14 +167,34 @@ pub fn from_mac_source(id: &str) -> Option<(Layout, Match)> {
         .map(|layout| (layout, Match::Closest))
 }
 
-/// A Windows KLID string as `GetKeyboardLayoutNameW` returns it
-/// (`"00000407"`).
+/// The keyboard layout ID in a Windows input locale handle (HKL).
+///
+/// The handle's high word is the layout, its low word the input language,
+/// and the two differ often: English (Germany) typing on the German layout
+/// is `0x0407_2000`, where `0x2000` is a placeholder for a language without
+/// its own ID. A high word `0xFnnn` is a variant (German IBM, Dvorak) whose
+/// KLID the registry names by "Layout Id" `nnn`; `variant` looks it up.
 #[cfg_attr(not(windows), allow(dead_code, reason = "Windows detection"))]
-pub fn from_windows_name(name: &str) -> Option<(Layout, Match)> {
-    let klid = u32::from_str_radix(name.trim(), 16).ok()?;
-    Some(match by_klid(klid) {
-        Some(layout) => (layout, Match::Exact),
-        // A layout 1-1 has no name for is still reported as it is.
+pub fn klid_from_hkl(hkl: u32, variant: impl FnOnce(u16) -> Option<u32>) -> Option<u32> {
+    let device = (hkl >> 16) as u16;
+    match device {
+        0 => None,
+        _ if device & 0xF000 == 0xF000 => variant(device & 0x0FFF),
+        _ => Some(u32::from(device)),
+    }
+}
+
+/// A Windows layout ID as Windows reports it. A layout 1-1 does not know
+/// whose language it does know (a third-party layout such as German (Magic
+/// Utilities), `A0010407`, which servers lack) is reported as that
+/// language's base layout, a closest match. Anything else goes as it is.
+#[cfg_attr(not(windows), allow(dead_code, reason = "Windows detection"))]
+pub fn from_windows_klid(klid: u32) -> (Layout, Match) {
+    if let Some(layout) = by_klid(klid) {
+        return (layout, Match::Exact);
+    }
+    match by_klid(klid & 0xFFFF) {
+        Some(base) => (base, Match::Closest),
         None => (
             Layout {
                 klid,
@@ -183,7 +203,7 @@ pub fn from_windows_name(name: &str) -> Option<(Layout, Match)> {
             },
             Match::Exact,
         ),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -239,14 +259,35 @@ mod tests {
     }
 
     #[test]
-    fn windows_names_are_exact() {
+    fn windows_layouts_are_exact() {
         assert_eq!(
-            from_windows_name("00000407").unwrap(),
+            from_windows_klid(0x407),
             (by_klid(0x407).unwrap(), Match::Exact)
         );
-        let unknown = from_windows_name("0000042F").unwrap();
+        let unknown = from_windows_klid(0x42F);
         assert_eq!((unknown.0.klid, unknown.1), (0x42F, Match::Exact));
-        assert_eq!(from_windows_name("not hex"), None);
+        // German (Magic Utilities), on the maintainer's workstation.
+        assert_eq!(
+            from_windows_klid(0xA001_0407),
+            (by_klid(0x407).unwrap(), Match::Closest)
+        );
+    }
+
+    #[test]
+    fn the_layout_is_the_high_word_of_the_input_locale() {
+        let no_variant = |_| panic!("not a variant");
+        // German layout, German language.
+        assert_eq!(klid_from_hkl(0x0407_0407, no_variant), Some(0x407));
+        // English (Germany): a placeholder language with the German layout,
+        // as on the maintainer's workstation. The language is not the layout.
+        assert_eq!(klid_from_hkl(0x0407_2000, no_variant), Some(0x407));
+        // English (US) language typing on the German layout.
+        assert_eq!(klid_from_hkl(0x0407_0409, no_variant), Some(0x407));
+        // A variant: the registry's "Layout Id" names its KLID.
+        let dvorak = |id| (id == 0x002).then_some(0x0001_0409);
+        assert_eq!(klid_from_hkl(0xF002_0409, dvorak), Some(0x0001_0409));
+        assert_eq!(klid_from_hkl(0xF0FF_0409, dvorak), None);
+        assert_eq!(klid_from_hkl(0x0000_0409, no_variant), None);
     }
 
     #[test]
