@@ -1,6 +1,8 @@
 # 1-1 maintainer handover
 
-**21 November 2026.** The native renderer works and is the default on Hyprland. Master is 21 commits ahead of `origin` (`ec5fead`..`8c7929a`, plus this handover update), unreleased and not pushed; `spike/h264-hw-decode` (`b27d9d8`) is local too. Remote screens on Linux now draw through a GPU layer below the web view: with the remote screen changing, the main thread averages about 1.5% instead of 15% (peaks 66%), and the whole app about 6% of one core. Also new today: the Renderer setting, an automatic fallback to the canvas, the end of WebKit's crash at quit, YUV input ready for H.264, and a measurement that rejected LTO. Next: spec group 9 (macOS and Windows) needs the MacBook and the Windows workstation; then pushing and a release.
+**21 November 2026, afternoon.** Master is pushed (`ef27194`), CI green on Linux, Windows and macOS, no release. New since the morning: the keyboard layout feature (spec `rdp-keyboard-layout`, verified by the maintainer against Windows) and a slower, smarter remote resize (1 s, and none for a panel that slides in and out). **Next: a session on the Windows workstation** (see "Where to resume", item 0).
+
+**21 November 2026.** The native renderer works and is the default on Hyprland. Pushed on 21 November (`2763812`), unreleased; `spike/h264-hw-decode` (`b27d9d8`) is local too. Remote screens on Linux now draw through a GPU layer below the web view: with the remote screen changing, the main thread averages about 1.5% instead of 15% (peaks 66%), and the whole app about 6% of one core. Also new today: the Renderer setting, an automatic fallback to the canvas, the end of WebKit's crash at quit, YUV input ready for H.264, and a measurement that rejected LTO. Next: spec group 9 (macOS and Windows) needs the MacBook and the Windows workstation; then pushing and a release.
 
 **20 November 2026.** Five commits on master since beta.1, unreleased and not pushed (`ec5fead`..`0104322`): folder sharing from the Linux and macOS builds (tasks 7.1–7.4), Esc goes to the remote, the Linux CPU and pointer fixes, the Linux profiler, and the rdp-terminal-graphics spec. H.264 is parked on the local branch `spike/h264-hw-decode` (not pushed). Next, agreed with the maintainer: a spike for the native renderer on Linux (see "Where to resume"). The Nix flake and APT repository from 19 November are still open.
 
@@ -33,6 +35,23 @@
 
 ## Where to resume
 
+0. **Next: the Windows workstation (agreed 21 November).** Build with `pwsh -NoProfile -File scripts/Invoke-WindowsPreview.ps1` (see "CI and local builds"). Check, in this order:
+   - **Native renderer group 9, Windows part** ([tasks](specs/rdp-native-renderer/tasks.md), 9.1 and 9.2):
+     - The native pointer in WebView2: the remote pointer's size and hotspot on a HiDPI display, the I-beam's inverted pixels (checker pattern), and a hidden pointer.
+     - No endless animation: CPU near zero with an idle session in Task Manager.
+     - Measure the canvas path with Windows Performance Recorder (CPU and GPU profiles), using the scenarios of task 7.3: idle, a scrolling terminal, typing with echo, and a full-screen update. Write the steps as `docs/profiling-windows.md`.
+     - Decide with requirement 5.3: a native layer only if the canvas costs at least twice the probe's native CPU or delays input noticeably. On Windows that would be the WebView2 composition controller with a DirectComposition swap chain below the web view, which wry does not expose: the largest of the three platforms.
+   - **Keyboard on a Windows client** (spec `rdp-keyboard-layout`): the layout detected from `GetKeyboardLayout` (status bar item, and "Detected" in the host's Keyboard section), symbols, Super as Ctrl. Watch for Windows itself taking Win+key chords before 1-1 sees them: Win+V is clipboard history and Win+L locks the screen, so Super as Ctrl may need its own handling there.
+   - **The 1 s resize delay** (`0670aa9`): revealing the status bar should no longer resize the remote. Window drags resize once, a second after release.
+   - **Folder sharing** still works from the Windows build (unchanged since beta.1; the Linux work moved shared code around).
+0b. **Keyboard layout (spec `rdp-keyboard-layout`, 21 November).** Done and verified by the maintainer against Windows; input methods (4.3) deferred. [Spec](specs/rdp-keyboard-layout/), [validation](specs/rdp-keyboard-layout/validation.md)
+   - **Automatic (default):** at connect, 1-1 detects the local layout and reports its Windows layout ID, so Windows and xrdp start the session with the client's layout. Mac variants map to the base layout (German Macintosh → German, "closest match").
+     - Linux Wayland: `keyboard/detect.rs` reads the compiled keymap from `wl_keyboard`; on Hyprland its symbols line looks like `pc_de(mac_nodeadkeys)_us_2_…`, and the active group comes from `wl_keyboard.modifiers`.
+     - X11: `setxkbmap -query`. Windows: `GetKeyboardLayout`. macOS: Carbon TIS on the main thread.
+     - Table: `keyboard/klid.rs`. Resolution and source: `keyboard/report.rs`.
+   - **Typed characters** go as Unicode (`SessionCommand::SendText`); shortcuts, named keys, Space and the keypad stay scancodes (`src/lib/keyboard-input.ts`). **Super as Ctrl**: a Super chord becomes the Ctrl chord, and Super alone stays the Windows key.
+   - **Per host:** Keyboard section in the host settings (Layout, Keys: Automatic or Physical keys, Super as Ctrl), and `--keyboard-layout`, `--keyboard-keys`, `--super-as-ctrl` on `1-1 import`. The status bar shows the reported layout (`DE`), with its source on hover.
+   - **Deferred, 4.3:** input methods and dead-key layouts need a hidden text field holding keyboard focus during a session (WebKit composes only into editable elements), as xterm.js does. The note is in the tasks.
 1. **Native renderer (spec `rdp-native-renderer`, 21 November).** Groups 1–8 are done; group 7 (verification) was skipped by the maintainer, whose sessions and `validation.md` stand in for it. [Spec](specs/rdp-native-renderer/), [probe](../probes/native-subsurface/results-2026-11-21.md)
    - **How it works:** a wgpu layer in a desynchronized `wl_subsurface` on GDK's Wayland connection, placed below GTK's surface (`renderer/native_layer.rs`). The page is transparent over the session (`html.native-layer`), and the layer clears to the page background. Each native session writes into its own `SharedFrame` with damage tracking, and the render thread (`renderer/gpu.rs`) uploads only damage and presents only on change. The page reports the visible session and its rectangles through `native_view`. Wayland fractional scaling is used where the compositor offers it.
    - **Choice:** Settings, Display, Renderer (Automatic, GPU layer, Web canvas), applied at the next start; `ONE_ONE_RENDERER` overrides it. Automatic chooses the layer only on Hyprland. GNOME, KDE and X11 are not supported and not tested (maintainer decision); X11 and XWayland always use the canvas.
@@ -71,6 +90,7 @@ Earlier folder-sharing notes (19 November): tasks 1 to 5.3 were tested against W
   - Multiply-linked files are read-only through the share.
   - NTFS refuses to move a folder that holds an open file.
 - **rdp-terminal-graphics:** approved on 20 November, tasks 1–4 not started.
+- **rdp-keyboard-layout:** approved and done on 21 November, verified against Windows; 4.3 (input methods) deferred.
 - **rdp-native-renderer:** approved on 21 November. Groups 1–8 done (7 skipped by decision); group 9 (macOS and Windows) open. Requirement 1.5 was amended for the Settings choice, and task 7.4 replaced by "Hyprland only". [Validation](specs/rdp-native-renderer/validation.md)
 - **windows-clearcodec-royalts-e2e:** 62 of 77 numbered subtasks are complete. Open work is the 11.x end-to-end harness, interoperability, DPI/text fidelity, performance and release evidence. [Task list](specs/windows-clearcodec-royalts-e2e/tasks.md)
 
