@@ -15,4 +15,4 @@ For comparison, the canvas path on 21 November in normal use: main thread 15% av
 
 Requirement 3.2 (main thread at most 5% during remote updates) holds in this run. A first 50-second run of normal use (connect, tabs, typing) averaged 10% on the main thread: page changes such as opening a session repaint the window as before, which is expected and outside 3.2.
 
-Still open for task 7.3: the four reference scenarios on both paths in one sitting (idle, scrolling terminal, typing with echo, full-screen update), frame rate, and decode-to-present latency.
+The four-scenario reference measurement (task 7.3) was skipped by the maintainer's decision on 21 November 2026; these runs are the evidence for turning the native layer on automatically on Hyprland.

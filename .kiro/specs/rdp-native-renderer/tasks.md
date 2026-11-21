@@ -69,19 +69,20 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - _Requirements: 6.3_
   - Done 21 November 2026. 6.1: `display_path::runtime_fallback` records the reason, emits `display-path` (the page drops `native-layer`, the HUD shows the reason) and sends `UseCanvas` to every session (`SessionManager::use_canvas_everywhere`); a session created during the fallback is checked again after it registers. Test: two native sessions each send one full frame, without reconnecting. `ONE_ONE_RENDERER_FAIL_AFTER=N` makes the render thread fail after N frames, for the checklist in 7.2. 6.2: `src/lib/__tests__/no-endless-animations.test.ts` (also Tailwind's looping `animate-*`, and the global styles; it checks that it read the watched folders) and `the_remote_pointer_is_never_composited_into_frames`. The dashboard's loading spinner became a static icon with text.
 
-- [ ] 7. Verify and measure on the reference machine
-- [ ] 7.1 Pixel parity
+- [x] 7. Verify and measure on the reference machine (skipped, see note)
+- [x] 7.1 Pixel parity (skipped)
   - `ONE_ONE_RENDERER_CAPTURE=1` reads back the presented region; compare with the canvas at 1:1 (exact) and in fit mode (within linear filtering).
   - _Depends: 5.2_
   - _Requirements: 2.1_
-- [ ] 7.2 Behavior checklist with the maintainer
+- [x] 7.2 Behavior checklist with the maintainer (skipped)
   - Resize, maximize, fullscreen, sidebar and bottom bar, tab switches, dashboard, dialogs and HUD over the session, reconnect, pause, disconnect, minimize, another workspace, several sessions, input and pointer. Record in `validation.md`.
   - _Depends: 5.2, 6.1_
   - _Requirements: 2.2–2.7, 4.1–4.4_
-- [ ] 7.3 Reference measurement
+- [x] 7.3 Reference measurement (skipped)
   - `scripts/linux/profile.sh`, 30 s per scenario and path: idle, scrolling terminal, typing with echo, full-screen update. Main-thread, web-process and whole-app CPU, frame rate, decode-to-present latency. Targets: main thread ≤ 5%, whole app at most half of the canvas, latency not worse. Record in `validation.md`.
   - _Depends: 7.2_
   - _Requirements: 3.2, 3.3, 3.4, 6.1, 6.2_
+  - Skipped 21 November 2026 by the maintainer's decision: the sessions the maintainer ran on the native path (picture, input, HUD, quitting) and the measurement in `validation.md` stand in for 7.1–7.3. The pixel capture (`ONE_ONE_RENDERER_CAPTURE`) and the full four-scenario measurement were not built or run. Automatic mode no longer waits for 7.3: on Hyprland it chooses the native layer (the `OptInOnly` gate is removed).
 - [x] 7.4 Supported compositors only
   - Settings, Display, Renderer (Automatic, GPU layer, Web canvas) carries the choice at the next start; `ONE_ONE_RENDERER` still overrides it (requirement 1.5 amended).
   - Replaced 21 November 2026 by the maintainer's decision: GNOME, KDE and X11 are not supported and not tested; the reference machine is the test environment. Automatic mode chooses the native layer only on Hyprland (`Reason::UntestedCompositor` elsewhere, override with `ONE_ONE_RENDERER=native`); X11 and XWayland already keep the canvas.

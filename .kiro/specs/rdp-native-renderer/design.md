@@ -50,7 +50,7 @@ flowchart LR
 - `Native`: write the update into the session's `SharedFrame` (which merges damage, so a slow render thread never queues frames) and wake the render thread. `FrameDelivery` is bypassed; the stall check becomes "the render thread has not taken a frame for 5 s while visible", reported through the existing `display_stalled` field.
 - Switching from `Native` to `Canvas` resets `FrameDelivery` and sends a full-frame packet from the authoritative image, so the canvas shows the current picture at once (requirement 1.3). The session never reconnects for a path change.
 
-The path is app-wide state: `get_display_path` returns it with its reason, a `display-path` event announces a runtime change, and the Performance HUD shows it (requirement 1.4). All sessions switch together, so it is not a `SessionInfo` field. Until the reference measurement (task 7.3) passes, automatic mode keeps the canvas (reason `OptInOnly`); `ONE_ONE_RENDERER=native` opts in.
+The path is app-wide state: `get_display_path` returns it with its reason, a `display-path` event announces a runtime change, and the Performance HUD shows it (requirement 1.4). All sessions switch together, so it is not a `SessionInfo` field. Automatic mode chooses the native layer on Hyprland; Settings (Display, Renderer) or `ONE_ONE_RENDERER` override it. The interim `OptInOnly` gate, meant to last until task 7.3, was removed when the maintainer skipped group 7 on 21 November 2026.
 
 **Frontend (`SessionCanvas.tsx`, `App.tsx`, styles)**.
 

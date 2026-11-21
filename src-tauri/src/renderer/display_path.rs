@@ -81,9 +81,6 @@ pub struct Facts {
     /// A compositor the native layer was verified on (Hyprland). Automatic
     /// mode keeps the canvas elsewhere (maintainer decision, 21 November 2026).
     pub supported_compositor: bool,
-    /// Automatic mode may pick the native layer. Off until the reference
-    /// measurement (spec task 7.3) passes; `ONE_ONE_RENDERER=native` opts in.
-    pub auto_native: bool,
     pub gpu: Option<Result<(), GpuFailure>>,
 }
 
@@ -98,8 +95,6 @@ pub enum Reason {
     MissingWaylandInterface(&'static str),
     /// Automatic mode on a compositor nobody has verified the layer on.
     UntestedCompositor,
-    /// Everything allows the layer, but automatic mode does not choose it yet.
-    OptInOnly,
     NoAdapter,
     SurfaceFailed(String),
     /// Set when the layer fails while sessions run (requirement 1.3).
@@ -120,7 +115,6 @@ impl fmt::Display for Reason {
             Self::X11Display => write!(f, "X11 or XWayland display"),
             Self::OtherDisplay => write!(f, "not a Wayland display"),
             Self::MissingWaylandInterface(name) => write!(f, "the compositor lacks {name}"),
-            Self::OptInOnly => write!(f, "the native layer is opt-in for now (Settings, Renderer)"),
             Self::NoAdapter => write!(f, "no usable GPU adapter"),
             Self::SurfaceFailed(error) => write!(f, "GPU surface failed: {error}"),
             Self::RuntimeFailure(error) => write!(f, "native layer failed: {error}"),
@@ -149,10 +143,8 @@ fn precondition(facts: &Facts) -> Option<Reason> {
     if let Some(name) = facts.missing_interface {
         return Some(Reason::MissingWaylandInterface(name));
     }
-    if facts.requested == Override::Auto && !facts.supported_compositor {
-        return Some(Reason::UntestedCompositor);
-    }
-    (facts.requested == Override::Auto && !facts.auto_native).then_some(Reason::OptInOnly)
+    (facts.requested == Override::Auto && !facts.supported_compositor)
+        .then_some(Reason::UntestedCompositor)
 }
 
 /// The display path for these facts, and why.
@@ -182,7 +174,6 @@ mod tests {
             display: Display::Wayland,
             missing_interface: None,
             supported_compositor: true,
-            auto_native: true,
             gpu: Some(Ok(())),
         }
     }
@@ -233,13 +224,6 @@ mod tests {
             ),
             (
                 Facts {
-                    auto_native: false,
-                    ..wayland()
-                },
-                Reason::OptInOnly,
-            ),
-            (
-                Facts {
                     supported_compositor: false,
                     ..wayland()
                 },
@@ -284,10 +268,6 @@ mod tests {
                 missing_interface: Some("wl_compositor"),
                 ..wayland()
             },
-            Facts {
-                auto_native: false,
-                ..wayland()
-            },
         ] {
             assert!(!worth_trying_gpu(&facts), "{facts:?}");
         }
@@ -297,7 +277,7 @@ mod tests {
     fn forcing_native_still_falls_back_on_failure() {
         let forced = Facts {
             requested: Override::Native,
-            auto_native: false,
+            supported_compositor: false,
             ..wayland()
         };
         assert_eq!(choose(&forced), (Path::Native, Reason::ForcedNative));
@@ -419,7 +399,6 @@ pub fn decide(setting: &str) -> (Path, Reason) {
         display: Display::Other,
         missing_interface: None,
         supported_compositor: std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
-        auto_native: false,
         gpu: None,
     };
     #[cfg(target_os = "linux")]
