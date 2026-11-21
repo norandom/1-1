@@ -50,6 +50,7 @@ Task 1 builds the data and settings (layout table, host profile). Task 2 detects
   - The hidden composition field: focus on `compositionstart`, forward `compositionend` text, return focus to the canvas; `data-remote-input` counts as remote. Checked by hand with a compose sequence and an input method.
   - _Depends: 4.2_
   - _Requirements: 2.3_
+  - Deferred 21 November 2026 by the maintainer's decision (their layout, German Macintosh without dead keys, does not need it). Finding for whoever takes it up: WebKit delivers input-method text and composed dead-key characters only to an editable element, and the session canvas is not one, so a dead key likely arrives as "Dead" followed by the plain letter. The robust route is the one web terminals take (xterm.js): a hidden text field holds keyboard focus during a session and composed text is forwarded from it. A smaller fallback: send a dead key and the key after it as scancodes, so the remote composes with the reported (matching) layout.
 
 - [x] 5. Super as Ctrl
 - [x] 5.1 Chord rewrite and tap
