@@ -37,10 +37,10 @@ Task 1 builds the data and settings (layout table, host profile). Task 2 detects
   - Done 21 November 2026 with 2.1 and 3.1. 2.1: `keyboard/detect.rs` reads the compiled keymap the compositor sends; on Hyprland its `xkb_symbols` line is `pc_de(mac_nodeadkeys)_us_2_inet(evdev)_…` (layouts with variants in parentheses, `_N` for later groups, option files mixed in), with display names in `name[N]` lines; the active group comes from `wl_keyboard.modifiers`. The X11 part of 2.2 (`setxkbmap -query`) is in too. 3.1: the session resolves the layout once per connect (`keyboard/report.rs`), keeps it for `SessionInfo.keyboard` and connects with it fixed, so `build_connector_config` never detects anything and tests stay machine-independent. 3.2: `KeyboardStatus` next to the clipboard status, and a HUD line.
 
 - [ ] 4. Characters as characters
-- [ ] 4.1 Key decision
+- [x] 4.1 Key decision
   - `src/lib/keyboard-input.ts`: scancode, text or nothing per key press (printable grapheme, AltGr and Option results, dead keys, named keys, Ctrl and Super chords, Physical mode). Unit tests for each case.
   - _Requirements: 2.1, 2.2_
-- [ ] 4.2 Unicode events
+- [x] 4.2 Unicode events
   - `send_key_event` text variant and `SessionCommand::SendText`: UTF-16 code units as Unicode press and release in one batch, ordered with other input. Key-up bookkeeping in `canvas-keyboard.ts` for keys sent as text; release-all on blur unchanged. Tests for encoding (BMP, surrogate pairs) and for releases after mixed paths.
   - _Depends: 4.1_
   - _Requirements: 2.1, 2.4_
@@ -49,11 +49,12 @@ Task 1 builds the data and settings (layout table, host profile). Task 2 detects
   - _Depends: 4.2_
   - _Requirements: 2.3_
 
-- [ ] 5. Super as Ctrl
-- [ ] 5.1 Chord rewrite and tap
+- [x] 5. Super as Ctrl
+- [x] 5.1 Chord rewrite and tap
   - In `canvas-keyboard.ts`: hold Super back; a chord sends Ctrl down, the key and Ctrl up; a lone tap sends the Windows key; blur releases what was sent; off when the host's `super_as_ctrl` is off; 1-1's own shortcuts unchanged. Tests for chord, tap, repeat, blur and the setting.
   - _Depends: 4.1_
   - _Requirements: 3.1, 3.2, 3.3_
+  - Done 21 November 2026 with 4.1 and 4.2 (`src/lib/keyboard-input.ts`: `decideKey` and `createKeyTranslator`, fed by the canvas's key events in `SessionView`; `send_text` / `SessionCommand::SendText`). Decisions beyond the design: Space and the numeric keypad stay scancodes; Alt with a key's own letter or digit is a shortcut (scancode) while Alt producing another character (Option+L is `@` on a Mac layout) is text; a repeated key keeps the path of its first press. Synthetic releases (`isTrusted` false, from focus leaving the session) release a Ctrl chord but never tap the Windows key.
 
 - [ ] 6. Verify with the maintainer
 - [ ] 6.1 Windows and xrdp

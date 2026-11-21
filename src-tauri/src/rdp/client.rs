@@ -28,6 +28,11 @@ pub enum SessionCommand {
         key_code: u32,
         is_down: bool,
     },
+    /// Typed characters as Unicode keyboard events (spec rdp-keyboard-layout
+    /// 2.1): the remote gets exactly these, whatever its own layout.
+    SendText {
+        text: String,
+    },
     SendMouse {
         x: i32,
         y: i32,

@@ -199,6 +199,7 @@ pub fn run() {
             renderer::display_path::get_display_path,
             renderer::gpu::native_view,
             keyboard::detect::detect_keyboard_layout,
+            commands::session::send_text,
             renderer::gpu::native_frames,
             // Connection commands (task 6.6: unified v2 store)
             commands::connection::list_connections,

@@ -219,6 +219,11 @@ export async function sendKeyEvent(sessionId: string, event: KeyEvent): Promise<
   }));
 }
 
+/** Typed characters as Unicode (spec rdp-keyboard-layout 2.1), in order with keys and mouse. */
+export async function sendText(sessionId: string, text: string): Promise<void> {
+  await orderedInput(sessionId, () => invoke('send_text', { sessionId, text }));
+}
+
 export async function sendMouseEvent(sessionId: string, event: RdpMouseEvent): Promise<void> {
   const submit = () => invoke<void>('send_mouse_event', {
     sessionId,

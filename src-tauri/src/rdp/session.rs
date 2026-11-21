@@ -1158,6 +1158,7 @@ impl SessionActor {
             SessionCommand::SendKey { key_code, is_down } => {
                 key_code & 0xff != 0 && (*is_down || !manual)
             }
+            SessionCommand::SendText { text } => !text.is_empty(),
             SessionCommand::SendMouse {
                 event_type,
                 scroll_delta,
@@ -1723,6 +1724,23 @@ impl SessionActor {
                                 }
                             }
                         }
+                        Some(SessionCommand::SendText { text }) => {
+                            let events = encode_unicode_fastpath_events(&text);
+                            if !events.is_empty() {
+                                match active_stage.process_fastpath_input(&mut image, &events) {
+                                    Ok(outputs) => {
+                                        for out in outputs {
+                                            if let ActiveStageOutput::ResponseFrame(frame) = out
+                                                && let Err(e) = writer.write_all(&frame).await {
+                                                    log::warn!("Write error on text input: {}", e);
+                                                    return DisconnectReason::ConnectionLost;
+                                                }
+                                        }
+                                    }
+                                    Err(e) => log::warn!("Failed to encode text input: {}", e),
+                                }
+                            }
+                        }
                         Some(SessionCommand::SendMouse { x, y, button, event_type, scroll_delta }) => {
                             log::debug!(
                                 "Session {} mouse event: ({},{}) btn={:?} type={} scroll={}",
@@ -2281,6 +2299,13 @@ impl SessionActor {
                     };
                     let _ = reply.send(result);
                 }
+                Some(SessionCommand::SendText { text }) => {
+                    log::debug!(
+                        "Session {} text input: {} chars",
+                        self.id,
+                        text.chars().count()
+                    );
+                }
                 Some(SessionCommand::SendKey { key_code, is_down }) => {
                     log::debug!(
                         "Session {} key event: code={}, down={}",
@@ -2527,6 +2552,61 @@ fn encode_keyboard_fastpath_event(key_code: u32, is_down: bool) -> Option<FastPa
     }
 
     Some(FastPathInputEvent::KeyboardEvent(flags, scancode))
+}
+
+/// Typed text as Unicode keyboard events: each UTF-16 code unit pressed and
+/// released (surrogate pairs as two units, in order), as MS-RDPBCGR
+/// 2.2.8.1.2.2.2 sends characters outside the keyboard layout.
+fn encode_unicode_fastpath_events(text: &str) -> Vec<FastPathInputEvent> {
+    use ironrdp_pdu::input::fast_path::KeyboardFlags;
+    text.encode_utf16()
+        .flat_map(|unit| {
+            [
+                FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::empty(), unit),
+                FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::RELEASE, unit),
+            ]
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod text_input_tests {
+    use super::*;
+    use ironrdp_pdu::input::fast_path::KeyboardFlags;
+
+    fn units(events: &[FastPathInputEvent]) -> Vec<(u16, bool)> {
+        events
+            .iter()
+            .map(|event| match event {
+                FastPathInputEvent::UnicodeKeyboardEvent(flags, unit) => {
+                    (*unit, flags.contains(KeyboardFlags::RELEASE))
+                }
+                other => panic!("not a Unicode event: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_character_is_pressed_and_released() {
+        assert_eq!(
+            units(&encode_unicode_fastpath_events("@ä")),
+            vec![(0x40, false), (0x40, true), (0xE4, false), (0xE4, true)]
+        );
+    }
+
+    #[test]
+    fn characters_outside_the_bmp_go_as_their_surrogate_pair() {
+        assert_eq!(
+            units(&encode_unicode_fastpath_events("😀")),
+            vec![
+                (0xD83D, false),
+                (0xD83D, true),
+                (0xDE00, false),
+                (0xDE00, true)
+            ]
+        );
+        assert!(encode_unicode_fastpath_events("").is_empty());
+    }
 }
 
 /// Encode a frontend pointer event as a FastPath mouse event.

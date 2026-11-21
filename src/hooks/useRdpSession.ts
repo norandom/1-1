@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { SessionStatus } from '../types';
 import type { ViewportSize } from '../lib/viewport-size';
+import type { KeyAction } from '../lib/keyboard-input';
 import { useSessionStore } from '../stores/sessionStore';
 import * as tauri from '../lib/tauri';
 import { connectSession, subscribeSessionFrames, reportSessionFramePresented, refreshSessionDisplay, type FrameListener } from '../lib/session-runtime';
 import {
+  keyCodeFor,
   mapKeyEvent,
   mapMouseEvent,
   normalizeWheelDelta,
@@ -72,6 +74,17 @@ export function useRdpSession(viewSessionId?: string) {
     if (mapped.keyCode !== 0) tauri.sendKeyEvent(sessionId, mapped).catch(() => {});
   }, [sessionId]);
 
+  /** One remote action from the keyboard translator (spec rdp-keyboard-layout). */
+  const sendKeyAction = useCallback((action: KeyAction) => {
+    if (!sessionId) return;
+    if (action.kind === 'text') {
+      tauri.sendText(sessionId, action.text).catch(() => {});
+      return;
+    }
+    const keyCode = keyCodeFor(action.code);
+    if (keyCode !== 0) tauri.sendKeyEvent(sessionId, { keyCode, isDown: action.isDown }).catch(() => {});
+  }, [sessionId]);
+
   const sendMouse = useCallback((event: globalThis.MouseEvent, type: 'move' | 'down' | 'up' | 'scroll', bounds?: MouseSurfaceBounds) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId) return;
@@ -115,6 +128,6 @@ export function useRdpSession(viewSessionId?: string) {
     reconnectAttempts: session?.reconnectAttempts ?? 0,
     maxReconnectAttempts: session?.maxReconnectAttempts ?? 5,
     subscribeToFrames, reportFramePresented, connect, restart, disconnect, cancelReconnect,
-    sendKey, sendMouse, sendWheel,
+    sendKey, sendKeyAction, sendMouse, sendWheel,
   };
 }

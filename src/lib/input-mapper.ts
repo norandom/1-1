@@ -131,6 +131,12 @@ const SCANCODE_MAP: Record<string, ScancodeMapping> = {
   ContextMenu: { scancode: 0x5d, extended: true },
 };
 
+/** The RDP key code for a key's `code`; 0 when it has none. */
+export function keyCodeFor(code: string): number {
+  const mapping = SCANCODE_MAP[code];
+  return mapping ? mapping.scancode | (mapping.extended ? EXTENDED_KEY_FLAG : 0) : 0;
+}
+
 export function mapKeyEvent(e: globalThis.KeyboardEvent): KeyEvent {
   const mapping = SCANCODE_MAP[e.code] ?? null;
   const keyCode =

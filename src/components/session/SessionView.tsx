@@ -20,6 +20,7 @@ import {
   resolveUrlAction,
   type ConnectController,
 } from '../../lib/session-attach';
+import { createKeyTranslator } from '../../lib/keyboard-input';
 import {
   createTrailingResizeScheduler,
   type ResizeScheduler,
@@ -59,7 +60,7 @@ function SessionContent() {
     restart,
     disconnect,
     cancelReconnect,
-    sendKey,
+    sendKeyAction,
     sendWheel,
     sendMouse,
   } = useRdpSession(id && sessions.has(id) ? id : undefined);
@@ -93,6 +94,11 @@ function SessionContent() {
     ? connections.find((c) => c.id === resolvedConnectionId)
     : undefined;
   const profile = normalizeHostProfile(connectionInfo?.hostProfile);
+  // Spec rdp-keyboard-layout: characters as Unicode, Super as Ctrl.
+  const keyTranslator = useMemo(
+    () => createKeyTranslator({ keys: profile.keyboardKeys, superAsCtrl: profile.superAsCtrl }, sendKeyAction),
+    [profile.keyboardKeys, profile.superAsCtrl, sendKeyAction],
+  );
   useEffect(() => {
     if (!sessionId || status !== 'connected') return;
     return onSessionViewReturn(window, document, () => {
@@ -359,8 +365,8 @@ function SessionContent() {
           surfaceWidth={surfaceWidth}
           surfaceHeight={surfaceHeight}
           onFramePresented={reportFramePresented}
-          onKeyDown={sendKey}
-          onKeyUp={sendKey}
+          onKeyDown={keyTranslator.keyDown}
+          onKeyUp={keyTranslator.keyUp}
           onMouseMove={(e, rect) => sendMouse(e, 'move', rect)}
           onMouseDown={(e, rect) => sendMouse(e, 'down', rect)}
           onMouseUp={(e, rect) => sendMouse(e, 'up', rect)}

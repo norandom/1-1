@@ -434,6 +434,23 @@ pub async fn send_key_event(
         .map_err(|_| format!("Session '{}' actor is no longer running", session_id))
 }
 
+/// Typed characters, sent as Unicode (spec rdp-keyboard-layout 2.1).
+#[tauri::command]
+pub async fn send_text(
+    session_id: String,
+    text: String,
+    session_mgr: State<'_, SessionManager>,
+) -> Result<(), String> {
+    let cmd_tx = session_mgr
+        .get_cmd_sender(&session_id)
+        .await
+        .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+    cmd_tx
+        .send(SessionCommand::SendText { text })
+        .await
+        .map_err(|_| format!("Session '{}' actor is no longer running", session_id))
+}
+
 #[tauri::command]
 pub async fn send_mouse_event(
     session_id: String,
