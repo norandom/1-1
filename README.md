@@ -161,7 +161,7 @@ Most of my work in this fork went into ClearCodec. I made it the preferred codec
 
 **Rendering and security**
 
-- Frames are drawn in the app's WebView canvas. A native wgpu renderer exists but is off by default (`ONE_ONE_NATIVE_RENDERER=1` turns it on)
+- Frames are drawn in the app's WebView canvas. On Linux Wayland a native GPU layer is in development (`ONE_ONE_RENDERER=native` opts in; `canvas` forces the canvas)
 - Passwords stored in the OS keychain (Windows Credential Manager, macOS Keychain, and on Linux the Secret Service from KWallet or GNOME Keyring); no plaintext credential storage. Per host you can turn saving off and be asked at each connect
 - Connection configs as local JSON: no cloud, no telemetry
 - Ships as a single `.app`, `.AppImage`, or small NSIS installer

@@ -78,10 +78,6 @@ impl Wake {
 
     /// Waits until something changed after `seen`, or the timeout; returns
     /// the current generation.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the render thread, spec task 4.1")
-    )]
     pub fn wait(&self, seen: u64, timeout: Duration) -> u64 {
         let guard = self.generation.lock().unwrap();
         let (guard, _) = self
@@ -95,15 +91,7 @@ impl Wake {
 /// What the render thread needs to draw into the layer.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct LayerTarget {
-    #[cfg_attr(
-        target_os = "linux",
-        expect(dead_code, reason = "used by the render thread, spec task 4.1")
-    )]
     pub display: RawDisplayHandle,
-    #[cfg_attr(
-        target_os = "linux",
-        expect(dead_code, reason = "used by the render thread, spec task 4.1")
-    )]
     pub surface: RawWindowHandle,
     pub geometry: Arc<Mutex<Geometry>>,
     pub wake: Arc<Wake>,

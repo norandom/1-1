@@ -143,7 +143,7 @@ pub async fn connect(
     session_mgr: State<'_, SessionManager>,
     settings_store: State<'_, SettingsStore>,
     display_path: State<'_, crate::renderer::display_path::DisplayPathState>,
-    frame_stores: State<'_, crate::renderer::frame_stores::FrameStores>,
+    frame_stores: State<'_, Arc<crate::renderer::frame_stores::FrameStores>>,
     share_grants: State<'_, Arc<crate::store::share_grants::ShareGrantStore>>,
 ) -> Result<String, String> {
     // Task 7.1 (Req 2.2/11.8/11.9): the session cap and per-connection

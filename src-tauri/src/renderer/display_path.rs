@@ -93,7 +93,6 @@ pub enum Reason {
     NoAdapter,
     SurfaceFailed(String),
     /// Set when the layer fails while sessions run (requirement 1.3).
-    #[expect(dead_code, reason = "runtime fallback, spec task 6.1")]
     RuntimeFailure(String),
 }
 

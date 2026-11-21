@@ -10,16 +10,11 @@ mod store;
 mod utils;
 
 use std::sync::Arc;
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::Manager;
 
 use rdp::session::SessionManager;
-use renderer::gpu::GpuRenderer;
-use renderer::shared_frame::SharedFrame;
 use store::library::LibraryStore;
 use store::settings::SettingsStore;
-
-/// Opt-in for the experimental native wgpu renderer (off by default).
-const NATIVE_RENDERER_ENV: &str = "ONE_ONE_NATIVE_RENDERER";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -136,14 +131,12 @@ pub fn run() {
                     store::credentials::CredentialStore::new()
                 }
             };
-            let shared_frame = SharedFrame::new(1920, 1080);
 
             // Register managed state
             app.manage(library_store);
             app.manage(settings_store);
             app.manage(session_manager);
             app.manage(credential_store);
-            app.manage(shared_frame.clone());
 
             // Spec rdp-native-renderer: native layer or web canvas. Decided
             // once here, before the main window exists, because only the
@@ -164,100 +157,43 @@ pub fn run() {
                 let builder = builder.transparent(path == renderer::display_path::Path::Native);
                 builder.build()?
             };
+            let frame_stores = Arc::new(renderer::frame_stores::FrameStores::default());
+            let render_shared = renderer::gpu::RenderShared::new(Arc::clone(&frame_stores));
             #[cfg(target_os = "linux")]
             if path == renderer::display_path::Path::Native {
-                let wake = Arc::new(renderer::native_layer::Wake::default());
-                match renderer::native_layer::attach(&main_window, wake) {
-                    // The render thread takes the target in spec task 4.1.
-                    Ok(_target) => {}
-                    Err(error) => {
-                        log::warn!("Native layer unavailable, using the web canvas: {error}");
-                        display_path.fall_back(renderer::display_path::Reason::SurfaceFailed(error));
-                    }
+                let started = renderer::native_layer::attach(&main_window, frame_stores.wake())
+                    .and_then(|target| {
+                        let handle = app.handle().clone();
+                        renderer::gpu::spawn(
+                            target,
+                            Arc::clone(&render_shared),
+                            Box::new(move |error| {
+                                // Spec task 6.1 switches running sessions too.
+                                handle
+                                    .state::<renderer::display_path::DisplayPathState>()
+                                    .fall_back(renderer::display_path::Reason::RuntimeFailure(
+                                        error,
+                                    ));
+                            }),
+                        )
+                        .map_err(|e| e.to_string())
+                    });
+                if let Err(error) = started {
+                    log::warn!("Native layer unavailable, using the web canvas: {error}");
+                    display_path.fall_back(renderer::display_path::Reason::SurfaceFailed(error));
                 }
             }
             #[cfg(not(target_os = "linux"))]
             let _ = &main_window;
             app.manage(display_path);
-            app.manage(renderer::frame_stores::FrameStores::default());
-
-            // The web view's canvas draws remote frames from IPC. The native
-            // wgpu renderer drew into the window's own surface under the opaque
-            // web view: invisible on Windows, and on Wayland it shared GTK's
-            // top-level surface, which explicit-sync compositors reject with
-            // protocol error 71 (issue #1). Keep it for experiments only.
-            let native_renderer = std::env::var_os(NATIVE_RENDERER_ENV).is_some_and(|v| v == "1");
-            if !native_renderer {
-                log::info!("Remote frames are drawn by the web view; set {NATIVE_RENDERER_ENV}=1 to try the native renderer.");
-                return Ok(());
-            }
-            let window = app.get_webview_window("main").unwrap();
-            let sf = shared_frame.clone();
-
-            match tauri::async_runtime::block_on(GpuRenderer::new(window, sf)) {
-                Ok(renderer) => {
-                    let renderer = Arc::new(renderer);
-                    app.manage(renderer.clone());
-
-                    // Spawn render loop on a DEDICATED OS thread (not tokio)
-                    // GPU present() blocks for vsync — must not starve the async runtime
-                    let r = renderer.clone();
-                    let sf_render = shared_frame.clone();
-                    std::thread::Builder::new()
-                        .name("gpu-render".into())
-                        .spawn(move || {
-                            log::info!(
-                                "[GPU] Render thread started (thread: {:?})",
-                                std::thread::current().id()
-                            );
-                            let mut first_frame = true;
-                            loop {
-                                // Sleep until session actor signals a new frame (via condvar)
-                                // Times out at 100ms to handle resize/surface-lost recovery
-                                sf_render.wait_for_frame(std::time::Duration::from_millis(100));
-
-                                match r.render() {
-                                    Ok(()) => {
-                                        if first_frame {
-                                            log::info!("[GPU] First frame rendered successfully!");
-                                            first_frame = false;
-                                        }
-                                    }
-                                    Err(
-                                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated,
-                                    ) => {
-                                        log::warn!(
-                                            "Surface lost/outdated, waiting for reconfigure"
-                                        );
-                                        std::thread::sleep(std::time::Duration::from_millis(16));
-                                    }
-                                    Err(wgpu::SurfaceError::OutOfMemory) => {
-                                        log::error!("GPU out of memory, stopping render thread");
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        log::warn!("Render error: {}", e);
-                                    }
-                                }
-                            }
-                        })
-                        .expect("Failed to spawn GPU render thread");
-
-                    log::info!("GPU renderer initialized successfully");
-                }
-                Err(e) => {
-                    log::warn!(
-                        "GPU renderer failed to initialize, falling back to IPC frames: {}",
-                        e
-                    );
-                    // No GPU renderer — the webview Canvas fallback handles frames via IPC
-                }
-            }
+            app.manage(frame_stores);
+            app.manage(render_shared);
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             renderer::display_path::get_display_path,
+            renderer::gpu::native_view,
             // Connection commands (task 6.6: unified v2 store)
             commands::connection::list_connections,
             commands::connection::get_connection,
@@ -343,17 +279,5 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
-        if let RunEvent::WindowEvent {
-            label: _,
-            event: WindowEvent::Resized(size),
-            ..
-        } = event
-        {
-            // Resize the GPU surface if renderer exists
-            if let Some(renderer) = app_handle.try_state::<Arc<GpuRenderer>>() {
-                renderer.resize(size.width, size.height);
-            }
-        }
-    });
+    app.run(|_, _| {});
 }

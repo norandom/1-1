@@ -37,15 +37,16 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - _Requirements: 2.3_
   - Done 21 November 2026 (`renderer/native_layer.rs`). The layer follows the web view through `size-allocate`, the window's `scale-factor` and a 500 ms check, and hands the render thread its raw handles, geometry and a `Wake` signal. The path is now decided before the main window exists (`tauri.conf.json` sets `"create": false`; `setup` builds the window from the same config, transparent only on the Linux native path). A layer that cannot be built records `SurfaceFailed` and keeps the canvas. Checked on the reference machine with an isolated test copy (own D-Bus session and data folder): the window opens on both paths, the native one is pixel-identical while the page is still opaque, and Hyprland offers fractional scaling. Windows and macOS window creation is checked by CI and in 9.1.
 
-- [ ] 4. The render thread
-- [ ] 4.1 Persistent texture, damage uploads, draw with rectangles
+- [x] 4. The render thread
+- [x] 4.1 Persistent texture, damage uploads, draw with rectangles
   - Rework `renderer/gpu.rs`: surface from the `NativeLayer` handles, one texture for the visible session, `take_damage` → `write_texture` → submit, clear to the background color, quad with source and destination rectangles, nearest at 1:1 and linear when scaled. Present only on change; FIFO, latency 2.
   - _Depends: 2.1, 3.1_
   - _Requirements: 2.1, 3.1, 3.5, 4.4_
-- [ ] 4.2 The visible session
+- [x] 4.2 The visible session
   - Backend view state per window: session id, destination and source rectangles. On a session change: full upload from that session's store. `null` view: draw only the background once, then stay idle. Stall on the native path: the visible session's store not taken for 5 s sets `display_stalled` (moved here from 2.2).
   - _Depends: 4.1_
   - _Requirements: 2.4, 4.1_
+  - Done 21 November 2026 (`renderer/gpu.rs`, `renderer/native_layer.wgsl`; the old opt-in renderer, `ONE_ONE_NATIVE_RENDERER`, its shader and the app-wide frame are removed). One `Wake` serves the layer, the view and every registered store. The view also carries the page's background color and the smoothing flag; the page sends it through `native_view` in 5.2. The native-path stall check is not built: the store merges damage and never queues, so nothing is lost while a present waits, and a waiting present means the window is not on screen, where a stall report would be a false alarm. `wait_for_frame` and the snapshot API went with the old renderer (`publish` stays for tests).
 
 - [ ] 5. The page over the layer
 - [ ] 5.1 `native-layer` styling

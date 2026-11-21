@@ -1,10 +1,10 @@
 use std::sync::{
-    Arc, Condvar, Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-/// Immutable snapshot of a frame. The renderer holds an `Arc<FrameSnapshot>`
-/// without blocking the session actor from writing new data.
+/// A copy of the whole picture (tests and diagnostics).
+#[cfg(test)]
 pub struct FrameSnapshot {
     pub width: u32,
     pub height: u32,
@@ -13,10 +13,6 @@ pub struct FrameSnapshot {
 
 /// A changed region taken for upload: its pixels, tightly packed RGBA.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the render thread, spec task 4.1")
-)]
 pub struct Damage {
     pub frame_width: u32,
     pub frame_height: u32,
@@ -60,20 +56,19 @@ struct SharedFrameInner {
     full: bool,
 }
 
-/// High-performance shared frame buffer between the RDP session actor and the GPU renderer.
+/// A session's picture on the native path: written by the session actor,
+/// read by the native layer's render thread (spec rdp-native-renderer).
 ///
-/// Optimizations:
-/// - Lock-free dirty check via AtomicBool (render thread doesn't lock when idle)
-/// - Condvar wakes render thread on new frame (no busy-spin)
-/// - `begin_write()`/`end_write()` batch multiple dirty rects under one lock
-/// - `publish()` swaps buffers via `std::mem::swap` (zero-copy)
-/// - `Arc::try_unwrap` reclaims old snapshot's allocation
+/// The buffer is authoritative and never swapped; the actor batches rects
+/// under one lock (`begin_write`), and the render thread copies only the
+/// damaged rectangle (`take_damage`). Every change rings the render thread's
+/// `Wake` once the store is registered.
 pub struct SharedFrame {
+    /// Also rung on every change: the native layer's render thread.
+    wake: std::sync::OnceLock<Arc<super::native_layer::Wake>>,
     inner: Mutex<SharedFrameInner>,
     dirty: AtomicBool,
     version: AtomicU64,
-    /// Condvar to wake the render thread when a new frame is published
-    notify: Condvar,
 }
 
 /// Guard for batched writes. Holds the mutex for the duration of multiple update_rect calls.
@@ -160,6 +155,7 @@ impl SharedFrame {
     pub fn new(width: u32, height: u32) -> Arc<Self> {
         let size = (width * height * 4) as usize;
         Arc::new(Self {
+            wake: std::sync::OnceLock::new(),
             inner: Mutex::new(SharedFrameInner {
                 width,
                 height,
@@ -169,7 +165,6 @@ impl SharedFrame {
             }),
             dirty: AtomicBool::new(false),
             version: AtomicU64::new(0),
-            notify: Condvar::new(),
         })
     }
 
@@ -186,7 +181,14 @@ impl SharedFrame {
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
         self.version.fetch_add(1, Ordering::Relaxed);
-        self.notify.notify_one();
+        if let Some(wake) = self.wake.get() {
+            wake.notify();
+        }
+    }
+
+    /// Rings `wake` on every later change (set once, by `FrameStores`).
+    pub fn set_wake(&self, wake: Arc<super::native_layer::Wake>) {
+        let _ = self.wake.set(wake);
     }
 
     /// Called by the session actor to update the entire frame.
@@ -209,6 +211,7 @@ impl SharedFrame {
         self.mark_dirty();
     }
 
+    #[cfg(test)]
     /// A copy of the whole picture, if anything changed since the last
     /// publish. For tests and diagnostics; the renderer uses `take_damage`.
     pub fn publish(&self) -> Option<Arc<FrameSnapshot>> {
@@ -226,10 +229,6 @@ impl SharedFrame {
     /// The pixels of everything changed since the last take, as one
     /// rectangle; `None` when nothing changed. Holds the lock only to copy
     /// that rectangle.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the render thread, spec task 4.1")
-    )]
     pub fn take_damage(&self) -> Option<Damage> {
         let mut inner = self.inner.lock().unwrap();
         let region = inner.damage.take()?;
@@ -239,10 +238,6 @@ impl SharedFrame {
 
     /// The whole picture, for a reader that has nothing yet (a session
     /// coming on screen). Leaves pending damage in place.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the render thread, spec task 4.1")
-    )]
     pub fn take_full(&self) -> Damage {
         let inner = self.inner.lock().unwrap();
         let region = Region {
@@ -252,16 +247,6 @@ impl SharedFrame {
             y1: inner.height,
         };
         copy_region(&inner, region, true)
-    }
-
-    /// Block until a new frame is available or timeout (for render thread).
-    pub fn wait_for_frame(&self, timeout: std::time::Duration) -> bool {
-        if self.dirty.load(Ordering::Acquire) {
-            return true;
-        }
-        let guard = self.inner.lock().unwrap();
-        let (_guard, result) = self.notify.wait_timeout(guard, timeout).unwrap();
-        !result.timed_out() || self.dirty.load(Ordering::Acquire)
     }
 
     #[allow(dead_code)]
@@ -276,10 +261,6 @@ impl SharedFrame {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the render thread, spec task 4.1")
-)]
 fn copy_region(inner: &SharedFrameInner, region: Region, full: bool) -> Damage {
     let (width, height) = (region.x1 - region.x0, region.y1 - region.y0);
     let row = width as usize * 4;
@@ -535,37 +516,5 @@ mod tests {
 
         assert_eq!(sf.version(), before, "not even marked dirty");
         assert!(sf.publish().is_none(), "no visible effect");
-    }
-
-    #[test]
-    fn wait_for_frame_returns_immediately_when_dirty() {
-        let sf = SharedFrame::new(2, 1);
-        sf.mark_dirty();
-
-        let start = std::time::Instant::now();
-        assert!(sf.wait_for_frame(std::time::Duration::from_secs(60)));
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(1),
-            "fast path must not wait out the timeout"
-        );
-    }
-
-    #[test]
-    fn wait_for_frame_parks_until_mark_dirty_wakes_it() {
-        let sf = SharedFrame::new(2, 1);
-        let waiter_sf = sf.clone();
-        let waiter = std::thread::spawn(move || {
-            waiter_sf.wait_for_frame(std::time::Duration::from_secs(60))
-        });
-
-        // Give the waiter a moment to park; it cannot return early because
-        // the frame is clean (it blocks on the condvar until mark_dirty).
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        sf.mark_dirty();
-
-        let woke = waiter
-            .join()
-            .expect("waiter thread must not panic within 60 s");
-        assert!(woke, "condvar wake beats the timeout");
     }
 }
