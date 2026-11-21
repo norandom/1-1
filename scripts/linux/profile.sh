@@ -4,7 +4,9 @@
 #
 #   profile.sh start [--wait]  record the app and its web process in the
 #                              background (--wait: until 1-1 starts)
-#   profile.sh dump            save the last ~seconds as perf.data.<time>
+#   profile.sh dump            save the last moments as perf.data.<time>
+#   profile.sh record S [name] record S seconds straight to disk (complete,
+#                              for a planned scenario); prints the file
 #   profile.sh report [file]   summary of a dump (default: the newest)
 #   profile.sh cpu             print main-thread and web-process CPU each second
 #   profile.sh stop            stop recording and the CPU log
@@ -83,6 +85,19 @@ dump)
     sleep 0.2
   done
   grep -o 'Dump [^ ]*' "$log" | tail -n1 | cut -d' ' -f2
+  ;;
+record)
+  need_perf
+  seconds="${2:?seconds}"
+  name="${3:-scenario}"
+  app="$(app_pid)" || { echo "1-1 is not running" >&2; exit 1; }
+  web="$(web_pids "$app")"
+  run="$(cat "$RUNFILE" 2>/dev/null || echo "$DIR")"
+  mkdir -p "$run"
+  out="$run/$name-$(date +%H%M%S).data"
+  # Straight to disk: no ring buffer, so nothing in the window is lost.
+  "$PERF" record -F 299 -g -m 128K -p "$app${web:+,$web}" -o "$out" -- sleep "$seconds" >"$out.log" 2>&1 || { tail -3 "$out.log" >&2; exit 1; }
+  echo "$out"
   ;;
 report)
   need_perf

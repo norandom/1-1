@@ -22,16 +22,21 @@ Without it, `perf` cannot attach to a process that is already running
 scripts/linux/profile.sh start --wait   # attaches when 1-1 starts (or now, if it runs)
 scripts/linux/profile.sh cpu            # main-thread and web-process CPU, once a second
 scripts/linux/profile.sh dump           # save the recent window when something is slow
+scripts/linux/profile.sh record 15 mouse # 15 s straight to disk, for a planned scenario
 scripts/linux/profile.sh report         # summary of the newest dump
 scripts/linux/profile.sh stop
 ```
 
 The recorder keeps only the newest samples in memory (`perf record
 --overwrite`, 299 Hz, frame-pointer call graphs), so it can run for hours; each
-`dump` writes the last few seconds. Every `start` creates
+`dump` writes the last moments. Every `start` creates
 `~/.cache/1-1-profiles/run-<time>/` with the dumps, `recorder.log` and
 `cpu.log` (set `PROFILE_DIR` to change the location). A restarted app needs a
 new `start`.
+
+The rolling buffer is small (128 KiB per CPU: the kernel's default
+`perf_event_mlock_kb` is 4 MiB), so with call stacks a dump holds well
+under a second of a busy thread. For a scenario you can plan, use `record`.
 
 `report` resolves symbols offline. For WebKit and GTK names, allow the Ubuntu
 symbol server; the first report then downloads debug info and is slow:
