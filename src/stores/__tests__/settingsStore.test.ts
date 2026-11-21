@@ -28,6 +28,7 @@ const BACKEND_DEFAULTS = {
   quality: 80,
   reconnectTimeout: 5000,
   connectionTimeout: 30000,
+  renderer: 'auto',
 } as const;
 
 describe('defaultSettings', () => {
@@ -45,6 +46,7 @@ describe('defaultSettings', () => {
       quality: 80,
       reconnectTimeout: 5000,
       connectionTimeout: 30000,
+      renderer: 'auto',
     });
   });
 

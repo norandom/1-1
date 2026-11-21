@@ -44,8 +44,13 @@ impl Override {
         }
     }
 
-    pub fn from_env() -> Self {
-        Self::parse(std::env::var(RENDERER_ENV).ok().as_deref())
+    /// `ONE_ONE_RENDERER` when set (for testing), otherwise the Settings
+    /// choice.
+    pub fn from_env_or(setting: &str) -> Self {
+        match std::env::var(RENDERER_ENV) {
+            Ok(value) if !value.trim().is_empty() => Self::parse(Some(&value)),
+            _ => Self::parse(Some(setting)),
+        }
     }
 }
 
@@ -73,6 +78,9 @@ pub struct Facts {
     pub display: Display,
     /// The first required Wayland global the compositor does not advertise.
     pub missing_interface: Option<&'static str>,
+    /// A compositor the native layer was verified on (Hyprland). Automatic
+    /// mode keeps the canvas elsewhere (maintainer decision, 21 November 2026).
+    pub supported_compositor: bool,
     /// Automatic mode may pick the native layer. Off until the reference
     /// measurement (spec task 7.3) passes; `ONE_ONE_RENDERER=native` opts in.
     pub auto_native: bool,
@@ -88,6 +96,8 @@ pub enum Reason {
     X11Display,
     OtherDisplay,
     MissingWaylandInterface(&'static str),
+    /// Automatic mode on a compositor nobody has verified the layer on.
+    UntestedCompositor,
     /// Everything allows the layer, but automatic mode does not choose it yet.
     OptInOnly,
     NoAdapter,
@@ -100,16 +110,17 @@ impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Available => write!(f, "native layer available"),
-            Self::ForcedNative => write!(f, "native layer requested by {RENDERER_ENV}"),
-            Self::ForcedCanvas => write!(f, "canvas requested by {RENDERER_ENV}"),
+            Self::ForcedNative => write!(f, "native layer chosen in Settings or {RENDERER_ENV}"),
+            Self::ForcedCanvas => write!(f, "canvas chosen in Settings or {RENDERER_ENV}"),
+            Self::UntestedCompositor => write!(
+                f,
+                "the native layer is tested on Hyprland only; choose it in Settings to try"
+            ),
             Self::NotLinux => write!(f, "the native layer exists only on Linux"),
             Self::X11Display => write!(f, "X11 or XWayland display"),
             Self::OtherDisplay => write!(f, "not a Wayland display"),
             Self::MissingWaylandInterface(name) => write!(f, "the compositor lacks {name}"),
-            Self::OptInOnly => write!(
-                f,
-                "the native layer is opt-in for now ({RENDERER_ENV}=native)"
-            ),
+            Self::OptInOnly => write!(f, "the native layer is opt-in for now (Settings, Renderer)"),
             Self::NoAdapter => write!(f, "no usable GPU adapter"),
             Self::SurfaceFailed(error) => write!(f, "GPU surface failed: {error}"),
             Self::RuntimeFailure(error) => write!(f, "native layer failed: {error}"),
@@ -137,6 +148,9 @@ fn precondition(facts: &Facts) -> Option<Reason> {
     }
     if let Some(name) = facts.missing_interface {
         return Some(Reason::MissingWaylandInterface(name));
+    }
+    if facts.requested == Override::Auto && !facts.supported_compositor {
+        return Some(Reason::UntestedCompositor);
     }
     (facts.requested == Override::Auto && !facts.auto_native).then_some(Reason::OptInOnly)
 }
@@ -167,6 +181,7 @@ mod tests {
             linux: true,
             display: Display::Wayland,
             missing_interface: None,
+            supported_compositor: true,
             auto_native: true,
             gpu: Some(Ok(())),
         }
@@ -222,6 +237,13 @@ mod tests {
                     ..wayland()
                 },
                 Reason::OptInOnly,
+            ),
+            (
+                Facts {
+                    supported_compositor: false,
+                    ..wayland()
+                },
+                Reason::UntestedCompositor,
             ),
             (
                 Facts {
@@ -293,6 +315,16 @@ mod tests {
             }),
             (Path::Canvas, Reason::NoAdapter)
         );
+    }
+
+    #[test]
+    fn choosing_native_also_works_on_an_untested_compositor() {
+        let forced = Facts {
+            requested: Override::Native,
+            supported_compositor: false,
+            ..wayland()
+        };
+        assert_eq!(choose(&forced), (Path::Native, Reason::ForcedNative));
     }
 
     #[test]
@@ -380,12 +412,13 @@ pub fn get_display_path(state: tauri::State<'_, DisplayPathState>) -> DisplayPat
 
 /// Collects the startup facts and chooses the path. Runs before the main
 /// window exists: the window is transparent only on the native path.
-pub fn decide() -> (Path, Reason) {
+pub fn decide(setting: &str) -> (Path, Reason) {
     let mut facts = Facts {
-        requested: Override::from_env(),
+        requested: Override::from_env_or(setting),
         linux: cfg!(target_os = "linux"),
         display: Display::Other,
         missing_interface: None,
+        supported_compositor: std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
         auto_native: false,
         gpu: None,
     };

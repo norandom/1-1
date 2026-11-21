@@ -109,7 +109,7 @@ Zero-copy import (requirement 7.2): VA-API exports a decoded surface as a DMA-BU
 - **Unit (frontend):** `native_view` rectangles for fit, native, scrolled and clipped cases, and `null` on unmount and tab switch; the `native-layer` class follows the path and drops on fallback.
 - **Regression guard (requirement 6.3):** a frontend test fails on `repeat: Infinity` or CSS `infinite` animations under `src/components/session` and `src/components/dashboard`; a Rust test fails if `build_connector_config` enables `pointer_software_rendering`.
 - **On the reference machine:** pixel comparison (`ONE_ONE_RENDERER_CAPTURE=1`), resize, sidebar, fullscreen, tab switches, reconnect, pause, minimize. Recorded with the measurements below.
-- **Before release:** GNOME and KDE on Wayland, an X11 session and `GDK_BACKEND=x11` (both canvas), a machine without a usable Vulkan or GL driver (canvas).
+- **Other desktops:** not tested (maintainer decision, 21 November 2026). Automatic mode chooses the native layer only on Hyprland; GNOME, KDE and others keep the canvas unless `ONE_ONE_RENDERER=native` asks for the layer.
 
 ## Measurement
 
@@ -117,7 +117,7 @@ The reference measurement (requirement 6.2) runs `scripts/linux/profile.sh` for 
 
 ## Risks
 
-- **Compositors.** Hyprland works; GNOME (Mutter) and KDE (KWin) support subsurfaces and are expected to, but are checked before release.
+- **Compositors.** Hyprland works and is the only supported compositor. GNOME (Mutter) and KDE (KWin) support subsurfaces, but are not tested, so the layer is off there unless forced.
 - **WebKitGTK transparency.** A future WebKitGTK that composites differently could paint an opaque background; the full-window layer keeps the failure visible as the background color, and the canvas override remains.
 - **GTK commits.** The subsurface position applies on GTK's next commit. If GTK skips a commit when nothing in the page changed, a window move inside the toplevel (sidebar toggle) could lag a frame; the layer then calls `queue_draw` explicitly, as the probe does.
 - **Driver variety.** Older Intel or NVIDIA proprietary drivers may lack what wgpu needs; they fall back at startup with `NoAdapter` or `SurfaceFailed`.

@@ -82,10 +82,10 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - `scripts/linux/profile.sh`, 30 s per scenario and path: idle, scrolling terminal, typing with echo, full-screen update. Main-thread, web-process and whole-app CPU, frame rate, decode-to-present latency. Targets: main thread ≤ 5%, whole app at most half of the canvas, latency not worse. Record in `validation.md`.
   - _Depends: 7.2_
   - _Requirements: 3.2, 3.3, 3.4, 6.1, 6.2_
-- [ ] 7.4 Other desktops before release
-  - GNOME and KDE on Wayland (native), an X11 session and `GDK_BACKEND=x11` (canvas with the right reason), a machine without a usable Vulkan or GL driver (canvas).
-  - _Depends: 7.3_
-  - _Requirements: 1.2, 6.2_
+- [x] 7.4 Supported compositors only
+  - Settings, Display, Renderer (Automatic, GPU layer, Web canvas) carries the choice at the next start; `ONE_ONE_RENDERER` still overrides it (requirement 1.5 amended).
+  - Replaced 21 November 2026 by the maintainer's decision: GNOME, KDE and X11 are not supported and not tested; the reference machine is the test environment. Automatic mode chooses the native layer only on Hyprland (`Reason::UntestedCompositor` elsewhere, override with `ONE_ONE_RENDERER=native`); X11 and XWayland already keep the canvas.
+  - _Requirements: 1.1, 1.2, 6.2_
 
 - [ ] 8. Leave room for H.264
 - [ ] 8.1 `FrameSource` with a YUV input

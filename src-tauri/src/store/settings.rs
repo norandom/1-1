@@ -32,6 +32,17 @@ pub struct AppSettings {
     pub reconnect_timeout: u64,
     #[serde(default = "default_connection_timeout")]
     pub connection_timeout: u64,
+    /// How the remote picture is shown (spec rdp-native-renderer): `auto`,
+    /// `native` (GPU layer) or `canvas`. Read at startup.
+    #[serde(default = "default_renderer")]
+    pub renderer: String,
+}
+
+/// The values `renderer` accepts.
+pub const RENDERERS: [&str; 3] = ["auto", "native", "canvas"];
+
+fn default_renderer() -> String {
+    "auto".to_string()
 }
 
 fn default_theme() -> String {
@@ -87,6 +98,7 @@ impl Default for AppSettings {
             quality: default_quality(),
             reconnect_timeout: default_reconnect_timeout(),
             connection_timeout: default_connection_timeout(),
+            renderer: default_renderer(),
         }
     }
 }
@@ -109,6 +121,7 @@ pub struct AppSettingsPatch {
     pub quality: Option<u32>,
     pub reconnect_timeout: Option<u64>,
     pub connection_timeout: Option<u64>,
+    pub renderer: Option<String>,
 }
 
 pub struct SettingsStore {
@@ -148,6 +161,14 @@ impl SettingsStore {
 
     pub async fn get(&self) -> AppSettings {
         self.settings.lock().await.clone()
+    }
+
+    /// The renderer choice, for startup (no async runtime there yet).
+    pub fn renderer_at_startup(&self) -> String {
+        self.settings
+            .try_lock()
+            .map(|settings| settings.renderer.clone())
+            .unwrap_or_else(|_| default_renderer())
     }
 
     /// Merge a partial update onto the stored settings (task 5.2, B3-11
@@ -194,6 +215,12 @@ impl SettingsStore {
         }
         if let Some(connection_timeout) = patch.connection_timeout {
             settings.connection_timeout = connection_timeout;
+        }
+        if let Some(renderer) = patch.renderer {
+            if !RENDERERS.contains(&renderer.as_str()) {
+                return Err(format!("Unknown renderer '{renderer}'"));
+            }
+            settings.renderer = renderer;
         }
         let merged = settings.clone();
         self.save(&merged).await?;
@@ -377,6 +404,7 @@ mod tests {
         // values (B3-11 fix).
         let patch: AppSettingsPatch = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         assert_eq!(patch.theme.as_deref(), Some("dark"));
+        assert_eq!(patch.renderer, None);
         assert_eq!(patch.connection_timeout, None);
         assert_eq!(patch.quality, None);
 
@@ -466,5 +494,33 @@ mod tests {
         assert_eq!(parsed.connection_timeout, defaults.connection_timeout);
         assert_eq!(parsed.quality, defaults.quality);
         assert_eq!(parsed.default_resolution, defaults.default_resolution);
+    }
+
+    #[tokio::test]
+    async fn the_renderer_setting_defaults_to_auto_and_accepts_only_known_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().to_path_buf());
+        assert_eq!(store.renderer_at_startup(), "auto");
+        let saved = store
+            .apply(AppSettingsPatch {
+                renderer: Some("native".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(saved.renderer, "native");
+        assert!(
+            store
+                .apply(AppSettingsPatch {
+                    renderer: Some("gpu".into()),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            SettingsStore::new(dir.path().to_path_buf()).renderer_at_startup(),
+            "native"
+        );
     }
 }

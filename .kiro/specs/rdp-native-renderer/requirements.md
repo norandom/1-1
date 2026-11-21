@@ -18,11 +18,11 @@ The maintainer approved these requirements on 21 November 2026. This spec brings
 
 ### 1. Choose the display path, with today's canvas as the fallback
 
-1. When a Linux session starts in a Wayland desktop session and the native layer can be created, 1-1 shall show the remote picture through the native layer.
+1. When a Linux session starts in a Wayland desktop session on a supported compositor and the native layer can be created, 1-1 shall show the remote picture through the native layer. Hyprland is the only supported compositor (maintainer decision, 21 November 2026); elsewhere 1-1 keeps the canvas unless `ONE_ONE_RENDERER=native` asks for the layer.
 2. If the desktop session is X11, 1-1 runs under XWayland, the compositor lacks a required Wayland interface, no usable GPU adapter is found, or creating the layer fails, 1-1 shall show the remote picture through the web canvas exactly as before, without an error dialog and with the session usable.
 3. If the native layer fails while a session is running (lost device, lost surface, a protocol error it can recover from), 1-1 shall switch that session to the canvas without dropping the connection or losing the current picture.
 4. When 1-1 chooses or changes the display path, it shall log the path and the reason once, and show the active path in the session's diagnostics (the Performance HUD).
-5. When the environment variable `ONE_ONE_RENDERER` is `canvas`, 1-1 shall use the canvas; when it is `native`, 1-1 shall try the native layer and fall back only on failure. Without the variable, 1-1 chooses automatically. No setting is added to the UI.
+5. Settings shall offer the choice Automatic, GPU layer or Web canvas (amended 21 November 2026 at the maintainer's request; it replaces "no setting in the UI"). With Web canvas, 1-1 shall use the canvas; with GPU layer, 1-1 shall try the native layer, also on an untested compositor, and fall back only on failure; with Automatic, 1-1 chooses as in 1.1. The choice applies at the next start, and Settings shows the path in use and its reason. The environment variable `ONE_ONE_RENDERER` (`auto`, `native`, `canvas`), when set, overrides the setting for testing.
 6. The native layer shall never stop a session that the canvas could show.
 
 ### 2. Show the same picture
@@ -60,7 +60,7 @@ The maintainer approved these requirements on 21 November 2026. This spec brings
 ### 6. Measurement and regression guard
 
 1. The profiling tools for Linux (`scripts/linux/profile.sh`) and the equivalent steps for macOS and Windows shall be documented in `docs/`, so that each measurement can be repeated.
-2. The reference measurement shall record, for the canvas and for the native layer on the same machine and session: an idle desktop, a scrolling terminal, typing with echo, and a full-screen update (a video or window drag); per scenario the main-thread CPU, the web-process CPU, the whole app's CPU, and the frame rate. The maintainer's Linux workstation (Hyprland, scale 1.6) is the reference machine; GNOME and KDE on Wayland shall be checked before a release.
+2. The reference measurement shall record, for the canvas and for the native layer on the same machine and session: an idle desktop, a scrolling terminal, typing with echo, and a full-screen update (a video or window drag); per scenario the main-thread CPU, the web-process CPU, the whole app's CPU, and the frame rate. The maintainer's Linux workstation (Hyprland, scale 1.6) is the reference machine and the only test environment: GNOME, KDE and X11 are not supported targets (maintainer decision, 21 November 2026), so they are not checked; requirement 1.1 keeps them on the canvas.
 3. Tests shall fail if a session or dashboard view adds an animation that repeats forever, or if the session again composites the pointer into frames.
 4. Automated tests shall cover the choice between the native layer and the canvas, including every fallback reason in requirement 1.2 and the runtime switch in 1.3, without a GPU.
 

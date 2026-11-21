@@ -118,6 +118,7 @@ pub fn run() {
             library_store.attach_share_grants(Arc::clone(&share_grants));
             app.manage(share_grants);
             let settings_store = SettingsStore::new(data_dir);
+            let renderer_setting = settings_store.renderer_at_startup();
             let session_manager = SessionManager::new();
             // Task 5.3 (Req 12.7): test-support builds may redirect
             // credentials into a harness-owned namespace; production builds
@@ -144,7 +145,7 @@ pub fn run() {
             // once here, before the main window exists, because only the
             // native path makes the window transparent; only a failure
             // changes it later.
-            let (path, reason) = renderer::display_path::decide();
+            let (path, reason) = renderer::display_path::decide(&renderer_setting);
             let display_path = renderer::display_path::DisplayPathState::new(path, reason);
             let main_window = {
                 let config = app

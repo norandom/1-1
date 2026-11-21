@@ -7,6 +7,8 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useTheme } from '../../hooks/useTheme';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { useDisplayPath } from '@/lib/display-path';
+import type { AppSettings } from '@/types';
 import { Switch } from '@/components/ui/switch';
 import { Slider } from '@/components/ui/slider';
 import { Input } from '@/components/ui/input';
@@ -26,6 +28,7 @@ const RESOLUTIONS = [
 export function SettingsPage() {
   const { settings, fetchSettings, updateSettings, error } = useSettingsStore();
   const { theme, setTheme } = useTheme();
+  const displayPath = useDisplayPath();
 
   useEffect(() => {
     fetchSettings();
@@ -261,6 +264,42 @@ export function SettingsPage() {
                     <SelectItem value="10000">10 seconds</SelectItem>
                     <SelectItem value="30000">30 seconds</SelectItem>
                     <SelectItem value="60000">60 seconds</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Display: how the remote picture is drawn (spec rdp-native-renderer) */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                Display
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-0.5">
+                  <Label className="text-sm font-medium">Renderer</Label>
+                  <p className="text-[11px] text-muted-foreground">
+                    The GPU layer draws remote screens without repainting the window (Linux, Wayland).
+                    Applies at the next start.
+                  </p>
+                  <p className="text-[11px] text-muted-foreground" title={displayPath.reason}>
+                    Now: {displayPath.path === 'native' ? 'GPU layer' : 'web canvas'} ({displayPath.reason})
+                  </p>
+                </div>
+                <Select
+                  value={settings.renderer ?? 'auto'}
+                  onValueChange={(value) => updateSettings({ renderer: value as AppSettings['renderer'] })}
+                >
+                  <SelectTrigger className="w-[150px]" aria-label="Renderer">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Automatic</SelectItem>
+                    <SelectItem value="native">GPU layer</SelectItem>
+                    <SelectItem value="canvas">Web canvas</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

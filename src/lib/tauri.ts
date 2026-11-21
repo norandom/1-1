@@ -324,6 +324,7 @@ export async function getSettings(): Promise<AppSettings> {
       quality: 80,
       reconnectTimeout: 5000,
       connectionTimeout: 10000,
+      renderer: 'auto',
     };
   }
 }

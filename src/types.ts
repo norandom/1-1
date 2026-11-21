@@ -188,6 +188,8 @@ export interface AppSettings {
   quality: number;
   reconnectTimeout: number;
   connectionTimeout: number;
+  /** How the remote picture is shown; read at the next start. */
+  renderer: 'auto' | 'native' | 'canvas';
 }
 
 export interface KeyEvent {

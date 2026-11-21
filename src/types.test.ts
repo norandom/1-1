@@ -80,6 +80,7 @@ describe('Type definitions', () => {
       quality: 80,
       reconnectTimeout: 5000,
       connectionTimeout: 10000,
+      renderer: 'auto',
     };
     expect(settings.theme).toBe('dark');
     expect(settings.defaultPort).toBe(3389);

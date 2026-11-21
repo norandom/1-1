@@ -27,6 +27,7 @@ export const defaultSettings: AppSettings = {
   // default_connection_timeout() in src-tauri/src/store/settings.rs;
   // parity pinned in settingsStore.test.ts (BACKEND_DEFAULTS).
   connectionTimeout: 30000,
+  renderer: 'auto',
 };
 
 export const useSettingsStore = create<SettingsState>((set) => {
