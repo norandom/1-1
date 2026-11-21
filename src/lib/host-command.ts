@@ -9,7 +9,10 @@ import { DEFAULT_HOST_PROFILE, normalizeHostProfile } from './host-profile';
  * `--fingerprint`.
  */
 
-type Kind = 'string' | 'int' | 'bool' | readonly string[];
+type Kind = 'string' | 'int' | 'bool' | 'layout' | readonly string[];
+
+/** A Windows keyboard layout ID as Windows writes it: eight hex digits. */
+const klidText = (klid: number) => klid.toString(16).toUpperCase().padStart(8, '0');
 
 const PROFILE: Record<keyof HostProfile, Kind> = {
   idlePreview: 'bool',
@@ -31,6 +34,9 @@ const PROFILE: Record<keyof HostProfile, Kind> = {
   scalePercent: 'int',
   savePassword: 'bool',
   transferPace: ['responsive', 'balanced', 'fastest'],
+  keyboardLayout: 'layout',
+  keyboardKeys: ['automatic', 'physical'],
+  superAsCtrl: 'bool',
 };
 
 const kebab = (key: string) => key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
@@ -66,7 +72,8 @@ export function hostCommand(host: ConnectionConfig, options: HostCommandOptions)
   for (const tag of host.tags) args.push(['tag', tag]);
   const profile = normalizeHostProfile(host.hostProfile);
   for (const key of Object.keys(PROFILE) as (keyof HostProfile)[]) {
-    args.push([kebab(key), String(profile[key])]);
+    const value = profile[key];
+    args.push([kebab(key), PROFILE[key] === 'layout' && typeof value === 'number' ? klidText(value) : String(value)]);
   }
   if (options.library) args.push(['add-to-lib', options.library]);
   if (options.fingerprint) args.push(['fingerprint', options.fingerprint]);
@@ -113,6 +120,10 @@ export function parseHostCommand(args: readonly string[]): ParsedHostCommand {
       } else if (kind === 'int') {
         if (!/^\d+$/.test(value)) return fail(`${flag} takes a whole number.`);
         profile[key] = Number(value);
+      } else if (kind === 'layout') {
+        if (value === 'automatic' || value === 'serverDefault') profile[key] = value;
+        else if (/^[0-9A-Fa-f]{8}$/.test(value)) profile[key] = parseInt(value, 16);
+        else return fail(`${flag} takes automatic, serverDefault or a Windows layout ID such as 00000407.`);
       } else if (Array.isArray(kind)) {
         if (!kind.includes(value)) return fail(`${flag} takes one of: ${kind.join(', ')}.`);
         profile[key] = value;

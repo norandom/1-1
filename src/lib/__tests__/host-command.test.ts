@@ -13,6 +13,7 @@ function host(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
     hostProfile: {
       ...DEFAULT_HOST_PROFILE, scaling: 'custom', scalePercent: 150, savePassword: false,
       clipboardDirection: 'localToRemote', bulkCompression: 'rdp61', wallpaper: true, bottomBar: 'withToolbar',
+      keyboardLayout: 0x407, keyboardKeys: 'physical', superAsCtrl: false,
     },
     ...overrides,
   };
@@ -40,6 +41,18 @@ describe('host command line', () => {
       expect(parsed.value.input).toEqual(saved(original));
     });
   }
+
+  it('writes a fixed keyboard layout as a Windows layout ID and reads the named choices', () => {
+    expect(hostCommand(host(), { windows: false })).toContain('--keyboard-layout 00000407 ');
+    const parse = (value: string) => parseHostCommand(['import', '--name', 'B', '--host', 'b', '--keyboard-layout', value]);
+    const layout = (value: string) => {
+      const parsed = parse(value);
+      return parsed.ok ? parsed.value.input.hostProfile?.keyboardLayout : parsed.error;
+    };
+    expect(layout('serverDefault')).toBe('serverDefault');
+    expect(layout('00020409')).toBe(0x20409);
+    expect(layout('qwerty')).toContain('Windows layout ID');
+  });
 
   it('names every host setting as its own flag', () => {
     const command = hostCommand(host(), { windows: false });

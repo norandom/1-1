@@ -70,6 +70,12 @@ export interface HostProfile {
   savePassword: boolean;
   /** How shared-folder file data shares the connection with input and frames. */
   transferPace: 'responsive' | 'balanced' | 'fastest';
+  /** Layout reported at connect: the detected local one, none, or a fixed Windows layout ID (KLID). */
+  keyboardLayout: 'automatic' | 'serverDefault' | number;
+  /** Automatic: printable characters as Unicode, the rest as keys. Physical: every key as a scancode. */
+  keyboardKeys: 'automatic' | 'physical';
+  /** Super chords reach the remote as Ctrl chords; Super alone stays the Windows key. */
+  superAsCtrl: boolean;
 }
 
 // Task 6.6 (Req 10.1/10.19): `libraryId`/`folderId`/`mock` mirror the v2

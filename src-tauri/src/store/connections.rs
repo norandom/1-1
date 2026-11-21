@@ -151,6 +151,46 @@ impl TransferPace {
     }
 }
 
+/// Which keyboard layout the session reports at connect (spec
+/// rdp-keyboard-layout, requirement 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum KeyboardLayoutChoice {
+    /// `"automatic"` (the detected local layout) or `"serverDefault"`
+    /// (report nothing, as before).
+    Named(KeyboardLayoutName),
+    /// A fixed Windows keyboard layout identifier (KLID).
+    Fixed(u32),
+}
+
+impl Default for KeyboardLayoutChoice {
+    fn default() -> Self {
+        Self::AUTOMATIC
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyboardLayoutName {
+    Automatic,
+    ServerDefault,
+}
+
+impl KeyboardLayoutChoice {
+    pub const AUTOMATIC: Self = Self::Named(KeyboardLayoutName::Automatic);
+}
+
+/// How key presses travel (requirement 2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyboardKeys {
+    /// Printable characters as Unicode, everything else as scancodes.
+    #[default]
+    Automatic,
+    /// Every key as a scancode (the behavior before 21 November 2026).
+    Physical,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HostProfile {
@@ -176,6 +216,12 @@ pub struct HostProfile {
     /// for it at connect and holds it only for that session.
     pub save_password: bool,
     pub transfer_pace: TransferPace,
+    /// The keyboard layout reported at connect.
+    pub keyboard_layout: KeyboardLayoutChoice,
+    pub keyboard_keys: KeyboardKeys,
+    /// Super chords reach the remote as Ctrl chords; Super alone stays the
+    /// Windows key.
+    pub super_as_ctrl: bool,
     /// The desktop scale factor (100–500%) requested for the running session,
     /// measured by the window at connect and resize. Runtime only, never saved.
     #[serde(skip)]
@@ -203,6 +249,9 @@ impl Default for HostProfile {
             scale_percent: 100,
             save_password: true,
             transfer_pace: TransferPace::Responsive,
+            keyboard_layout: KeyboardLayoutChoice::AUTOMATIC,
+            keyboard_keys: KeyboardKeys::Automatic,
+            super_as_ctrl: true,
             desktop_scale: None,
         }
     }
@@ -465,6 +514,43 @@ mod tests {
         f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    /// Spec rdp-keyboard-layout 4.3: hosts from older versions read as
+    /// Automatic; the three settings round-trip.
+    #[test]
+    fn keyboard_settings_default_to_automatic_and_round_trip() {
+        let old: HostProfile =
+            serde_json::from_value(serde_json::json!({"idlePreview": true})).unwrap();
+        assert_eq!(old.keyboard_layout, KeyboardLayoutChoice::AUTOMATIC);
+        assert_eq!(old.keyboard_keys, KeyboardKeys::Automatic);
+        assert!(old.super_as_ctrl);
+
+        for (json, choice) in [
+            (
+                serde_json::json!("automatic"),
+                KeyboardLayoutChoice::AUTOMATIC,
+            ),
+            (
+                serde_json::json!("serverDefault"),
+                KeyboardLayoutChoice::Named(KeyboardLayoutName::ServerDefault),
+            ),
+            (serde_json::json!(1031), KeyboardLayoutChoice::Fixed(0x407)),
+        ] {
+            let profile: HostProfile = serde_json::from_value(serde_json::json!({
+                "keyboardLayout": json, "keyboardKeys": "physical", "superAsCtrl": false
+            }))
+            .unwrap();
+            assert_eq!(profile.keyboard_layout, choice);
+            assert_eq!(profile.keyboard_keys, KeyboardKeys::Physical);
+            assert!(!profile.super_as_ctrl);
+            let back = serde_json::to_value(&profile).unwrap();
+            assert_eq!(back["keyboardLayout"], json);
+        }
+        assert!(
+            serde_json::from_value::<HostProfile>(serde_json::json!({"keyboardLayout": "qwerty"}))
+                .is_err()
+        );
     }
 
     #[test]

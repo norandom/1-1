@@ -6,6 +6,7 @@ mod commands;
 /// exist in production builds (Req 12.10).
 #[cfg(feature = "test-support")]
 mod harness;
+mod keyboard;
 mod rdp;
 mod renderer;
 mod store;

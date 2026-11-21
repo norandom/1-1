@@ -13,6 +13,9 @@ export const DEFAULT_HOST_PROFILE: Readonly<HostProfile> = Object.freeze({
   scalePercent: 100,
   savePassword: true,
   transferPace: 'responsive',
+  keyboardLayout: 'automatic',
+  keyboardKeys: 'automatic',
+  superAsCtrl: true,
 });
 
 /** Defaults missing legacy fields without losing explicit false preferences. */
@@ -37,6 +40,9 @@ export function normalizeHostProfile(profile?: Partial<HostProfile> | null): Hos
     scalePercent: profile?.scalePercent ?? DEFAULT_HOST_PROFILE.scalePercent,
     savePassword: profile?.savePassword ?? DEFAULT_HOST_PROFILE.savePassword,
     transferPace: profile?.transferPace ?? DEFAULT_HOST_PROFILE.transferPace,
+    keyboardLayout: profile?.keyboardLayout ?? DEFAULT_HOST_PROFILE.keyboardLayout,
+    keyboardKeys: profile?.keyboardKeys ?? DEFAULT_HOST_PROFILE.keyboardKeys,
+    superAsCtrl: profile?.superAsCtrl ?? DEFAULT_HOST_PROFILE.superAsCtrl,
   };
 }
 

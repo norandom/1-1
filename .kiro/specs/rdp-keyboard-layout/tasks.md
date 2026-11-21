@@ -3,12 +3,13 @@
 Task 1 builds the data and settings (layout table, host profile). Task 2 detects the local layout per platform. Task 3 reports it at connect and shows it. Task 4 sends characters as Unicode, task 5 makes Super act as Ctrl, and task 6 verifies against the maintainer's hosts. Each leaf is one to three hours; today's behavior stays available as "Physical keys" and "Server default" throughout.
 
 - [ ] 1. Data and settings
-- [ ] 1.1 Layout table
+- [x] 1.1 Layout table
   - `src-tauri/src/keyboard/klid.rs`: XKB layout and variant, and macOS input source IDs, to Windows KLIDs with the match kind (exact, closest, unknown), plus a short name ("DE") and a display name. Unit tests for exact, closest (Mac and no-dead-keys variants) and unknown entries.
   - _Requirements: 1.1, 1.2, 7.3_
-- [ ] 1.2 Keyboard section in the host profile
+- [x] 1.2 Keyboard section in the host profile
   - `KeyboardProfile { layout: Automatic | ServerDefault | Fixed(klid), keys: Automatic | Physical, super_as_ctrl }` in `HostProfile` with serde defaults (Automatic, Automatic, on); TypeScript types and normalization; import, export and duplicate keep it. Tests for defaults and old profiles.
   - _Requirements: 1.4, 4.1, 4.3, 7.3_
+  - Done 21 November 2026 with 1.1 (`src-tauri/src/keyboard/klid.rs`). Flat profile fields like the others: `keyboardLayout` (`"automatic"`, `"serverDefault"` or a KLID number), `keyboardKeys` (`"automatic"`, `"physical"`), `superAsCtrl`. "Copy as command line" carries them (`--keyboard-layout 00000407`, Windows's eight-digit hex form).
 - [ ] 1.3 Keyboard section in the host editor
   - `HostProfileFields`: Layout (Automatic, a list of common layouts, Server default), Keys (Automatic, Physical keys, with the note about servers without Unicode input), Super as Ctrl. Shows the detected local layout (`detect_keyboard_layout`, from 2.x).
   - _Depends: 1.2_
