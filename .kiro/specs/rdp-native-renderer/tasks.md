@@ -12,14 +12,15 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - _Requirements: 1.4_
   - Done 21 November 2026 (`renderer/display_path.rs`, `src/lib/display-path.ts`, HUD "Renderer" line). Two adjustments, also noted in the design: the path is app-wide state (`get_display_path` plus a `display-path` event) instead of a `SessionInfo` field, since every session switches together; and automatic mode keeps the canvas (`OptInOnly`) until task 7.3 passes, so `ONE_ONE_RENDERER=native` opts in during development. The GPU adapter is tried only when every other fact allows the layer.
 
-- [ ] 2. Frames for the native path in the session actor
-- [ ] 2.1 One frame store per session, with damage
+- [x] 2. Frames for the native path in the session actor
+- [x] 2.1 One frame store per session, with damage
   - `SharedFrame` records the union of damage since the last take and offers `take_damage()` (copies only that rectangle, under the lock) and a full take for a session switch. Created per session, dropped with it; the app-wide `SharedFrame` goes away. Unit tests: merging, full refresh on resize, take after take.
   - _Requirements: 4.1, 4.2, 4.3, 3.1_
-- [ ] 2.2 `FrameSink` in `present_image_update`
+- [x] 2.2 `FrameSink` in `present_image_update`
   - `Canvas` keeps today's path exactly; `Native` writes to the session's store and wakes the renderer, bypassing `FrameDelivery`. A stall is "no take for 5 s while visible". Switching `Native` → `Canvas` resets delivery and sends one full frame. Session tests with a recording channel: no packets on the native path, one full frame after a switch, no reconnect.
   - _Depends: 2.1_
   - _Requirements: 1.3, 1.6, 3.1_
+  - Done 21 November 2026. `SharedFrame` keeps its buffer authoritative and tracks damage (`take_damage`, `take_full`); this also fixes the pinned defect B3-10, where `publish()` swapped the buffer and lost earlier rects. `renderer/frame_stores.rs` registers each native session's store weakly. On the native path `present_image_update` writes only the store; `SessionCommand::UseCanvas` switches a session to the canvas with one full frame (also accepted while connecting or reconnecting). Session tests now run the canvas path by default, with native twins for the store checks and a switch test. The stall check for the native path moves to 4.2, since it needs the render thread. The old opt-in renderer (`ONE_ONE_NATIVE_RENDERER`) is no longer fed until 4.1 replaces it.
 
 - [ ] 3. The Wayland layer
 - [ ] 3.1 `NativeLayer` below the web view
@@ -41,7 +42,7 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - _Depends: 2.1, 3.1_
   - _Requirements: 2.1, 3.1, 3.5, 4.4_
 - [ ] 4.2 The visible session
-  - Backend view state per window: session id, destination and source rectangles. On a session change: full upload from that session's store. `null` view: draw only the background once, then stay idle.
+  - Backend view state per window: session id, destination and source rectangles. On a session change: full upload from that session's store. `null` view: draw only the background once, then stay idle. Stall on the native path: the visible session's store not taken for 5 s sets `display_stalled` (moved here from 2.2).
   - _Depends: 4.1_
   - _Requirements: 2.4, 4.1_
 

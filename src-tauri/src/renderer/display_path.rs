@@ -363,7 +363,6 @@ impl DisplayPathState {
         }
     }
 
-    #[expect(dead_code, reason = "read by the frame sink, spec task 2.2")]
     pub fn path(&self) -> Path {
         self.0.lock().unwrap().0
     }

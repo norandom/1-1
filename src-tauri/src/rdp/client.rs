@@ -59,6 +59,13 @@ pub enum SessionCommand {
         reply: crate::rdp::clipboard::ClipboardReply,
     },
     Disconnect,
+    /// Spec rdp-native-renderer 1.3: the native layer failed; send frames to
+    /// the web canvas from now on, starting with the whole current picture.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "sent by the runtime fallback, spec task 6.1")
+    )]
+    UseCanvas,
     /// Task 5.3 (Req 12.2/12.10): force a mock-session connection loss so
     /// E2E can drive the shared reconnect loop. Exists ONLY in
     /// `test-support` builds (compiled out of production); a logged no-op on

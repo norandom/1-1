@@ -150,6 +150,7 @@ pub fn run() {
             let main_window = app.get_webview_window("main").unwrap();
             let (path, reason) = renderer::display_path::decide(&main_window);
             app.manage(renderer::display_path::DisplayPathState::new(path, reason));
+            app.manage(renderer::frame_stores::FrameStores::default());
 
             // The web view's canvas draws remote frames from IPC. The native
             // wgpu renderer drew into the window's own surface under the opaque

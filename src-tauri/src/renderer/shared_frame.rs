@@ -11,11 +11,53 @@ pub struct FrameSnapshot {
     pub data: Vec<u8>,
 }
 
+/// A changed region taken for upload: its pixels, tightly packed RGBA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the render thread, spec task 4.1")
+)]
+pub struct Damage {
+    pub frame_width: u32,
+    pub frame_height: u32,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// The whole frame, at possibly new dimensions: the reader must
+    /// (re)create its texture before uploading.
+    pub full: bool,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Region {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+impl Region {
+    fn union(self, other: Self) -> Self {
+        Self {
+            x0: self.x0.min(other.x0),
+            y0: self.y0.min(other.y0),
+            x1: self.x1.max(other.x1),
+            y1: self.y1.max(other.y1),
+        }
+    }
+}
+
 struct SharedFrameInner {
     width: u32,
     height: u32,
+    /// The authoritative picture. Never swapped out: readers copy from it.
     write_buf: Vec<u8>,
-    read_snapshot: Arc<FrameSnapshot>,
+    /// Bounding box of the changes since the last `take_damage`.
+    damage: Option<Region>,
+    /// The frame was replaced (first frame, resize, reactivation).
+    full: bool,
 }
 
 /// High-performance shared frame buffer between the RDP session actor and the GPU renderer.
@@ -47,6 +89,15 @@ impl WriteGuard<'_> {
     pub fn update_rect(&mut self, x: u16, y: u16, w: u16, h: u16, rgba_data: &[u8], stride: usize) {
         let fw = self.inner.width as usize;
         let fh = self.inner.height as usize;
+        let region = Region {
+            x0: u32::from(x).min(self.inner.width),
+            y0: u32::from(y).min(self.inner.height),
+            x1: (u32::from(x) + u32::from(w)).min(self.inner.width),
+            y1: (u32::from(y) + u32::from(h)).min(self.inner.height),
+        };
+        if region.x0 < region.x1 && region.y0 < region.y1 {
+            self.inner.damage = Some(self.inner.damage.map_or(region, |d| d.union(region)));
+        }
         let row_bytes = w as usize * 4;
 
         for row in 0..h as usize {
@@ -87,6 +138,13 @@ impl WriteGuard<'_> {
             self.inner.write_buf.resize(expected, 0);
         }
         self.inner.write_buf[..expected].copy_from_slice(&data[..expected]);
+        self.inner.full = true;
+        self.inner.damage = Some(Region {
+            x0: 0,
+            y0: 0,
+            x1: width,
+            y1: height,
+        });
         true
     }
 
@@ -106,11 +164,8 @@ impl SharedFrame {
                 width,
                 height,
                 write_buf: vec![0u8; size],
-                read_snapshot: Arc::new(FrameSnapshot {
-                    width,
-                    height,
-                    data: vec![0u8; size],
-                }),
+                damage: None,
+                full: false,
             }),
             dirty: AtomicBool::new(false),
             version: AtomicU64::new(0),
@@ -154,39 +209,49 @@ impl SharedFrame {
         self.mark_dirty();
     }
 
-    /// Publish the write buffer as a new immutable snapshot.
-    /// Zero-copy: swaps write_buf into snapshot, reclaims old snapshot's Vec.
+    /// A copy of the whole picture, if anything changed since the last
+    /// publish. For tests and diagnostics; the renderer uses `take_damage`.
     pub fn publish(&self) -> Option<Arc<FrameSnapshot>> {
         if !self.dirty.swap(false, Ordering::AcqRel) {
             return None;
         }
-        let mut inner = self.inner.lock().unwrap();
-
-        let mut snapshot_data = Vec::new();
-        std::mem::swap(&mut inner.write_buf, &mut snapshot_data);
-
-        let snapshot = Arc::new(FrameSnapshot {
+        let inner = self.inner.lock().unwrap();
+        Some(Arc::new(FrameSnapshot {
             width: inner.width,
             height: inner.height,
-            data: snapshot_data,
-        });
+            data: inner.write_buf.clone(),
+        }))
+    }
 
-        let old_snapshot = std::mem::replace(&mut inner.read_snapshot, snapshot.clone());
+    /// The pixels of everything changed since the last take, as one
+    /// rectangle; `None` when nothing changed. Holds the lock only to copy
+    /// that rectangle.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the render thread, spec task 4.1")
+    )]
+    pub fn take_damage(&self) -> Option<Damage> {
+        let mut inner = self.inner.lock().unwrap();
+        let region = inner.damage.take()?;
+        let full = std::mem::take(&mut inner.full);
+        Some(copy_region(&inner, region, full))
+    }
 
-        // Reclaim old Vec allocation if renderer released it
-        match Arc::try_unwrap(old_snapshot) {
-            Ok(old) => {
-                inner.write_buf = old.data;
-                let expected = (inner.width * inner.height * 4) as usize;
-                inner.write_buf.resize(expected, 0);
-            }
-            Err(_) => {
-                let expected = (inner.width * inner.height * 4) as usize;
-                inner.write_buf = vec![0u8; expected];
-            }
-        }
-
-        Some(snapshot)
+    /// The whole picture, for a reader that has nothing yet (a session
+    /// coming on screen). Leaves pending damage in place.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the render thread, spec task 4.1")
+    )]
+    pub fn take_full(&self) -> Damage {
+        let inner = self.inner.lock().unwrap();
+        let region = Region {
+            x0: 0,
+            y0: 0,
+            x1: inner.width,
+            y1: inner.height,
+        };
+        copy_region(&inner, region, true)
     }
 
     /// Block until a new frame is available or timeout (for render thread).
@@ -208,6 +273,30 @@ impl SharedFrame {
     #[allow(dead_code)]
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the render thread, spec task 4.1")
+)]
+fn copy_region(inner: &SharedFrameInner, region: Region, full: bool) -> Damage {
+    let (width, height) = (region.x1 - region.x0, region.y1 - region.y0);
+    let row = width as usize * 4;
+    let mut data = Vec::with_capacity(row * height as usize);
+    for y in region.y0..region.y1 {
+        let start = (y as usize * inner.width as usize + region.x0 as usize) * 4;
+        data.extend_from_slice(&inner.write_buf[start..start + row]);
+    }
+    Damage {
+        frame_width: inner.width,
+        frame_height: inner.height,
+        x: region.x0,
+        y: region.y0,
+        width,
+        height,
+        full,
+        data,
     }
 }
 
@@ -326,60 +415,104 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_publishes_lose_the_other_branchs_rects_defect_b3_10() {
-        // B3-10: publish() swaps the write buffer out and rebuilds the next
-        // one from the PREVIOUS published snapshot (or zeros), so partial
-        // updates published one-by-one alternate between two accumulation
-        // branches — every snapshot loses the rects of the publish before
-        // it. The GPU surface therefore diverges from the remote display
-        // for any multi-PDU sequence (the actor writes only the dirty
-        // rects of each PDU). Pinned as a defect (Req 4.2 sync); a fix must
-        // keep the full accumulated surface in every snapshot.
+    fn consecutive_publishes_keep_every_earlier_rect_b3_10_fixed() {
+        // B3-10 (fixed 21 November 2026): publish() used to swap the write
+        // buffer out and rebuild the next one from an older snapshot, so
+        // partial updates published one by one lost the rects before them.
+        // The buffer is now authoritative and never swapped.
         let sf = SharedFrame::new(2, 3); // 3 rows of 2 px
 
-        paint_rect(&sf, 0, 0, 0xAA); // row 0
+        paint_rect(&sf, 0, 0, 0xAA);
         let s1 = sf.publish().expect("s1");
         assert_eq!(&s1.data[..8], &[0xAA; 8]);
-        drop(s1);
-
-        paint_rect(&sf, 0, 1, 0xBB); // row 1
-        let s2 = sf.publish().expect("s2");
-        assert_eq!(&s2.data[8..16], &[0xBB; 8], "the new rect is present");
-        assert_eq!(&s2.data[..8], &[0x00; 8], "row 0 from publish #1 is LOST");
-        drop(s2);
-
-        paint_rect(&sf, 0, 2, 0xCC); // row 2
-        let s3 = sf.publish().expect("s3");
-        assert_eq!(&s3.data[16..], &[0xCC; 8], "the new rect is present");
-        assert_eq!(&s3.data[..8], &[0xAA; 8], "row 0 returns via the reclaim");
-        assert_eq!(&s3.data[8..16], &[0x00; 8], "row 1 from publish #2 is LOST");
-    }
-
-    #[test]
-    fn publish_while_previous_snapshot_is_referenced_zeroes_the_next_base_defect_b3_10() {
-        // B3-10 (referenced-snapshot half): when the renderer still holds
-        // the previous snapshot Arc, publish() cannot reclaim its buffer
-        // and starts the next write buffer ZEROED — even the branch base is
-        // lost. Pinned as a defect; a fix must keep the accumulated surface.
-        let sf = SharedFrame::new(2, 3);
-
-        paint_rect(&sf, 0, 0, 0xAA);
-        let held = sf.publish().expect("s1, still referenced below");
 
         paint_rect(&sf, 0, 1, 0xBB);
         let s2 = sf.publish().expect("s2");
-        assert_eq!(&s2.data[8..16], &[0xBB; 8]);
-        drop(s2);
+        assert_eq!(&s2.data[..16], &[[0xAA; 8], [0xBB; 8]].concat()[..]);
 
         paint_rect(&sf, 0, 2, 0xCC);
         let s3 = sf.publish().expect("s3");
-        assert_eq!(&s3.data[16..], &[0xCC; 8], "the new rect is present");
         assert_eq!(
-            &s3.data[..16],
-            &[0u8; 16],
-            "rows 0 and 1 both lost: the base was zeroed under contention"
+            &s3.data[..],
+            &[[0xAA; 8], [0xBB; 8], [0xCC; 8]].concat()[..]
         );
-        drop(held);
+        // A snapshot still held by a reader does not change the next one.
+        drop((s1, s2));
+    }
+
+    #[test]
+    fn damage_is_the_union_of_changes_since_the_last_take() {
+        let sf = SharedFrame::new(4, 4);
+        assert_eq!(sf.take_damage(), None, "nothing changed yet");
+
+        let mut guard = sf.begin_write();
+        guard.update_rect(0, 0, 1, 1, &[1; 4], 4);
+        guard.update_rect(2, 1, 1, 2, &[2; 8], 4);
+        drop(guard);
+        sf.mark_dirty();
+
+        let damage = sf.take_damage().expect("damage");
+        assert_eq!(
+            (damage.x, damage.y, damage.width, damage.height, damage.full),
+            (0, 0, 3, 3, false)
+        );
+        assert_eq!((damage.frame_width, damage.frame_height), (4, 4));
+        // Rows of the 3x3 box, copied from the authoritative picture.
+        assert_eq!(&damage.data[..12], &[[1; 4], [0; 4], [0; 4]].concat()[..]);
+        assert_eq!(&damage.data[12..24], &[[0; 4], [0; 4], [2; 4]].concat()[..]);
+        assert_eq!(damage.data.len(), 3 * 3 * 4);
+        assert_eq!(sf.take_damage(), None, "taking clears the damage");
+    }
+
+    #[test]
+    fn damage_is_clipped_to_the_frame() {
+        let sf = SharedFrame::new(2, 2);
+        sf.update_rect(1, 1, 4, 4, &[9; 64], 16);
+        let damage = sf.take_damage().expect("damage");
+        assert_eq!(
+            (damage.x, damage.y, damage.width, damage.height),
+            (1, 1, 1, 1)
+        );
+        sf.update_rect(5, 5, 1, 1, &[9; 4], 4);
+        assert_eq!(sf.take_damage(), None, "outside the frame: nothing changed");
+    }
+
+    #[test]
+    fn a_full_update_is_whole_frame_damage_at_the_new_size() {
+        let sf = SharedFrame::new(2, 2);
+        sf.update_rect(0, 0, 1, 1, &[1; 4], 4);
+        sf.update_full(3, 1, &[7; 12]);
+        let damage = sf.take_damage().expect("damage");
+        assert!(damage.full);
+        assert_eq!(
+            (
+                damage.frame_width,
+                damage.frame_height,
+                damage.width,
+                damage.height
+            ),
+            (3, 1, 3, 1)
+        );
+        assert_eq!(damage.data, vec![7; 12]);
+
+        sf.update_rect(1, 0, 1, 1, &[8; 4], 4);
+        assert!(
+            !sf.take_damage().unwrap().full,
+            "later damage is partial again"
+        );
+    }
+
+    #[test]
+    fn take_full_gives_the_whole_picture_and_keeps_pending_damage() {
+        let sf = SharedFrame::new(2, 1);
+        sf.update_rect(1, 0, 1, 1, &[5; 4], 4);
+        let full = sf.take_full();
+        assert!(full.full);
+        assert_eq!(full.data, [[0; 4], [5; 4]].concat());
+        assert!(
+            sf.take_damage().is_some(),
+            "the pending damage is still there"
+        );
     }
 
     #[test]

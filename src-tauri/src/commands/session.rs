@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tauri::{
-    AppHandle, Manager, State,
+    AppHandle, State,
     ipc::{Channel, InvokeResponseBody},
 };
 
@@ -142,7 +142,8 @@ pub async fn connect(
     cred_store: State<'_, CredentialStore>,
     session_mgr: State<'_, SessionManager>,
     settings_store: State<'_, SettingsStore>,
-    shared_frame: State<'_, Arc<SharedFrame>>,
+    display_path: State<'_, crate::renderer::display_path::DisplayPathState>,
+    frame_stores: State<'_, crate::renderer::frame_stores::FrameStores>,
     share_grants: State<'_, Arc<crate::store::share_grants::ShareGrantStore>>,
 ) -> Result<String, String> {
     // Task 7.1 (Req 2.2/11.8/11.9): the session cap and per-connection
@@ -196,10 +197,16 @@ pub async fn connect(
     );
 
     // Create and spawn the session actor (with password for CredSSP/NLA)
-    // Only the opt-in native renderer reads the shared frame.
-    let native_frame = app
-        .try_state::<Arc<crate::renderer::gpu::GpuRenderer>>()
-        .map(|_| Arc::clone(&shared_frame));
+    // Spec rdp-native-renderer: on the native path the session draws into
+    // its own frame store, which the render thread reads.
+    let native_frame =
+        (display_path.path() == crate::renderer::display_path::Path::Native).then(|| {
+            SharedFrame::new(
+                config.display_width.unwrap_or(1920),
+                config.display_height.unwrap_or(1080),
+            )
+        });
+    let registered_frame = native_frame.clone();
     let session_id = session_mgr
         .create_session(
             config,
@@ -211,6 +218,9 @@ pub async fn connect(
             share_source(Arc::clone(&share_grants)),
         )
         .await?;
+    if let Some(store) = &registered_frame {
+        frame_stores.register(&session_id, store);
+    }
 
     // Update last_connected_at on the connection
     conn_store

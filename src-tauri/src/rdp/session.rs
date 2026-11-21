@@ -665,8 +665,9 @@ impl SessionActor {
         self.send_frame_packet(receipt, packet)
     }
 
-    /// Deliver the same composited damage to both consumers. Local pointer
-    /// movement uses the normal single-outstanding-frame IPC limit.
+    /// Deliver composited damage to the session's frame sink: the native
+    /// layer's frame store when it has one (spec rdp-native-renderer), the
+    /// web canvas over IPC otherwise.
     fn present_image_update(
         &mut self,
         image: &ironrdp_session::image::DecodedImage,
@@ -701,8 +702,42 @@ impl SessionActor {
                     started.elapsed().as_secs_f64() * 1000.0
                 );
             }
+            // The native layer reads the store; nothing goes over IPC.
+            return Ok(());
         }
         self.delivery.damage(surface, plan);
+        self.flush_image_frame(image)
+    }
+
+    /// Leave the native layer (requirement 1.3). With a picture at hand, the
+    /// canvas gets all of it at once; otherwise the next connection's first
+    /// frame is whole anyway.
+    fn use_canvas(
+        &mut self,
+        image: Option<&ironrdp_session::image::DecodedImage>,
+    ) -> Result<(), DisconnectReason> {
+        if self.shared_frame.take().is_none() {
+            return Ok(());
+        }
+        log::info!("Session {} now draws through the web canvas", self.id);
+        self.delivery.reset();
+        let Some(image) = image else { return Ok(()) };
+        let (width, height) = (image.width(), image.height());
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        self.delivery.damage(
+            (width, height),
+            frame_batch::BatchPlan {
+                full_refresh: true,
+                rect: ironrdp_pdu::geometry::InclusiveRectangle {
+                    left: 0,
+                    top: 0,
+                    right: width - 1,
+                    bottom: height - 1,
+                },
+            },
+        );
         self.flush_image_frame(image)
     }
 
@@ -922,6 +957,7 @@ impl SessionActor {
                     Some(SessionCommand::ClipboardWrite { text }) => {
                         self.local_clipboard_text = Some(text);
                     }
+                    Some(SessionCommand::UseCanvas) => { let _ = self.use_canvas(None); }
                     _ => {}
                 },
                 outcome = &mut connect => return Some(outcome),
@@ -1616,6 +1652,9 @@ impl SessionActor {
                             let _ = reply.send(result);
                         }
                         Some(SessionCommand::ViewReturned) => {}
+                        Some(SessionCommand::UseCanvas) => {
+                            if self.use_canvas(Some(&image)).is_err() { return DisconnectReason::ConnectionLost; }
+                        }
                         Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
                             let was_stalled = self.delivery.stalled;
                             if self.delivery.acknowledge(&receipt, refresh) {
@@ -2138,6 +2177,7 @@ impl SessionActor {
                         Some(SessionCommand::ClipboardWrite { text }) => {
                             self.local_clipboard_text = Some(text);
                         }
+                        Some(SessionCommand::UseCanvas) => { let _ = self.use_canvas(None); }
                         _ => {} // Ignore key/mouse during reconnect
                     }
                 }
@@ -2165,6 +2205,8 @@ impl SessionActor {
                 _ = crate::rdp::frame_delivery::wait_for_stall(self.delivery.deadline()) => { self.check_display_stall(); continue; }
             };
             match command {
+                // Mock frames always go to the canvas.
+                Some(SessionCommand::UseCanvas) => {}
                 Some(SessionCommand::FrameConsumed { receipt, refresh }) => {
                     let was_stalled = self.delivery.stalled;
                     if self.delivery.acknowledge(&receipt, refresh) {
@@ -6314,7 +6356,6 @@ mod tests {
                 Ok(())
             });
             let (events, _) = RecordedEvents::new();
-            let shared = SharedFrame::new(64, 64);
             let id = manager
                 .create_session_with_transport(
                     test_config("delivery-reactivation"),
@@ -6322,7 +6363,7 @@ mod tests {
                     channel,
                     SessionEventSink::recorded(events),
                     false,
-                    Some(Arc::clone(&shared)),
+                    None,
                     connect,
                 )
                 .await
@@ -6349,7 +6390,6 @@ mod tests {
             }
             settle_actor().await;
             assert_eq!(packets.lock().unwrap().len(), 1);
-            assert!(shared.publish().is_some());
             let mut activation = reactivation_script_frames();
             activation[1] = demand_active_frame_for(size, size);
             if ack_during_activation {
@@ -7141,12 +7181,35 @@ mod tests {
             create_egfx_session_with_ack(manager, tag, server_frames, shared_frame, true).await
         }
 
+        /// The same script on the native path: frames go to the store only
+        /// (spec rdp-native-renderer, task 2.2).
+        async fn create_egfx_native_session(
+            manager: &SessionManager,
+            tag: &str,
+            server_frames: Vec<Vec<u8>>,
+            shared_frame: Arc<SharedFrame>,
+        ) -> EgfxTestSession {
+            create_egfx_session_on(manager, tag, server_frames, shared_frame, true, true).await
+        }
+
+        /// Canvas path: frames go out as IPC packets.
         async fn create_egfx_session_with_ack(
             manager: &SessionManager,
             tag: &str,
             server_frames: Vec<Vec<u8>>,
             shared_frame: Arc<SharedFrame>,
             auto_ack: bool,
+        ) -> EgfxTestSession {
+            create_egfx_session_on(manager, tag, server_frames, shared_frame, auto_ack, false).await
+        }
+
+        async fn create_egfx_session_on(
+            manager: &SessionManager,
+            tag: &str,
+            server_frames: Vec<Vec<u8>>,
+            shared_frame: Arc<SharedFrame>,
+            auto_ack: bool,
+            native: bool,
         ) -> EgfxTestSession {
             let (events, events_rx) = RecordedEvents::new();
             let frame_sizes = Arc::new(StdMutex::new(Vec::new()));
@@ -7229,7 +7292,7 @@ mod tests {
                     channel,
                     SessionEventSink::recorded(Arc::clone(&events)),
                     true,
-                    Some(Arc::clone(&shared_frame)),
+                    native.then(|| Arc::clone(&shared_frame)),
                     connect,
                 )
                 .await
@@ -7271,6 +7334,19 @@ mod tests {
             }
         }
 
+        /// Poll until the native store has been written `marks` times.
+        async fn wait_for_store(egfx: &EgfxTestSession, marks: u64) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            while egfx.shared_frame.version() < marks {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "timed out waiting for the native store; recorded statuses: {:?}",
+                    statuses_of(&info_events(&egfx.session.id, &egfx.session.events))
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
         async fn verify_withheld_delivery(stall: bool) {
             let manager = SessionManager::new();
             let base = expected_rgba(W, H);
@@ -7301,20 +7377,9 @@ mod tests {
             )
             .await;
             wait_for_packets(&egfx, |n| n == 1).await;
-            // Let real upstream decode/composition finish while UI does NOT ACK.
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-            loop {
-                if egfx
-                    .shared_frame
-                    .publish()
-                    .is_some_and(|s| s.data == expected)
-                {
-                    break;
-                }
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "latest decoded image missing"
-                );
+            // Let real upstream decode/composition finish while UI does NOT
+            // ACK; the packet after the ACK below proves the latest pixels.
+            for _ in 0..200 {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
             assert_eq!(
@@ -7473,19 +7538,82 @@ mod tests {
                 "canvas packet pixels match the decoded ClearCodec frame"
             );
 
-            // GPU feed: the SharedFrame snapshot is exactly what
-            // GpuRenderer::render uploads to the wgpu texture.
-            let snapshot = egfx.shared_frame.publish().expect("dirty after the frame");
-            assert_eq!(snapshot.width, u32::from(W));
-            assert_eq!(snapshot.height, u32::from(H));
-            assert_eq!(snapshot.data, expected);
-
             // No H.264 transport anywhere on this route (Req 9.4).
             for packet in &packets {
                 assert_ne!(packet[0], 3, "no kind-3/H.264 packet may be emitted");
             }
-
             disconnect_and_wait(&egfx).await;
+
+            // The native path: the same picture lands in the store, which
+            // the render thread uploads, and nothing goes over IPC.
+            let native = create_egfx_native_session(
+                &manager,
+                "egfx-clear-native",
+                egfx_server_frames(&expected),
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+            wait_for_store(&native, 1).await;
+            let snapshot = native
+                .shared_frame
+                .publish()
+                .expect("dirty after the frame");
+            assert_eq!(snapshot.width, u32::from(W));
+            assert_eq!(snapshot.height, u32::from(H));
+            assert_eq!(snapshot.data, expected);
+            assert!(
+                native.packets.lock().unwrap().is_empty(),
+                "no IPC frames on the native path"
+            );
+            disconnect_and_wait(&native).await;
+        }
+
+        /// Requirement 1.3: when the native layer fails, a running session
+        /// switches to the canvas and sends its whole current picture once,
+        /// without reconnecting.
+        #[tokio::test(start_paused = true)]
+        async fn a_native_session_switches_to_the_canvas_with_one_full_frame() {
+            let manager = SessionManager::new();
+            let expected = expected_rgba(W, H);
+            let native = create_egfx_native_session(
+                &manager,
+                "egfx-switch",
+                egfx_server_frames(&expected),
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+            wait_for_store(&native, 1).await;
+            assert!(native.packets.lock().unwrap().is_empty());
+
+            native
+                .session
+                .cmd_tx
+                .send(SessionCommand::UseCanvas)
+                .await
+                .unwrap();
+            wait_for_packets(&native, |n| n >= 1).await;
+            let packets = native.packets.lock().unwrap().clone();
+            assert_eq!(packets.len(), 1, "exactly one frame after the switch");
+            let parsed = parse_packet(&packets[0]);
+            assert_eq!(parsed.kind, 1, "the switch sends the whole picture");
+            assert_eq!(parsed.rects, vec![(0, 0, W, H)]);
+            assert_eq!(parsed.pixels, expected);
+            assert_eq!(
+                native.session.connect_calls.load(Ordering::SeqCst),
+                1,
+                "no reconnect"
+            );
+
+            // A second request changes nothing.
+            native
+                .session
+                .cmd_tx
+                .send(SessionCommand::UseCanvas)
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(native.packets.lock().unwrap().len(), 1);
+            disconnect_and_wait(&native).await;
         }
 
         /// A server graphics reset (resize) resizes the decoded image, the
@@ -7534,7 +7662,7 @@ mod tests {
             let egfx = create_egfx_session(
                 &manager,
                 "egfx-reset",
-                server_frames,
+                server_frames.clone(),
                 SharedFrame::new(u32::from(W), u32::from(H)),
             )
             .await;
@@ -7585,16 +7713,36 @@ mod tests {
             assert_eq!(parsed.rects, vec![(0, 0, 96, 64)]);
             assert_eq!(parsed.pixels, expected2);
 
-            // SharedFrame resized + fully repainted at the new size.
-            let snapshot = egfx
+            disconnect_and_wait(&egfx).await;
+
+            // Native path: the store is resized and fully repainted, and
+            // its damage tells the render thread to recreate its texture.
+            let native = create_egfx_native_session(
+                &manager,
+                "egfx-reset-native",
+                server_frames,
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            while native.shared_frame.dimensions() != (96, 64) {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the store never resized"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let snapshot = native
                 .shared_frame
                 .publish()
                 .expect("dirty after the resize frame");
-            assert_eq!(snapshot.width, 96);
-            assert_eq!(snapshot.height, 64);
+            assert_eq!((snapshot.width, snapshot.height), (96, 64));
             assert_eq!(snapshot.data, expected2);
-
-            disconnect_and_wait(&egfx).await;
+            let damage = native.shared_frame.take_damage().expect("damage");
+            assert!(damage.full, "a resize is whole-frame damage");
+            assert_eq!((damage.frame_width, damage.frame_height), (96, 64));
+            assert!(native.packets.lock().unwrap().is_empty());
+            disconnect_and_wait(&native).await;
         }
 
         /// Task 9.4 (design L316; Reqs 4.1/4.4/9.8): the initial delivery
@@ -7628,7 +7776,7 @@ mod tests {
             let egfx = create_egfx_session(
                 &manager,
                 "egfx-batch",
-                server_frames,
+                server_frames.clone(),
                 SharedFrame::new(u32::from(W), u32::from(H)),
             )
             .await;
@@ -7661,12 +7809,26 @@ mod tests {
             let mut composite = base.clone();
             overlay_solid(&mut composite, W, 16, 16, 32, 32, color_a);
             overlay_solid(&mut composite, W, 44, 6, 16, 16, color_b);
-            let snapshot = egfx.shared_frame.publish().expect("dirty after batches");
-            assert_eq!(snapshot.width, u32::from(W));
-            assert_eq!(snapshot.height, u32::from(H));
-            assert_eq!(snapshot.data, composite);
-
             disconnect_and_wait(&egfx).await;
+
+            // Native path: the store ends holding the complete composite;
+            // the disjoint updates accumulate without losing pixels.
+            let native = create_egfx_native_session(
+                &manager,
+                "egfx-batch-native",
+                server_frames,
+                SharedFrame::new(u32::from(W), u32::from(H)),
+            )
+            .await;
+            wait_for_store(&native, 3).await;
+            let snapshot = native.shared_frame.publish().expect("dirty after batches");
+            assert_eq!(
+                (snapshot.width, snapshot.height),
+                (u32::from(W), u32::from(H))
+            );
+            assert_eq!(snapshot.data, composite);
+            assert!(native.packets.lock().unwrap().is_empty());
+            disconnect_and_wait(&native).await;
         }
 
         // ------------------------------------------------------------------
