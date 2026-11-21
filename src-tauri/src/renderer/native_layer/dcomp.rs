@@ -17,7 +17,7 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
-use tauri::{PhysicalSize, WindowEvent};
+use tauri::WindowEvent;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionTarget,
@@ -25,7 +25,7 @@ use windows::Win32::Graphics::DirectComposition::{
 };
 use windows::core::{IUnknown, Interface};
 
-use super::{Geometry, LayerTarget, SurfaceSource, Wake};
+use super::{LayerTarget, SurfaceSource, Wake, client_geometry};
 
 struct Objects {
     device: IDCompositionDesktopDevice,
@@ -134,47 +134,4 @@ pub fn attach(window: &tauri::WebviewWindow, wake: Arc<Wake>) -> Result<LayerTar
         geometry,
         wake,
     })
-}
-
-/// The layer's geometry for a client area in physical pixels. A minimized
-/// window reports 0×0, which the render thread treats as nothing to draw.
-fn client_geometry(size: PhysicalSize<u32>, scale: f64) -> Geometry {
-    let scale = if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    };
-    let logical = |value: u32| (f64::from(value) / scale).round() as u32;
-    Geometry {
-        logical_width: logical(size.width),
-        logical_height: logical(size.height),
-        buffer_width: size.width,
-        buffer_height: size.height,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_client_area_in_physical_and_css_pixels() {
-        let at = |w, h, scale| client_geometry(PhysicalSize::new(w, h), scale);
-        assert_eq!(
-            at(2400, 1500, 1.5),
-            Geometry {
-                logical_width: 1600,
-                logical_height: 1000,
-                buffer_width: 2400,
-                buffer_height: 1500,
-            }
-        );
-        assert_eq!(at(1600, 1000, 1.0).logical_width, 1600);
-        // 125%: CSS pixels rounded, the buffer stays exact.
-        let odd = at(1001, 801, 1.25);
-        assert_eq!((odd.logical_width, odd.buffer_width), (801, 1001));
-        // Minimized, and a nonsense scale.
-        assert_eq!(at(0, 0, 1.5).buffer_width, 0);
-        assert_eq!(at(800, 600, 0.0).logical_width, 800);
-    }
 }

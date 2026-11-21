@@ -213,8 +213,9 @@ impl Renderer {
             backends: super::display_path::layer_backends(),
             ..Default::default()
         });
-        // SAFETY: the layer keeps the Wayland objects and the visual alive for
-        // the window's lifetime; wgpu takes its own reference to the visual.
+        // SAFETY: the layer keeps the Wayland objects, the visual and the
+        // Metal layer alive for the window's lifetime; wgpu takes its own
+        // reference to the visual and to the Metal layer.
         let surface = unsafe {
             match &target.surface {
                 SurfaceSource::Raw(display, window) => {
@@ -226,6 +227,10 @@ impl Renderer {
                 #[cfg(windows)]
                 SurfaceSource::Composition(composition) => instance.create_surface_unsafe(
                     wgpu::SurfaceTargetUnsafe::CompositionVisual(composition.visual()),
+                ),
+                #[cfg(target_os = "macos")]
+                SurfaceSource::Metal(layer) => instance.create_surface_unsafe(
+                    wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer.as_ptr()),
                 ),
             }
         }

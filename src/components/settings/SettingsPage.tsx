@@ -283,7 +283,7 @@ export function SettingsPage() {
                   <Label className="text-sm font-medium">Renderer</Label>
                   <p className="text-[11px] text-muted-foreground">
                     The GPU layer draws remote screens below the window's page instead of through it
-                    (Windows; Linux on Wayland).
+                    (Windows; Linux on Wayland; macOS by choice).
                     Applies at the next start.
                   </p>
                   <p className="text-[11px] text-muted-foreground" title={displayPath.reason}>

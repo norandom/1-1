@@ -160,14 +160,16 @@ pub fn run() {
                     .clone();
                 let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
                 // On Windows this also makes WebView2's default background
-                // transparent, so the layer below shows (amendment 5a).
+                // transparent, so the layer below shows (amendment 5a). On
+                // macOS the window stays opaque: the layer sits inside it,
+                // and only the web view stops painting its background.
                 #[cfg(any(target_os = "linux", windows))]
                 let builder = builder.transparent(path == renderer::display_path::Path::Native);
                 builder.build()?
             };
             let frame_stores = Arc::new(renderer::frame_stores::FrameStores::default());
             let render_shared = renderer::gpu::RenderShared::new(Arc::clone(&frame_stores));
-            #[cfg(any(target_os = "linux", windows))]
+            #[cfg(any(target_os = "linux", windows, target_os = "macos"))]
             if path == renderer::display_path::Path::Native {
                 let started = renderer::native_layer::attach(&main_window, frame_stores.wake())
                     .and_then(|target| {
@@ -192,7 +194,7 @@ pub fn run() {
                     display_path.fall_back(reason);
                 }
             }
-            #[cfg(not(any(target_os = "linux", windows)))]
+            #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
             let _ = &main_window;
             app.manage(display_path);
             // Spec rdp-keyboard-layout: follow the local layout (Wayland), or

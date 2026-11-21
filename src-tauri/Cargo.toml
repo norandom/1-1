@@ -128,6 +128,14 @@ wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 webkit2gtk = "2.0"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The native renderer's layer below the WKWebView (spec rdp-native-renderer,
+# task 9.2). The versions tauri's AppKit stack already resolves.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSGraphics", "NSResponder", "NSView", "NSWindow", "objc2-quartz-core"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSString", "NSValue"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
+
 [target.'cfg(windows)'.dependencies]
 # The shell's IFileOpenDialog with FOS_PICKFOLDERS supplies the native folder picker;
 # FileSystem reads the chosen directory's volume and file identity.

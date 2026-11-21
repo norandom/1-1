@@ -54,12 +54,13 @@ impl Override {
     }
 }
 
-/// Where 1-1 runs. The native layer exists for Linux Wayland and for Windows
-/// (DirectComposition, amendment 5a).
+/// Where 1-1 runs. The native layer exists for Linux Wayland, for Windows
+/// (DirectComposition, amendment 5a) and, by choice only, for macOS (Metal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Linux,
     Windows,
+    MacOs,
     Other,
 }
 
@@ -69,6 +70,8 @@ impl Platform {
             Self::Linux
         } else if cfg!(windows) {
             Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
         } else {
             Self::Other
         }
@@ -112,8 +115,11 @@ pub enum Reason {
     Available,
     ForcedNative,
     ForcedCanvas,
-    /// Neither Linux nor Windows (macOS keeps the canvas, task 9.2).
+    /// Neither Linux, Windows nor macOS.
     UnsupportedPlatform,
+    /// Automatic mode on macOS: the canvas path is not measured there yet
+    /// (requirement 5.2), so the layer is by choice only (task 9.2).
+    UnmeasuredPlatform,
     X11Display,
     OtherDisplay,
     MissingWaylandInterface(&'static str),
@@ -140,8 +146,15 @@ impl fmt::Display for Reason {
                 "the native layer is tested on Hyprland only; choose it in Settings to try"
             ),
             Self::UnsupportedPlatform => {
-                write!(f, "the native layer exists on Linux and Windows only")
+                write!(
+                    f,
+                    "the native layer exists on Linux, Windows and macOS only"
+                )
             }
+            Self::UnmeasuredPlatform => write!(
+                f,
+                "the native layer is not measured on macOS yet; choose it in Settings to try"
+            ),
             Self::CompositionFailed(error) => write!(f, "DirectComposition failed: {error}"),
             Self::X11Display => write!(f, "X11 or XWayland display"),
             Self::OtherDisplay => write!(f, "not a Wayland display"),
@@ -168,6 +181,10 @@ fn precondition(facts: &Facts) -> Option<Reason> {
         // Every Windows 10 and 11 has DirectComposition; what can fail is
         // found when the layer is built (CompositionFailed, SurfaceFailed).
         Platform::Windows => None,
+        // The layer is built and its surface checked later, as on Windows.
+        Platform::MacOs => {
+            (facts.requested == Override::Auto).then_some(Reason::UnmeasuredPlatform)
+        }
         Platform::Linux => {
             match facts.display {
                 Display::Wayland => {}
@@ -244,6 +261,31 @@ mod tests {
                 ..windows()
             }),
             (Path::Native, Reason::ForcedNative)
+        );
+    }
+
+    /// Task 9.2: on macOS the layer is by choice until the canvas path is
+    /// measured there (requirement 5.2).
+    #[test]
+    fn macos_gets_the_native_layer_by_choice_only() {
+        let macos = Facts {
+            platform: Platform::MacOs,
+            ..windows()
+        };
+        assert!(!worth_trying_gpu(&macos));
+        assert_eq!(choose(&macos), (Path::Canvas, Reason::UnmeasuredPlatform));
+        let chosen = Facts {
+            requested: Override::Native,
+            ..macos.clone()
+        };
+        assert!(worth_trying_gpu(&chosen));
+        assert_eq!(choose(&chosen), (Path::Native, Reason::ForcedNative));
+        assert_eq!(
+            choose(&Facts {
+                gpu: Some(Err(GpuFailure::NoAdapter)),
+                ..chosen
+            }),
+            (Path::Canvas, Reason::NoAdapter)
         );
     }
 
@@ -492,10 +534,12 @@ pub fn decide(setting: &str) -> (Path, Reason) {
 }
 
 /// The wgpu backends the layer uses: Vulkan (or GL) on Wayland, DX12 for a
-/// DirectComposition visual on Windows.
+/// DirectComposition visual on Windows, Metal on macOS.
 pub fn layer_backends() -> wgpu::Backends {
     if cfg!(windows) {
         wgpu::Backends::DX12
+    } else if cfg!(target_os = "macos") {
+        wgpu::Backends::METAL
     } else {
         wgpu::Backends::VULKAN | wgpu::Backends::GL
     }

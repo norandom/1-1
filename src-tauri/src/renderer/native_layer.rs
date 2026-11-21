@@ -89,7 +89,6 @@ impl Wake {
 }
 
 /// Where the render thread's surface comes from.
-#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub enum SurfaceSource {
     /// Wayland: our subsurface on GDK's connection.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "Wayland only"))]
@@ -97,10 +96,12 @@ pub enum SurfaceSource {
     /// Windows: the layer's DirectComposition visual (amendment 5a).
     #[cfg(windows)]
     Composition(Arc<dcomp::Composition>),
+    /// macOS: the `CAMetalLayer` below the WKWebView.
+    #[cfg(target_os = "macos")]
+    Metal(metal::Layer),
 }
 
 /// What the render thread needs to draw into the layer.
-#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub struct LayerTarget {
     pub surface: SurfaceSource,
     pub geometry: Arc<Mutex<Geometry>>,
@@ -109,7 +110,7 @@ pub struct LayerTarget {
 
 // SAFETY: the raw handles name libwayland objects owned by the layer for the
 // window's lifetime, and libwayland proxies may be used from any thread; the
-// Windows composition is `Send` on its own.
+// Windows composition and the macOS layer are `Send` on their own.
 unsafe impl Send for LayerTarget {}
 
 #[cfg(target_os = "linux")]
@@ -119,6 +120,30 @@ pub use linux::attach;
 pub mod dcomp;
 #[cfg(windows)]
 pub use dcomp::attach;
+
+#[cfg(target_os = "macos")]
+pub mod metal;
+#[cfg(target_os = "macos")]
+pub use metal::attach;
+
+/// The layer's geometry for a client area in physical pixels (Windows and
+/// macOS, where the web view fills the client area). A minimized window
+/// reports 0×0, which the render thread treats as nothing to draw.
+#[cfg(any(windows, target_os = "macos", test))]
+fn client_geometry(size: tauri::PhysicalSize<u32>, scale: f64) -> Geometry {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let logical = |value: u32| (f64::from(value) / scale).round() as u32;
+    Geometry {
+        logical_width: logical(size.width),
+        logical_height: logical(size.height),
+        buffer_width: size.width,
+        buffer_height: size.height,
+    }
+}
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -419,6 +444,29 @@ mod tests {
         };
         assert!((g.scale() - 1.6).abs() < 1e-9);
         assert_eq!(Geometry::default().scale(), 1.0);
+    }
+
+    #[test]
+    fn the_client_area_in_physical_and_css_pixels() {
+        let at = |w, h, scale| client_geometry(tauri::PhysicalSize::new(w, h), scale);
+        assert_eq!(
+            at(2400, 1500, 1.5),
+            Geometry {
+                logical_width: 1600,
+                logical_height: 1000,
+                buffer_width: 2400,
+                buffer_height: 1500,
+            }
+        );
+        assert_eq!(at(1600, 1000, 1.0).logical_width, 1600);
+        // Retina: two device pixels per point.
+        assert_eq!(at(2400, 1600, 2.0).logical_width, 1200);
+        // 125%: CSS pixels rounded, the buffer stays exact.
+        let odd = at(1001, 801, 1.25);
+        assert_eq!((odd.logical_width, odd.buffer_width), (801, 1001));
+        // Minimized, and a nonsense scale.
+        assert_eq!(at(0, 0, 1.5).buffer_width, 0);
+        assert_eq!(at(800, 600, 0.0).logical_width, 800);
     }
 
     #[test]
