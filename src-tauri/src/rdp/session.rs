@@ -1299,6 +1299,8 @@ impl SessionActor {
         let mut cursor_possible = false;
         let mut held_modifiers = std::collections::BTreeSet::new();
         let mut deferred_commands = VecDeque::new();
+        // Server PDUs a reactivation set aside; processed before the next read.
+        let mut held_pdus = HeldPdus::default();
         let mut network_sampler = self
             .network_counters
             .clone()
@@ -1373,8 +1375,13 @@ impl SessionActor {
                         return reason;
                     }
                 },
-                // Read PDUs from the server
-                pdu_result = reader.read_pdu() => {
+                // Read PDUs from the server, first those a reactivation held.
+                pdu_result = async {
+                    match held_pdus.pop() {
+                        Some(held) => Ok(held),
+                        None => reader.read_pdu().await,
+                    }
+                } => {
                     let (action, payload) = match pdu_result {
                         Ok(ap) => ap,
                         Err(e) => {
@@ -1508,6 +1515,7 @@ impl SessionActor {
                                 &mut reader,
                                 &mut writer,
                                 &mut deferred_commands,
+                                &mut held_pdus,
                             )
                             .await
                         {
@@ -1868,6 +1876,11 @@ impl SessionActor {
     /// disconnect) surface as [`ReactivationOutcome::Stop`]; the caller maps
     /// `ConnectionLost` into the existing reconnect loop, preserving Req
     /// 2.3/2.4 semantics for genuinely broken transports.
+    ///
+    /// Server PDUs that are not part of the sequence go to `held` in arrival
+    /// order (`belongs_to_activation`); the session loop processes them
+    /// before reading again.
+    #[allow(clippy::too_many_arguments)]
     async fn drive_reactivation<SR, SW>(
         &mut self,
         factory: &ironrdp_connector::connection_activation::ConnectionActivationFactory,
@@ -1876,6 +1889,7 @@ impl SessionActor {
         reader: &mut ironrdp_tokio::Framed<SR>,
         writer: &mut ironrdp_tokio::Framed<SW>,
         deferred: &mut VecDeque<SessionCommand>,
+        held: &mut HeldPdus,
     ) -> ReactivationOutcome
     where
         SR: ironrdp_tokio::FramedRead,
@@ -1906,7 +1920,7 @@ impl SessionActor {
             let written = if sequence.next_pdu_hint().is_some() {
                 // Wait for the next server PDU while staying responsive to
                 // commands (cancel mirrors Req 2.4's intent).
-                let (_action, payload) = tokio::select! {
+                let (action, payload) = tokio::select! {
                     _ = tokio::time::sleep_until(replay_full_deadline.unwrap_or_else(tokio::time::Instant::now)),
                         if replay_full_deadline.is_some() => {
                         self.last_error = Some("Server failed to reactivate before its input queue filled.".into());
@@ -1960,10 +1974,29 @@ impl SessionActor {
                     }
                 };
 
+                if !belongs_to_activation(action, &payload, factory.io_channel_id()) {
+                    if !held.push(action, payload) {
+                        log::warn!(
+                            "Session {} held {} PDUs ({} bytes) during reactivation; reconnecting",
+                            self.id,
+                            held.pdus.len(),
+                            held.bytes
+                        );
+                        self.last_error = Some("Server sent too much during reactivation.".into());
+                        return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
+                    }
+                    continue;
+                }
+
                 match sequence.step(&payload, None, &mut buf) {
                     Ok(written) => written,
                     Err(e) => {
-                        log::warn!("Session {} reactivation sequence error: {}", self.id, e);
+                        log::warn!(
+                            "Session {} reactivation sequence error: {} (the server sent {})",
+                            self.id,
+                            e,
+                            describe_server_pdu(action, &payload)
+                        );
                         self.last_error = Some(format!("Reactivation failed: {}", e));
                         return ReactivationOutcome::Stop(DisconnectReason::ConnectionLost);
                     }
@@ -2382,6 +2415,136 @@ enum ReactivationOutcome {
     /// protocol failure, server redirection, user disconnect). The actor
     /// must unwind with the carried reason.
     Stop(DisconnectReason),
+}
+
+/// At most this many server PDUs, and this many bytes, wait while a
+/// reactivation runs (`held_pdus`); beyond that the session reconnects.
+const MAX_HELD_PDUS: usize = 1024;
+const MAX_HELD_BYTES: usize = 32 * 1024 * 1024;
+
+/// Server PDUs held during a reactivation, in arrival order, bounded by
+/// `MAX_HELD_PDUS` and `MAX_HELD_BYTES`.
+#[derive(Default)]
+struct HeldPdus {
+    pdus: VecDeque<(ironrdp_pdu::Action, ironrdp_tokio::bytes::BytesMut)>,
+    bytes: usize,
+}
+
+impl HeldPdus {
+    /// Holds the PDU; `false` when that would exceed the bounds.
+    fn push(
+        &mut self,
+        action: ironrdp_pdu::Action,
+        payload: ironrdp_tokio::bytes::BytesMut,
+    ) -> bool {
+        if self.pdus.len() >= MAX_HELD_PDUS || self.bytes + payload.len() > MAX_HELD_BYTES {
+            return false;
+        }
+        self.bytes += payload.len();
+        self.pdus.push_back((action, payload));
+        true
+    }
+
+    fn pop(&mut self) -> Option<(ironrdp_pdu::Action, ironrdp_tokio::bytes::BytesMut)> {
+        let pdu = self.pdus.pop_front()?;
+        self.bytes -= pdu.1.len();
+        Some(pdu)
+    }
+}
+
+/// Whether a PDU read during a deactivation-reactivation sequence belongs to
+/// the sequence. Everything else (fast-path updates, data on static
+/// channels, slow-path updates, compressed share data) is held and replayed
+/// through the session after the new share is active: xrdp sends a
+/// bulk-compressed update in the middle of finalization, which upstream's
+/// sequence rejects. Replaying in arrival order keeps the bulk decompression
+/// history, which the stage keeps across reactivation, in step.
+///
+/// A PDU that does not decode goes to the sequence, which reports it as
+/// before (a Disconnect Provider Ultimatum, for example).
+fn belongs_to_activation(action: ironrdp_pdu::Action, payload: &[u8], io_channel_id: u16) -> bool {
+    use ironrdp_pdu::rdp::headers::{ShareControlPdu, decode_share_control};
+
+    if action == ironrdp_pdu::Action::FastPath {
+        return false;
+    }
+    let Ok(indication) = ironrdp_pdu::mcs::decode_send_data_indication(payload) else {
+        return true;
+    };
+    if indication.channel_id != io_channel_id {
+        return false;
+    }
+    match decode_share_control(indication) {
+        Ok(ctx) => match &ctx.pdu {
+            ShareControlPdu::Data(header) => activation_share_data(&header.share_data_pdu),
+            _ => true,
+        },
+        Err(_) => true,
+    }
+}
+
+/// The share-data PDUs of capabilities exchange and connection finalization.
+/// A compressed one counts by its inner type: the sequence cannot decompress
+/// it and fails as before, instead of waiting forever for it.
+fn activation_share_data(pdu: &ironrdp_pdu::rdp::headers::ShareDataPdu) -> bool {
+    use ironrdp_pdu::rdp::headers::{ShareDataPdu, ShareDataPduType};
+
+    match pdu {
+        ShareDataPdu::Synchronize(_)
+        | ShareDataPdu::Control(_)
+        | ShareDataPdu::FontMap(_)
+        | ShareDataPdu::ServerSetErrorInfo(_)
+        | ShareDataPdu::MonitorLayout(_) => true,
+        ShareDataPdu::Compressed { pdu_type, .. } => matches!(
+            pdu_type,
+            ShareDataPduType::Synchronize
+                | ShareDataPduType::Control
+                | ShareDataPduType::FontMap
+                | ShareDataPduType::SetErrorInfoPdu
+                | ShareDataPduType::MonitorLayoutPdu
+        ),
+        _ => false,
+    }
+}
+
+/// A server PDU in a few words, for the log when reactivation rejects it:
+/// fast-path, data on a static channel, or the share-control or share-data
+/// message by name. Never the payload itself.
+fn describe_server_pdu(action: ironrdp_pdu::Action, payload: &[u8]) -> String {
+    use ironrdp_pdu::rdp::headers::{ShareControlPdu, decode_share_control};
+
+    if action == ironrdp_pdu::Action::FastPath {
+        return format!("a fast-path PDU of {} bytes", payload.len());
+    }
+    let indication = match ironrdp_pdu::mcs::decode_send_data_indication(payload) {
+        Ok(indication) => indication,
+        Err(_) => {
+            return format!(
+                "an X.224 PDU of {} bytes that is not channel data",
+                payload.len()
+            );
+        }
+    };
+    let channel = indication.channel_id;
+    let bytes = indication.user_data.len();
+    match decode_share_control(indication) {
+        Ok(ctx) => match &ctx.pdu {
+            // xrdp compresses finalization PDUs after a resize; upstream's
+            // sequence cannot reach the session's decompressor.
+            ShareControlPdu::Data(header) => match &header.share_data_pdu {
+                ironrdp_pdu::rdp::headers::ShareDataPdu::Compressed { pdu_type, .. } => format!(
+                    "a compressed {pdu_type:?} PDU on channel {channel}, which reactivation \
+                     cannot decompress; turning the host's Bulk compression off avoids it"
+                ),
+                pdu => format!("share data {} on channel {channel}", pdu.as_short_name()),
+            },
+            other => format!(
+                "share control {} on channel {channel}",
+                other.as_short_name()
+            ),
+        },
+        Err(_) => format!("{bytes} bytes of data on channel {channel}"),
+    }
 }
 
 /// Where to cut `frame` so that the first part is whole TPKT packets of at
@@ -6736,6 +6899,148 @@ mod tests {
             })
             .await;
             assert_eq!(session.connect_calls.load(Ordering::SeqCst), 1);
+        }
+
+        /// A share data PDU of `pdu_type` with a 4-byte body. Upstream
+        /// encodes only a few types, so this is a Synchronize PDU with its
+        /// pduType2 byte (8 bytes before the end: type, compression type,
+        /// compressed length, body) replaced.
+        fn share_data_frame_of_type(pdu_type: u8) -> Vec<u8> {
+            use ironrdp_pdu::rdp::finalization_messages::SynchronizePdu;
+            use ironrdp_pdu::rdp::headers::ShareDataPdu;
+
+            let mut frame = finalization_frame(ShareDataPdu::Synchronize(SynchronizePdu {
+                target_user_id: USER_CHANNEL_ID,
+            }));
+            let at = frame.len() - 8;
+            assert_eq!(frame[at], 0x1F, "Synchronize's pduType2");
+            frame[at] = pdu_type;
+            frame
+        }
+
+        /// Set Keyboard Indicators, which the session ignores.
+        fn keyboard_indicators_frame() -> Vec<u8> {
+            share_data_frame_of_type(0x29)
+        }
+
+        /// xrdp, on a resize: server PDUs that are not part of the sequence
+        /// arrive during capabilities exchange and finalization (there, a
+        /// bulk-compressed update). They are held and replayed after the new
+        /// share is active instead of failing the reactivation into a
+        /// reconnect.
+        #[tokio::test(start_paused = true)]
+        async fn pdus_outside_the_sequence_wait_instead_of_failing_reactivation() {
+            let indicators = keyboard_indicators_frame;
+            let mut frames = reactivation_script_frames();
+            // After Synchronize (finalization), then before Demand Active
+            // (capabilities exchange).
+            frames.insert(3, indicators());
+            frames.insert(1, indicators());
+            let manager = SessionManager::new();
+            let session =
+                create_scripted_real_session(&manager, "reactivate-held", true, frames, true).await;
+            let mut rx = session.events_rx.clone();
+
+            let applied = tokio::time::timeout(
+                std::time::Duration::from_secs(600),
+                wait_for(&session.id, &session.events, &mut rx, |events| {
+                    events.last().is_some_and(|(_, v)| {
+                        status_string(v) == "connected"
+                            && v["width"].as_u64() == Some(u64::from(REACTIVATION_WIDTH))
+                    })
+                }),
+            )
+            .await;
+            let statuses = statuses_of(&info_events(&session.id, &session.events));
+            assert!(
+                applied.is_ok(),
+                "reactivation did not complete: {statuses:?}"
+            );
+            assert!(
+                !statuses
+                    .iter()
+                    .any(|s| s == "reconnecting" || s.starts_with("error:")),
+                "held PDUs must not fail the session (got {statuses:?})"
+            );
+            assert_eq!(session.connect_calls.load(Ordering::SeqCst), 1);
+            session
+                .cmd_tx
+                .send(SessionCommand::Disconnect)
+                .await
+                .unwrap();
+        }
+
+        #[test]
+        fn only_sequence_pdus_go_to_the_activation_sequence() {
+            use ironrdp_pdu::Action;
+            use ironrdp_pdu::rdp::finalization_messages::{FontPdu, SynchronizePdu};
+            use ironrdp_pdu::rdp::headers::{ShareDataPdu, ShareDataPduType};
+
+            let x224 = |frame: Vec<u8>| belongs_to_activation(Action::X224, &frame, IO_CHANNEL_ID);
+            assert!(x224(deactivate_all_frame()));
+            assert!(x224(demand_active_frame()));
+            assert!(x224(finalization_frame(ShareDataPdu::Synchronize(
+                SynchronizePdu {
+                    target_user_id: USER_CHANNEL_ID,
+                }
+            ))));
+            assert!(x224(finalization_frame(ShareDataPdu::FontMap(
+                FontPdu::default()
+            ))));
+            assert!(!x224(keyboard_indicators_frame()));
+            assert!(!x224(share_data_frame_of_type(0x02))); // Update
+            // Undecodable: the sequence reports it.
+            assert!(x224(vec![3, 0, 0, 4]));
+            assert!(!belongs_to_activation(
+                Action::FastPath,
+                &[0, 3, 0],
+                IO_CHANNEL_ID
+            ));
+            // The same share data on a static channel is channel data.
+            assert!(!belongs_to_activation(
+                Action::X224,
+                &deactivate_all_frame(),
+                IO_CHANNEL_ID + 2
+            ));
+
+            // Compressed share data counts by its inner type.
+            let compressed = |pdu_type| ShareDataPdu::Compressed {
+                pdu_type,
+                data: vec![0; 4],
+            };
+            assert!(!activation_share_data(&compressed(
+                ShareDataPduType::Update
+            )));
+            assert!(!activation_share_data(&compressed(
+                ShareDataPduType::Pointer
+            )));
+            assert!(activation_share_data(&compressed(
+                ShareDataPduType::FontMap
+            )));
+            assert!(activation_share_data(&compressed(
+                ShareDataPduType::Control
+            )));
+        }
+
+        #[test]
+        fn held_pdus_are_bounded_and_kept_in_order() {
+            use ironrdp_pdu::Action;
+            use ironrdp_tokio::bytes::BytesMut;
+
+            let mut held = HeldPdus::default();
+            assert!(held.push(Action::X224, BytesMut::from(&[1u8][..])));
+            assert!(held.push(Action::FastPath, BytesMut::from(&[2u8, 2][..])));
+            assert_eq!(held.bytes, 3);
+            assert!(!held.push(Action::X224, BytesMut::zeroed(MAX_HELD_BYTES)));
+            let (action, first) = held.pop().unwrap();
+            assert_eq!((action, &first[..]), (Action::X224, &[1u8][..]));
+            assert_eq!(held.pop().unwrap().1.len(), 2);
+            assert!(held.pop().is_none());
+            assert_eq!(held.bytes, 0);
+            for _ in 0..MAX_HELD_PDUS {
+                assert!(held.push(Action::X224, BytesMut::new()));
+            }
+            assert!(!held.push(Action::X224, BytesMut::new()));
         }
 
         #[tokio::test(start_paused = true)]
