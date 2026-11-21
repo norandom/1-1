@@ -122,6 +122,7 @@ pub enum Reason {
     NoAdapter,
     /// Windows: the DirectComposition device or target for the main window
     /// could not be created.
+    #[cfg_attr(not(windows), allow(dead_code, reason = "Windows only"))]
     CompositionFailed(String),
     SurfaceFailed(String),
     /// Set when the layer fails while sessions run (requirement 1.3).
