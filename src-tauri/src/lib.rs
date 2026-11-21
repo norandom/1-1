@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod bench_decode;
 mod commands;
 /// Harness-owned storage isolation (task 5.3): compiled ONLY in
 /// `test-support` builds; the DRIFT_TEST_* environment variables do not

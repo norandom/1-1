@@ -76,3 +76,25 @@ Linux, keep looping animations out of the session and dashboard views.
 A WebKit web-process crash at exit (`libgbm`/`dri_gbm.so` freeing during exit
 handlers) shows up in `coredumpctl`. It predates these changes and does not
 affect sessions.
+
+## Release build settings
+
+Measured on 21 November 2026 on the reference machine with
+`cargo test --release --lib bench_ -- --ignored --nocapture`
+(`src-tauri/src/bench_decode.rs`: ClearCodec decode of a terminal-like
+1920×1080 frame, and writing and taking a 1920×200 band through a frame
+store; median of three runs). Rebuild time is after touching the app crate.
+
+| Release profile | Binary | Rebuild | ClearCodec 1080p | Frame-store band |
+| --- | --- | --- | --- | --- |
+| Cargo defaults | 47.97 MB | 51 s | 9.0 ms | 0.21 ms |
+| `lto = "thin"` | 48.20 MB | 108 s | 8.9 ms | 0.20 ms |
+| `lto = "thin"`, `codegen-units = 1` | 35.58 MB | 280 s | 9.0 ms | 0.21 ms |
+
+No setting makes decoding measurably faster: the hot loops are in IronRDP's
+crates and already optimized per crate. One codegen unit makes the binary 26%
+smaller at five times the rebuild time, so release builds keep the defaults.
+The C compilers (`gcc`/`g++`) only build a few dependencies such as `ring`,
+whose hot paths are hand-written assembly. `target-cpu=native` would make
+shipped builds crash on older CPUs.
+

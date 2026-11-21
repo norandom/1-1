@@ -143,6 +143,9 @@ tokio = { version = "1", features = ["test-util"] }
 
 # Keep iterative app/test builds bounded; dependencies retain their existing cache.
 # Override temporarily only for an explicit debugger investigation, then clean it.
+# Release builds keep Cargo's defaults: thin LTO and one codegen unit made
+# no measurable difference to decoding (docs/profiling-linux.md, "Release
+# build settings"), only slower builds.
 [profile.dev.package.rdp-client]
 debug = 0
 incremental = false
