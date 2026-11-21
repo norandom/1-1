@@ -331,7 +331,6 @@ pub struct DisplayPathInfo {
 pub struct DisplayPathState(std::sync::Mutex<(Path, Reason)>);
 
 /// Emitted when the path changes while the app runs.
-#[expect(dead_code, reason = "runtime fallback, spec task 6.1")]
 pub const DISPLAY_PATH_EVENT: &str = "display-path";
 
 impl DisplayPathState {
@@ -356,6 +355,22 @@ impl DisplayPathState {
     pub fn fall_back(&self, reason: Reason) {
         *self.0.lock().unwrap() = (Path::Canvas, reason);
     }
+}
+
+/// The native layer failed while the app runs (requirement 1.3): record it,
+/// tell the page, and move every session to the canvas without dropping it.
+pub fn runtime_fallback(app: &tauri::AppHandle, error: String) {
+    use tauri::{Emitter, Manager};
+    log::warn!("Native layer failed, switching to the web canvas: {error}");
+    let state = app.state::<DisplayPathState>();
+    state.fall_back(Reason::RuntimeFailure(error));
+    let _ = app.emit(DISPLAY_PATH_EVENT, state.info());
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let sessions = app.state::<crate::rdp::session::SessionManager>();
+        let told = sessions.use_canvas_everywhere().await;
+        log::info!("{told} session(s) moved to the web canvas");
+    });
 }
 
 #[tauri::command]

@@ -170,12 +170,7 @@ pub fn run() {
                             target,
                             Arc::clone(&render_shared),
                             Box::new(move |error| {
-                                // Spec task 6.1 switches running sessions too.
-                                handle
-                                    .state::<renderer::display_path::DisplayPathState>()
-                                    .fall_back(renderer::display_path::Reason::RuntimeFailure(
-                                        error,
-                                    ));
+                                renderer::display_path::runtime_fallback(&handle, error);
                             }),
                         )
                         .map_err(|e| e.to_string())

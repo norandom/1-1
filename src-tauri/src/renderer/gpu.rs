@@ -355,6 +355,10 @@ impl Renderer {
 
     fn run(&mut self, target: &LayerTarget, shared: &RenderShared) -> Result<(), String> {
         let wake: &Wake = &target.wake;
+        // For checking the fallback by hand: fail after this many frames.
+        let mut fail_after: Option<u64> = std::env::var("ONE_ONE_RENDERER_FAIL_AFTER")
+            .ok()
+            .and_then(|value| value.parse().ok());
         let mut seen = 0;
         let mut failures = 0;
         let mut drawn_view: Option<View> = None;
@@ -393,6 +397,12 @@ impl Renderer {
             match self.draw(&view, geometry, store.is_some()) {
                 Ok(()) => {
                     failures = 0;
+                    if let Some(left) = fail_after.as_mut() {
+                        if *left == 0 {
+                            return Err("injected by ONE_ONE_RENDERER_FAIL_AFTER".into());
+                        }
+                        *left -= 1;
+                    }
                     if let (Some(session), Some(_)) = (view.session.as_deref(), &store) {
                         shared.count_present(session);
                     }

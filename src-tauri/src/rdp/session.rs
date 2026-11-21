@@ -3080,6 +3080,22 @@ impl SessionManager {
             .map(|h| h.info_rx.borrow().clone())
     }
 
+    /// Spec rdp-native-renderer 1.3: every running session draws through
+    /// the web canvas from now on. Returns how many sessions were told.
+    pub async fn use_canvas_everywhere(&self) -> usize {
+        let senders: Vec<_> = {
+            let state = self.state.lock().await;
+            state.handles.values().map(|h| h.cmd_tx.clone()).collect()
+        };
+        let mut told = 0;
+        for sender in senders {
+            if sender.send(SessionCommand::UseCanvas).await.is_ok() {
+                told += 1;
+            }
+        }
+        told
+    }
+
     /// List all sessions.
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
         let state = self.state.lock().await;
@@ -7614,6 +7630,39 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             assert_eq!(native.packets.lock().unwrap().len(), 1);
             disconnect_and_wait(&native).await;
+        }
+
+        /// Requirement 1.3 for the whole app: a runtime failure moves every
+        /// running session to the canvas, each with its own full picture.
+        #[tokio::test(start_paused = true)]
+        async fn a_runtime_fallback_moves_every_session_to_the_canvas() {
+            let manager = SessionManager::new();
+            let expected = expected_rgba(W, H);
+            let mut sessions = Vec::new();
+            for tag in ["egfx-everywhere-a", "egfx-everywhere-b"] {
+                let native = create_egfx_native_session(
+                    &manager,
+                    tag,
+                    egfx_server_frames(&expected),
+                    SharedFrame::new(u32::from(W), u32::from(H)),
+                )
+                .await;
+                wait_for_store(&native, 1).await;
+                sessions.push(native);
+            }
+
+            assert_eq!(manager.use_canvas_everywhere().await, 2);
+            for native in &sessions {
+                wait_for_packets(native, |n| n >= 1).await;
+                let packets = native.packets.lock().unwrap().clone();
+                assert_eq!(packets.len(), 1);
+                let parsed = parse_packet(&packets[0]);
+                assert_eq!((parsed.kind, parsed.pixels.len()), (1, expected.len()));
+                assert_eq!(native.session.connect_calls.load(Ordering::SeqCst), 1);
+            }
+            for native in &sessions {
+                disconnect_and_wait(native).await;
+            }
         }
 
         /// A server graphics reset (resize) resizes the decoded image, the

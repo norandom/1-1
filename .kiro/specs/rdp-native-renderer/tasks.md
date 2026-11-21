@@ -59,14 +59,15 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - _Requirements: 2.2, 2.4, 2.7_
   - Done 21 November 2026 (`src/lib/native-view.ts`, `SessionCanvas`, `globals.css`). Only `<body>`, the app root and the session wrapper paint backgrounds on the way down to the canvas; under `native-layer` they are transparent and the layer clears to `--color-surface-0`, which the page sends with every view (also with no session open, and on theme changes). The black letterbox is the transparent canvas's `box-shadow`, clipped by its container, so the renderer needs no second color. On the native path the canvas draws nothing and stays for input and the cursor. Checked with an isolated test copy: the native start screen matches the canvas one except 648 pixels off by one level (text antialiasing over a transparent page).
 
-- [ ] 6. Failures and fallback
-- [ ] 6.1 Runtime fallback to the canvas
+- [x] 6. Failures and fallback
+- [x] 6.1 Runtime fallback to the canvas
   - Render-thread errors as in the design (reconfigure on `Lost`/`Outdated`; `RuntimeFailure` on device loss, out of memory, three failures). On `RuntimeFailure`: every session's sink switches to `Canvas` with a full frame, the frontend drops `native-layer`, the reason appears in the HUD. Test with an injected failure.
   - _Depends: 2.2, 4.1, 5.1_
   - _Requirements: 1.3, 1.6_
-- [ ] 6.2 Regression guard
+- [x] 6.2 Regression guard
   - Frontend test: no `repeat: Infinity` or CSS `infinite` animation under `src/components/session` and `src/components/dashboard`. Rust test: `build_connector_config` keeps `pointer_software_rendering` false.
   - _Requirements: 6.3_
+  - Done 21 November 2026. 6.1: `display_path::runtime_fallback` records the reason, emits `display-path` (the page drops `native-layer`, the HUD shows the reason) and sends `UseCanvas` to every session (`SessionManager::use_canvas_everywhere`); a session created during the fallback is checked again after it registers. Test: two native sessions each send one full frame, without reconnecting. `ONE_ONE_RENDERER_FAIL_AFTER=N` makes the render thread fail after N frames, for the checklist in 7.2. 6.2: `src/lib/__tests__/no-endless-animations.test.ts` (also Tailwind's looping `animate-*`, and the global styles; it checks that it read the watched folders) and `the_remote_pointer_is_never_composited_into_frames`. The dashboard's loading spinner became a static icon with text.
 
 - [ ] 7. Verify and measure on the reference machine
 - [ ] 7.1 Pixel parity

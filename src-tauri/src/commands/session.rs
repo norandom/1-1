@@ -220,6 +220,15 @@ pub async fn connect(
         .await?;
     if let Some(store) = &registered_frame {
         frame_stores.register(&session_id, store);
+        // The layer may have failed while this session was being created,
+        // after the fallback told the sessions it knew about.
+        if display_path.path() != crate::renderer::display_path::Path::Native
+            && let Some(sender) = session_mgr.get_cmd_sender(&session_id).await
+        {
+            let _ = sender
+                .send(crate::rdp::client::SessionCommand::UseCanvas)
+                .await;
+        }
     }
 
     // Update last_connected_at on the connection

@@ -118,8 +118,10 @@ export function DashboardView({ node }: { node: NodeId }) {
             <p className="mt-1 max-w-[280px] text-sm text-muted-foreground">{error}</p>
           </div>
         ) : summaries === null ? (
-          <div className="flex h-64 items-center justify-center">
-            <Loader2 className="size-8 animate-spin text-primary" />
+          <div className="flex h-64 items-center justify-center gap-2 text-sm text-muted-foreground">
+            {/* Static: an endless spin keeps the window repainting (see the guard test). */}
+            <Loader2 className="size-5 text-primary" aria-hidden="true" />
+            Loading connections…
           </div>
         ) : model.emptyState ? (
           <motion.div

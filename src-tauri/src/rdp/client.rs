@@ -61,10 +61,6 @@ pub enum SessionCommand {
     Disconnect,
     /// Spec rdp-native-renderer 1.3: the native layer failed; send frames to
     /// the web canvas from now on, starting with the whole current picture.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "sent by the runtime fallback, spec task 6.1")
-    )]
     UseCanvas,
     /// Task 5.3 (Req 12.2/12.10): force a mock-session connection loss so
     /// E2E can drive the shared reconnect loop. Exists ONLY in
@@ -764,6 +760,27 @@ mod tests {
         assert_eq!(
             actual.connection_type,
             ironrdp_pdu::gcc::ConnectionType::Wan
+        );
+    }
+
+    /// Spec rdp-native-renderer 6.3: the pointer is the local cursor. If the
+    /// session composited it again, every mouse move would be a frame and,
+    /// on Linux, a full-window repaint.
+    #[test]
+    fn the_remote_pointer_is_never_composited_into_frames() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "pointer", "name": "Pointer", "host": "pointer.invalid", "port": 3389,
+            "createdAt": "2026-11-21T00:00:00Z", "updatedAt": "2026-11-21T00:00:00Z"
+        }))
+        .unwrap();
+        let built = build_connector_config(&config, "test", 800, 600);
+        assert!(
+            built.enable_server_pointer,
+            "the server's pointer shapes are wanted"
+        );
+        assert!(
+            !built.pointer_software_rendering,
+            "but not drawn into the frames"
         );
     }
 
