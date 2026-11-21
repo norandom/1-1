@@ -16,6 +16,8 @@ import {
 } from '../../lib/canvas-compositor';
 import type { SessionStatus } from '../../types';
 import { remoteCursor, type PointerImage } from '../../lib/remote-cursor';
+import { useDisplayPath } from '../../lib/display-path';
+import { reportNativeView, visibleView } from '../../lib/native-view';
 import { subscribeCanvasWheel } from './canvas-wheel';
 import { createHeldButtons } from '../../lib/mouse-capture';
 
@@ -28,6 +30,8 @@ interface MouseSurfaceBounds {
 const liveDisplay = () => false;
 
 interface Props {
+  /** The session shown here; the native layer draws it by id. */
+  sessionId?: string;
   displayMode?: DisplayMode;
   /** How remote pixels map to this display's density. */
   scaling?: DisplayScaling;
@@ -57,6 +61,7 @@ interface Props {
 }
 
 export function SessionCanvas({
+  sessionId,
   displayMode = 'fit',
   scaling = 'automatic',
   hideLocalCursor = false,
@@ -97,6 +102,37 @@ export function SessionCanvas({
     height: surfaceHeight,
   }));
 
+  // Spec rdp-native-renderer: on the native path a GPU layer below the page
+  // draws the picture, and this canvas stays transparent (input only).
+  const native = useDisplayPath().path === 'native';
+  const nativeRef = useRef(native);
+  nativeRef.current = native;
+
+  // Tell the native layer where the picture is (spec task 5.2). Layout
+  // changes reach here through displaySize; a window resize or move of the
+  // panel without a size change through the resize listener.
+  useLayoutEffect(() => {
+    if (!native) return;
+    if (!sessionId || status !== 'connected') {
+      reportNativeView(null);
+      return;
+    }
+    const report = () => {
+      const canvas = canvasRef.current;
+      const container = containerRef.current;
+      if (!canvas || !container) return;
+      const visible = visibleView(canvas.getBoundingClientRect(), container.getBoundingClientRect(), {
+        width: surfaceWidth,
+        height: surfaceHeight,
+      });
+      reportNativeView(visible && { session: sessionId, ...visible, smooth: displayMode !== 'native' });
+    };
+    report();
+    window.addEventListener('resize', report);
+    return () => window.removeEventListener('resize', report);
+  }, [native, sessionId, status, displaySize, displayMode, surfaceWidth, surfaceHeight]);
+  useEffect(() => () => { if (nativeRef.current) reportNativeView(null); }, []);
+
   // The remote pointer is the system cursor: moving the mouse repaints nothing.
   const cursorScale = surfaceWidth > 0 ? displaySize.width / surfaceWidth : 1;
   const [shapeCursor, setShapeCursor] = useState<string | null>(null);
@@ -135,7 +171,7 @@ export function SessionCanvas({
 
   useLayoutEffect(() => {
     const draw = () => {
-      if (renderScheduledRef.current) {
+      if (renderScheduledRef.current || nativeRef.current) {
         return;
       }
 
@@ -442,7 +478,7 @@ export function SessionCanvas({
   }
 
   return (
-    <div className="flex flex-col w-full h-full bg-black">
+    <div className="session-surface flex flex-col w-full h-full bg-black">
       <div className="relative flex flex-1 min-h-0 flex-col overflow-hidden">
         <div
           ref={containerRef}
@@ -454,7 +490,7 @@ export function SessionCanvas({
           <canvas
             ref={canvasRef}
             tabIndex={0}
-            className="absolute outline-none"
+            className="session-hole absolute outline-none"
             style={{
               cursor,
               left: displaySize.left,

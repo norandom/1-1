@@ -316,6 +316,7 @@ function SessionContent() {
       <div ref={viewportRef} data-rdp-session={sessionId ?? undefined} className="relative min-h-0 flex-1 overflow-hidden">
         {/* Canvas */}
         <SessionCanvas
+          sessionId={sessionId ?? undefined}
           displayMode={profile.displayMode}
           scaling={profile.scaling}
           hideLocalCursor={sessionResolution?.hideLocalCursor}

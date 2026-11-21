@@ -4,8 +4,10 @@ import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import './styles/globals.css';
 import { suppressBrowserMenu } from './lib/browser-menu';
+import { syncDisplayPathClass } from './lib/display-path';
 
 suppressBrowserMenu(document);
+syncDisplayPathClass();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

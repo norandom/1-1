@@ -96,7 +96,7 @@ export default function App() {
 
   return (
     <TooltipProvider>
-      <div className="flex flex-col h-screen w-screen overflow-hidden bg-[var(--color-surface-0)]">
+      <div className="app-root flex flex-col h-screen w-screen overflow-hidden bg-[var(--color-surface-0)]">
         {/* Titlebar */}
         <Titlebar />
 

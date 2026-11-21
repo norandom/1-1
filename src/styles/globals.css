@@ -132,6 +132,16 @@ html, body, #root {
 
 /* A steady ring, not a pulse: an endless animation keeps the web view
    repainting, and on Linux each frame repaints the whole window in software. */
+/* Spec rdp-native-renderer: on the native path the remote picture is a GPU
+   layer below the page. The page is transparent from <body> down to the
+   session canvas; the layer clears to --color-surface-0, so transparent areas
+   look as before. The canvas's shadow paints the black letterbox around the
+   picture without covering it (its container clips the shadow). */
+html.native-layer body,
+html.native-layer .app-root,
+html.native-layer .session-surface { background: transparent !important; }
+html.native-layer .session-hole { box-shadow: 0 0 0 100vmax #000; }
+
 .pulse-online { box-shadow: 0 0 0 3px oklch(0.72 0.19 155 / 0.25); }
 .glow-accent { box-shadow: 0 0 20px oklch(0.65 0.2 270 / 0.15), 0 0 60px oklch(0.65 0.2 270 / 0.05); }
 

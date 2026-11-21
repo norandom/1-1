@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { reportNativeView } from './native-view';
 
 export type DisplayPath = 'native' | 'canvas';
 
@@ -40,4 +41,21 @@ export function useDisplayPath(): DisplayPathInfo {
     };
   }, []);
   return info;
+}
+
+/** Keeps `<html class="native-layer">` in step with the path (task 5.1). */
+export function syncDisplayPathClass(
+  root: HTMLElement = document.documentElement,
+  showBackground: () => void = () => reportNativeView(null),
+): void {
+  const apply = (info: DisplayPathInfo) => {
+    root.classList.toggle('native-layer', info.path === 'native');
+    // The layer clears to the page background from the start.
+    if (info.path === 'native') showBackground();
+  };
+  void getDisplayPath().then(apply);
+  void listen<DisplayPathInfo>(DISPLAY_PATH_EVENT, (event) => {
+    current = Promise.resolve(event.payload);
+    apply(event.payload);
+  }).catch(() => {});
 }

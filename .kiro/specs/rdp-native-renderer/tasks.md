@@ -48,15 +48,16 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - _Requirements: 2.4, 4.1_
   - Done 21 November 2026 (`renderer/gpu.rs`, `renderer/native_layer.wgsl`; the old opt-in renderer, `ONE_ONE_NATIVE_RENDERER`, its shader and the app-wide frame are removed). One `Wake` serves the layer, the view and every registered store. The view also carries the page's background color and the smoothing flag; the page sends it through `native_view` in 5.2. The native-path stall check is not built: the store merges damage and never queues, so nothing is lost while a present waits, and a waiting present means the window is not on screen, where a stall report would be a false alarm. `wait_for_frame` and the snapshot API went with the old renderer (`publish` stays for tests).
 
-- [ ] 5. The page over the layer
-- [ ] 5.1 `native-layer` styling
+- [x] 5. The page over the layer
+- [x] 5.1 `native-layer` styling
   - `<html class="native-layer">` from `get_display_path`. Audit every ancestor of the session canvas and make their backgrounds transparent under the class; panels beside the session (tab strip, sidebar, toolbar, status bar, dialogs) stay opaque. The canvas stays in the layout but draws nothing.
   - _Depends: 1.2_
   - _Requirements: 2.5, 2.7_
-- [ ] 5.2 Report the view from `SessionCanvas`
+- [x] 5.2 Report the view from `SessionCanvas`
   - `native_view(session_id, dest, source)` from `layoutSurface`, clipped to the scroll container; on mount, `ResizeObserver`, scroll, and `null` on unmount, tab switch and the screens that replace the canvas. Frontend tests for fit, native, scrolled and clipped rectangles and for `null`.
   - _Depends: 4.2, 5.1_
   - _Requirements: 2.2, 2.4, 2.7_
+  - Done 21 November 2026 (`src/lib/native-view.ts`, `SessionCanvas`, `globals.css`). Only `<body>`, the app root and the session wrapper paint backgrounds on the way down to the canvas; under `native-layer` they are transparent and the layer clears to `--color-surface-0`, which the page sends with every view (also with no session open, and on theme changes). The black letterbox is the transparent canvas's `box-shadow`, clipped by its container, so the renderer needs no second color. On the native path the canvas draws nothing and stays for input and the cursor. Checked with an isolated test copy: the native start screen matches the canvas one except 648 pixels off by one level (text antialiasing over a transparent page).
 
 - [ ] 6. Failures and fallback
 - [ ] 6.1 Runtime fallback to the canvas
