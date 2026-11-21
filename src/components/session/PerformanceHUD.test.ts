@@ -27,6 +27,8 @@ describe('network performance details', () => {
     expect(html).toContain('Sent 2.0 KiB');
     expect(html).toContain('rfx-progressive, clearcodec');
     expect(html).toContain('Channel: egfx');
+    // The display path is asked asynchronously; the first render shows the canvas.
+    expect(html).toContain('Renderer: web canvas');
     expect(html).toContain('Excludes TCP/IP headers, retransmissions');
     expect(html).toContain('Totals reset on reconnect');
   });

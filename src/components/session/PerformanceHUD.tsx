@@ -5,6 +5,7 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { formatBandwidth, fpsLevel, latencyLevel } from '../../lib/hud-format';
+import { useDisplayPath } from '../../lib/display-path';
 import type { GraphicsObservation, NetworkMetrics } from '../../types';
 
 interface Props {
@@ -17,6 +18,7 @@ interface Props {
 
 export function PerformanceHUD({ fps, latency, network, graphics, resolution }: Props) {
   const show = useSessionStore((s) => s.showPerformanceHud);
+  const displayPath = useDisplayPath();
 
   const fpsTrend = fpsLevel(fps);
 
@@ -79,6 +81,7 @@ export function PerformanceHUD({ fps, latency, network, graphics, resolution }: 
               <div className="text-[10px] text-white/60 break-words" title="Observed on this connection, not requested capabilities. Unknown means the wire encoding is not identified.">
                 <div>Channel: {graphics?.channels.join(', ') || 'Unknown'}</div>
                 <div>Codecs: {graphics?.codecs.join(', ') || 'Unknown'}</div>
+                <div title={displayPath.reason}>Renderer: {displayPath.path === 'native' ? 'native layer' : 'web canvas'}</div>
               </div>
               <div className="text-[9px] text-white/50" title="Includes RDP negotiation and TLS overhead. Excludes TCP/IP headers, retransmissions and separate authentication sockets. Totals reset on reconnect.">
                 TCP payload · includes TLS

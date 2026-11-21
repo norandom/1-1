@@ -145,6 +145,12 @@ pub fn run() {
             app.manage(credential_store);
             app.manage(shared_frame.clone());
 
+            // Spec rdp-native-renderer: native layer or web canvas. Decided
+            // once here; only a runtime failure changes it later.
+            let main_window = app.get_webview_window("main").unwrap();
+            let (path, reason) = renderer::display_path::decide(&main_window);
+            app.manage(renderer::display_path::DisplayPathState::new(path, reason));
+
             // The web view's canvas draws remote frames from IPC. The native
             // wgpu renderer drew into the window's own surface under the opaque
             // web view: invisible on Windows, and on Wayland it shared GTK's
@@ -221,6 +227,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            renderer::display_path::get_display_path,
             // Connection commands (task 6.6: unified v2 store)
             commands::connection::list_connections,
             commands::connection::get_connection,

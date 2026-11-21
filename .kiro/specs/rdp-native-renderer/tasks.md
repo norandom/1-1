@@ -2,14 +2,15 @@
 
 Tasks 1–2 build the parts that need no GPU or window: the path choice, per-session frame stores and the session's frame sink. Tasks 3–4 bring the Wayland layer and the render thread into the app. Task 5 makes the page transparent over the session and connects layout. Task 6 handles failures and fallback, task 7 measures and verifies on the reference machine, task 8 prepares H.264, and task 9 covers macOS and Windows. Each leaf is one to three hours. The canvas path keeps working after every task.
 
-- [ ] 1. Choose the display path
-- [ ] 1.1 Decide native or canvas from startup facts
+- [x] 1. Choose the display path
+- [x] 1.1 Decide native or canvas from startup facts
   - `renderer/display_path.rs`: `choose(facts) -> (Path, Reason)` with the reasons from the design; `ONE_ONE_RENDERER` parsing (`canvas`, `native`, unset). Pure function, unit tests for every reason and the override.
   - _Requirements: 1.1, 1.2, 1.5, 6.4_
-- [ ] 1.2 Collect the facts and expose the path
+- [x] 1.2 Collect the facts and expose the path
   - On Linux: GDK display type (Wayland or X11), advertised `wl_compositor` and `wl_subcompositor`. Log the chosen path and reason once. `get_display_path` command; `SessionInfo.displayPath` and `displayPathReason`; shown in the Performance HUD.
   - _Depends: 1.1_
   - _Requirements: 1.4_
+  - Done 21 November 2026 (`renderer/display_path.rs`, `src/lib/display-path.ts`, HUD "Renderer" line). Two adjustments, also noted in the design: the path is app-wide state (`get_display_path` plus a `display-path` event) instead of a `SessionInfo` field, since every session switches together; and automatic mode keeps the canvas (`OptInOnly`) until task 7.3 passes, so `ONE_ONE_RENDERER=native` opts in during development. The GPU adapter is tried only when every other fact allows the layer.
 
 - [ ] 2. Frames for the native path in the session actor
 - [ ] 2.1 One frame store per session, with damage

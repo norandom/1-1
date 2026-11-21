@@ -116,6 +116,15 @@ nix = { version = "=0.31.4", features = ["fs", "dir"] }
 # macOS (task 7.5). Windows keeps IFileOpenDialog.
 tauri-plugin-dialog = "=2.8.4"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The native renderer's Wayland layer (spec rdp-native-renderer): GDK's
+# Wayland objects and our subsurface on the same connection. Versions follow
+# what tauri's GTK stack and wgpu already resolve.
+gtk = "0.18"
+gdkwayland-sys = "0.18"
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+
 [target.'cfg(windows)'.dependencies]
 # The shell's IFileOpenDialog with FOS_PICKFOLDERS supplies the native folder picker;
 # FileSystem reads the chosen directory's volume and file identity.
