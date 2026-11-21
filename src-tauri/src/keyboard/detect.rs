@@ -186,15 +186,23 @@ pub fn current() -> Option<LocalLayout> {
     if cfg!(test) {
         return None;
     }
-    #[cfg(target_os = "linux")]
     if let Some(layout) = CURRENT.lock().unwrap().clone() {
         return Some(layout);
     }
     platform::detect_now()
 }
 
+/// Startup on GTK's or the window's main thread: Windows remembers the UI
+/// thread (layouts are per thread there), macOS reads the input source
+/// (its API wants the main thread).
+pub fn remember_ui_thread() {
+    platform::remember_ui_thread();
+}
+
+/// A synchronous command, so it runs on the main thread (macOS refreshes).
 #[tauri::command]
 pub fn detect_keyboard_layout() -> Option<LocalLayout> {
+    platform::remember_ui_thread();
     current()
 }
 
@@ -358,6 +366,9 @@ mod platform {
         });
     }
 
+    /// Wayland is followed by `watch_wayland`; nothing to remember.
+    pub fn remember_ui_thread() {}
+
     /// X11: `setxkbmap -query`, first layout (task 2.2).
     pub fn detect_now() -> Option<LocalLayout> {
         let output = std::process::Command::new("setxkbmap")
@@ -386,11 +397,130 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+mod platform {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
+
+    use super::super::klid::{self, Match};
+    use super::LocalLayout;
+
+    static UI_THREAD: AtomicU32 = AtomicU32::new(0);
+
+    pub fn remember_ui_thread() {
+        // SAFETY: plain Win32 call without arguments.
+        UI_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+    }
+
+    /// The UI thread's input locale. Its low word is the language; a high
+    /// word equal to it is that language's default layout (an exact KLID),
+    /// anything else a variant, reported as the language's layout.
+    pub fn detect_now() -> Option<LocalLayout> {
+        // SAFETY: GetKeyboardLayout only reads the thread's input locale.
+        let hkl = unsafe { GetKeyboardLayout(UI_THREAD.load(Ordering::Relaxed)) };
+        let value = hkl.0 as usize as u32;
+        let (language, device) = (value & 0xFFFF, value >> 16);
+        if language == 0 {
+            return None;
+        }
+        let (layout, _) = klid::from_windows_name(&format!("{language:08X}"))?;
+        Some(LocalLayout {
+            display_name: layout.name.to_string(),
+            windows: Some(layout),
+            matched: Some(if device == language {
+                Match::Exact
+            } else {
+                Match::Closest
+            }),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use std::ffi::{c_char, c_void};
+
+    use super::super::klid;
+    use super::{CURRENT, LocalLayout};
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn TISCopyCurrentKeyboardInputSource() -> *const c_void;
+        fn TISGetInputSourceProperty(source: *const c_void, key: *const c_void) -> *const c_void;
+        static kTISPropertyInputSourceID: *const c_void;
+        static kTISPropertyLocalizedName: *const c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringGetCString(
+            string: *const c_void,
+            buffer: *mut c_char,
+            size: isize,
+            encoding: u32,
+        ) -> u8;
+        fn CFRelease(object: *const c_void);
+    }
+
+    const UTF8: u32 = 0x0800_0100;
+
+    /// SAFETY: `string` is a live CFString or null.
+    unsafe fn text(string: *const c_void) -> Option<String> {
+        if string.is_null() {
+            return None;
+        }
+        let mut buffer = [0 as c_char; 256];
+        // SAFETY: the buffer's length is passed along.
+        if unsafe { CFStringGetCString(string, buffer.as_mut_ptr(), buffer.len() as isize, UTF8) }
+            == 0
+        {
+            return None;
+        }
+        // SAFETY: CFStringGetCString wrote a NUL-terminated string.
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    /// Reads the current input source; called on the main thread.
+    pub fn remember_ui_thread() {
+        // SAFETY: Carbon's documented calls; the copied source is released,
+        // the properties follow the Get rule and are not released.
+        let found = unsafe {
+            let source = TISCopyCurrentKeyboardInputSource();
+            if source.is_null() {
+                return;
+            }
+            let id = text(TISGetInputSourceProperty(source, kTISPropertyInputSourceID));
+            let name = text(TISGetInputSourceProperty(source, kTISPropertyLocalizedName));
+            CFRelease(source);
+            id.map(|id| (id, name))
+        };
+        let Some((id, name)) = found else { return };
+        let resolved = klid::from_mac_source(&id);
+        *CURRENT.lock().unwrap() = Some(LocalLayout {
+            display_name: name.unwrap_or(id),
+            windows: resolved.map(|(layout, _)| layout),
+            matched: resolved.map(|(_, matched)| matched),
+        });
+    }
+
+    /// Off the main thread only the value read there is used.
+    pub fn detect_now() -> Option<LocalLayout> {
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 mod platform {
     use super::LocalLayout;
 
-    /// Windows and macOS detection: task 2.2.
+    pub fn remember_ui_thread() {}
+
     pub fn detect_now() -> Option<LocalLayout> {
         None
     }

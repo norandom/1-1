@@ -187,9 +187,11 @@ pub fn run() {
             #[cfg(not(target_os = "linux"))]
             let _ = &main_window;
             app.manage(display_path);
-            // Spec rdp-keyboard-layout: follow the local layout (Wayland).
+            // Spec rdp-keyboard-layout: follow the local layout (Wayland), or
+            // remember the main thread for Windows and macOS detection.
             #[cfg(target_os = "linux")]
             keyboard::detect::watch_wayland();
+            keyboard::detect::remember_ui_thread();
             app.manage(frame_stores);
             app.manage(render_shared);
 

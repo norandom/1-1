@@ -21,10 +21,11 @@ Task 1 builds the data and settings (layout table, host profile). Task 2 detects
   - `src-tauri/src/keyboard/detect.rs`: bind `wl_seat` and `wl_keyboard` on a queue over GDK's connection, read the keymap's `xkb_symbols` include line and the active group from `wl_keyboard.modifiers`; dispatch from GTK's main loop. Parser tests with real Hyprland keymaps (one layout, two layouts and a switch, variants).
   - _Depends: 1.1_
   - _Requirements: 6.1_
-- [ ] 2.2 X11, Windows and macOS
+- [x] 2.2 X11, Windows and macOS
   - X11: `setxkbmap -query`. Windows: `GetKeyboardLayoutNameW`. macOS: `TISCopyCurrentKeyboardInputSource` and its input source ID. Each falls back to "not detected".
   - _Depends: 1.1_
   - _Requirements: 6.2, 6.3, 6.4, 6.5_
+  - Done 21 November 2026, compiled on Linux only; the Windows and macOS code is checked by CI's native jobs. Windows: `GetKeyboardLayout` for the UI thread remembered at startup (layouts are per thread); the language's default layout is exact, a variant is reported as the language's layout (closest). macOS: `TISCopyCurrentKeyboardInputSource` read on the main thread at startup and when the host editor asks (`detect_keyboard_layout` is synchronous, so it runs there), cached for connects; a layout switch on the Mac is picked up then.
 
 - [ ] 3. Report and show the layout
 - [x] 3.1 Report at connect
