@@ -53,7 +53,12 @@
       }
     },
     "createUpdaterArtifacts": false,
-    "useLocalToolsDir": true
+    "useLocalToolsDir": true,
+    "linux": {
+      "deb": {
+        "recommends": ["libvulkan1", "mesa-vulkan-drivers"]
+      }
+    }
   },
   "plugins": {
     "updater": {
