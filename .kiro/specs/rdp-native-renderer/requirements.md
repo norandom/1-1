@@ -18,7 +18,7 @@ The maintainer approved these requirements on 21 November 2026. This spec brings
 
 ### 1. Choose the display path, with today's canvas as the fallback
 
-1. When a Linux session starts in a Wayland desktop session on a supported compositor and the native layer can be created, 1-1 shall show the remote picture through the native layer. Hyprland is the only supported compositor (maintainer decision, 21 November 2026); elsewhere 1-1 keeps the canvas unless `ONE_ONE_RENDERER=native` asks for the layer.
+1. When a Linux session starts in a Wayland desktop session and the native layer can be created, 1-1 shall show the remote picture through the native layer. Amended 22 November 2026 at the maintainer's request ("default when available"): the layer is automatic on any Wayland compositor that offers the required interfaces, verified on Hyprland and KDE (KWin); the 21 November rule "Hyprland only" is withdrawn. A compositor where the layer fails falls back to the canvas (requirement 1.3).
 2. If the desktop session is X11, 1-1 runs under XWayland, the compositor lacks a required Wayland interface, no usable GPU adapter is found, or creating the layer fails, 1-1 shall show the remote picture through the web canvas exactly as before, without an error dialog and with the session usable.
 3. If the native layer fails while a session is running (lost device, lost surface, a protocol error it can recover from), 1-1 shall switch that session to the canvas without dropping the connection or losing the current picture.
 4. When 1-1 chooses or changes the display path, it shall log the path and the reason once, and show the active path in the session's diagnostics (the Performance HUD).

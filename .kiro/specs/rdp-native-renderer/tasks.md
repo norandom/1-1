@@ -84,6 +84,7 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - _Requirements: 3.2, 3.3, 3.4, 6.1, 6.2_
   - Skipped 21 November 2026 by the maintainer's decision: the sessions the maintainer ran on the native path (picture, input, HUD, quitting) and the measurement in `validation.md` stand in for 7.1–7.3. The pixel capture (`ONE_ONE_RENDERER_CAPTURE`) and the full four-scenario measurement were not built or run. Automatic mode no longer waits for 7.3: on Hyprland it chooses the native layer (the `OptInOnly` gate is removed).
 - [x] 7.4 Supported compositors only
+  - Superseded 22 November 2026: verified on KDE (KWin) as well, and Automatic now chooses the layer on any Wayland compositor that offers the interfaces (requirement 1.1 amended).
   - Settings, Display, Renderer (Automatic, GPU layer, Web canvas) carries the choice at the next start; `ONE_ONE_RENDERER` still overrides it (requirement 1.5 amended).
   - Replaced 21 November 2026 by the maintainer's decision: GNOME, KDE and X11 are not supported and not tested; the reference machine is the test environment. Automatic mode chooses the native layer only on Hyprland (`Reason::UntestedCompositor` elsewhere, override with `ONE_ONE_RENDERER=native`); X11 and XWayland already keep the canvas.
   - _Requirements: 1.1, 1.2, 6.2_
@@ -108,6 +109,7 @@ Tasks 1–2 build the parts that need no GPU or window: the path choice, per-ses
   - _Depends: 7.3, 9.1_
   - _Requirements: 5.2, 5.3, 5.4, 6.1_
   - Windows done 21 November 2026: [profiling-windows.md](../../../docs/profiling-windows.md), rule met, maintainer chose the native layer; probe and amendment 5a below. macOS open.
+  - macOS: the maintainer measured the canvas path on 21 November 2026 and, on 22 November, made the native layer automatic on macOS (`UnmeasuredPlatform` removed). The numbers are not in the repository yet; `docs/profiling-macos.md` should record them.
 
 ## Windows native layer (amendment 5a, approved 21 November 2026)
 

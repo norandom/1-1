@@ -162,7 +162,7 @@ Most of my work in this fork went into ClearCodec. I made it the preferred codec
 
 **Rendering and security**
 
-- Frames are drawn in the app's WebView canvas. On Linux (Wayland, tested on Hyprland) a native GPU layer can draw remote screens instead: Settings, Display, Renderer
+- Frames are drawn in the app's WebView canvas. A native GPU layer draws remote screens instead where it is available (Linux on Wayland, Windows, macOS), with the canvas as fallback: Settings, Display, Renderer
 - Passwords stored in the OS keychain (Windows Credential Manager, macOS Keychain, and on Linux the Secret Service from KWallet or GNOME Keyring); no plaintext credential storage. Per host you can turn saving off and be asked at each connect
 - Connection configs as local JSON: no cloud, no telemetry
 - Ships as a single `.app`, `.AppImage`, or small NSIS installer

@@ -138,7 +138,7 @@ The reference measurement (requirement 6.2) runs `scripts/linux/profile.sh` for 
 
 ## Risks
 
-- **Compositors.** Hyprland works and is the only supported compositor. GNOME (Mutter) and KDE (KWin) support subsurfaces, but are not tested, so the layer is off there unless forced.
+- **Compositors.** Verified on Hyprland and KDE (KWin 6.6, 22 November 2026, fractional scaling, Vulkan, main thread about 2%). Automatic chooses the layer on every Wayland compositor with the required interfaces; GNOME (Mutter) is untested and relies on the fallback.
 - **WebKitGTK transparency.** A future WebKitGTK that composites differently could paint an opaque background; the full-window layer keeps the failure visible as the background color, and the canvas override remains.
 - **GTK commits.** The subsurface position applies on GTK's next commit. If GTK skips a commit when nothing in the page changed, a window move inside the toplevel (sidebar toggle) could lag a frame; the layer then calls `queue_draw` explicitly, as the probe does.
 - **Driver variety.** Older Intel or NVIDIA proprietary drivers may lack what wgpu needs; they fall back at startup with `NoAdapter` or `SurfaceFailed`.

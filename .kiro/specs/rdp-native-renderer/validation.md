@@ -40,3 +40,8 @@ Measured with `scripts/windows/Measure-AppCpu.ps1`, 30 s each, against the same 
 - Main thread at most 5% (5a.4): met in every scenario.
 - Whole app at most half of the canvas (5a.4): met for the drag (39%); typing 55%, where the rest is the key-event IPC (one invoke per key event through WebView2's browser process), which the layer does not change; the scrolling terminal was too light on this host to differ.
 - A probe run with `PROBE_THREAD=render` confirmed that configuring and committing from the render thread, as 1-1 does, shows the layer.
+
+## 22 November 2026: KDE Plasma (KWin 6.6.6, Wayland, scale 1.5)
+
+Same machine, version 0.2.0-beta.1, Renderer set to GPU layer. Log: "Native layer below the web view (fractional scaling)", "renders with Intel(R) UHD Graphics 630 (CFL GT2) (Vulkan, Rgba8Unorm)" (KWin offers RGBA where Hyprland offered BGRA); no layer errors or fallback. Over 23 s of use with a session: main thread 2.0% average, 13% peak; no `cairo_fill`/`pixman_fill` in a 15 s perf recording. With this, Automatic chooses the layer on any Wayland compositor (requirement 1.1 amended).
+

@@ -103,10 +103,6 @@ pub struct Facts {
     pub display: Display,
     /// The first required Wayland global the compositor does not advertise.
     pub missing_interface: Option<&'static str>,
-    /// A Linux compositor the native layer was verified on (Hyprland).
-    /// Automatic mode keeps the canvas elsewhere on Linux (maintainer
-    /// decision, 21 November 2026). Windows needs no such fact (amendment 5a).
-    pub supported_compositor: bool,
     pub gpu: Option<Result<(), GpuFailure>>,
 }
 
@@ -117,14 +113,9 @@ pub enum Reason {
     ForcedCanvas,
     /// Neither Linux, Windows nor macOS.
     UnsupportedPlatform,
-    /// Automatic mode on macOS: the canvas path is not measured there yet
-    /// (requirement 5.2), so the layer is by choice only (task 9.2).
-    UnmeasuredPlatform,
     X11Display,
     OtherDisplay,
     MissingWaylandInterface(&'static str),
-    /// Automatic mode on a compositor nobody has verified the layer on.
-    UntestedCompositor,
     NoAdapter,
     /// Windows: the DirectComposition device or target for the main window
     /// could not be created.
@@ -141,20 +132,12 @@ impl fmt::Display for Reason {
             Self::Available => write!(f, "native layer available"),
             Self::ForcedNative => write!(f, "native layer chosen in Settings or {RENDERER_ENV}"),
             Self::ForcedCanvas => write!(f, "canvas chosen in Settings or {RENDERER_ENV}"),
-            Self::UntestedCompositor => write!(
-                f,
-                "the native layer is tested on Hyprland only; choose it in Settings to try"
-            ),
             Self::UnsupportedPlatform => {
                 write!(
                     f,
                     "the native layer exists on Linux, Windows and macOS only"
                 )
             }
-            Self::UnmeasuredPlatform => write!(
-                f,
-                "the native layer is not measured on macOS yet; choose it in Settings to try"
-            ),
             Self::CompositionFailed(error) => write!(f, "DirectComposition failed: {error}"),
             Self::X11Display => write!(f, "X11 or XWayland display"),
             Self::OtherDisplay => write!(f, "not a Wayland display"),
@@ -182,20 +165,18 @@ fn precondition(facts: &Facts) -> Option<Reason> {
         // found when the layer is built (CompositionFailed, SurfaceFailed).
         Platform::Windows => None,
         // The layer is built and its surface checked later, as on Windows.
-        Platform::MacOs => {
-            (facts.requested == Override::Auto).then_some(Reason::UnmeasuredPlatform)
-        }
+        // Automatic since 22 November 2026 (maintainer: measured on the Mac).
+        Platform::MacOs => None,
         Platform::Linux => {
             match facts.display {
                 Display::Wayland => {}
                 Display::X11 => return Some(Reason::X11Display),
                 Display::Other => return Some(Reason::OtherDisplay),
             }
-            if let Some(name) = facts.missing_interface {
-                return Some(Reason::MissingWaylandInterface(name));
-            }
-            (facts.requested == Override::Auto && !facts.supported_compositor)
-                .then_some(Reason::UntestedCompositor)
+            // Any Wayland compositor that offers the interfaces: verified on
+            // Hyprland and KDE (KWin); a failure falls back to the canvas
+            // (maintainer decision, 22 November 2026).
+            facts.missing_interface.map(Reason::MissingWaylandInterface)
         }
     }
 }
@@ -226,7 +207,6 @@ mod tests {
             platform: Platform::Linux,
             display: Display::Wayland,
             missing_interface: None,
-            supported_compositor: true,
             gpu: Some(Ok(())),
         }
     }
@@ -238,7 +218,6 @@ mod tests {
             platform: Platform::Windows,
             display: Display::Other,
             missing_interface: None,
-            supported_compositor: false,
             gpu: Some(Ok(())),
         }
     }
@@ -264,26 +243,20 @@ mod tests {
         );
     }
 
-    /// Task 9.2: on macOS the layer is by choice until the canvas path is
-    /// measured there (requirement 5.2).
+    /// On macOS, as on Windows, Automatic chooses the layer (22 November
+    /// 2026; it was by choice only until the canvas was measured there).
     #[test]
-    fn macos_gets_the_native_layer_by_choice_only() {
+    fn macos_gets_the_native_layer_automatically() {
         let macos = Facts {
             platform: Platform::MacOs,
             ..windows()
         };
-        assert!(!worth_trying_gpu(&macos));
-        assert_eq!(choose(&macos), (Path::Canvas, Reason::UnmeasuredPlatform));
-        let chosen = Facts {
-            requested: Override::Native,
-            ..macos.clone()
-        };
-        assert!(worth_trying_gpu(&chosen));
-        assert_eq!(choose(&chosen), (Path::Native, Reason::ForcedNative));
+        assert!(worth_trying_gpu(&macos));
+        assert_eq!(choose(&macos), (Path::Native, Reason::Available));
         assert_eq!(
             choose(&Facts {
                 gpu: Some(Err(GpuFailure::NoAdapter)),
-                ..chosen
+                ..macos
             }),
             (Path::Canvas, Reason::NoAdapter)
         );
@@ -346,13 +319,6 @@ mod tests {
             ),
             (
                 Facts {
-                    supported_compositor: false,
-                    ..wayland()
-                },
-                Reason::UntestedCompositor,
-            ),
-            (
-                Facts {
                     gpu: Some(Err(GpuFailure::NoAdapter)),
                     ..wayland()
                 },
@@ -399,7 +365,6 @@ mod tests {
     fn forcing_native_still_falls_back_on_failure() {
         let forced = Facts {
             requested: Override::Native,
-            supported_compositor: false,
             ..wayland()
         };
         assert_eq!(choose(&forced), (Path::Native, Reason::ForcedNative));
@@ -417,16 +382,6 @@ mod tests {
             }),
             (Path::Canvas, Reason::NoAdapter)
         );
-    }
-
-    #[test]
-    fn choosing_native_also_works_on_an_untested_compositor() {
-        let forced = Facts {
-            requested: Override::Native,
-            supported_compositor: false,
-            ..wayland()
-        };
-        assert_eq!(choose(&forced), (Path::Native, Reason::ForcedNative));
     }
 
     #[test]
@@ -520,7 +475,6 @@ pub fn decide(setting: &str) -> (Path, Reason) {
         platform: Platform::current(),
         display: Display::Other,
         missing_interface: None,
-        supported_compositor: std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
         gpu: None,
     };
     #[cfg(target_os = "linux")]
