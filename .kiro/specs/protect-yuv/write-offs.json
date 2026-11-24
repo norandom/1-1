@@ -9,8 +9,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -19,8 +19,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -29,8 +29,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -39,8 +39,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -49,8 +49,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -59,8 +59,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -69,8 +69,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -79,8 +79,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -89,8 +89,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -99,8 +99,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     },
     {
       "file": "src-tauri/src/renderer/yuv.rs",
@@ -109,8 +109,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
     }
   ]
 }
