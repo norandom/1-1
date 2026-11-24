@@ -9,7 +9,7 @@ unchanged code (`lesscode-core step pin`; the receipts are in `pins/`). All test
     `YuvConverter` on the GPU gives the reference picture of the same frame, within one step of
     rounding, for both matrices; without a GPU adapter the test says so and passes.
   - Faults: `drop_statement@114:8` (#5)
-  - Pins: `pins/pin-5.json` (admitted 2026-11-24, 11 min 21 s; log `pins/pin-5.log`)
+  - Pins: `pins/pin-5.json` (admitted 2026-11-24, 11 min 21 s; the log is kept outside the repository, which ignores `*.log`)
   - _Boundary: src-tauri/src/renderer/yuv/protect.rs; test files only_
   - _Requirements: 3.1_
 
