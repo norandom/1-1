@@ -1,0 +1,22 @@
+{
+  "receipt": "step-pin-v1",
+  "step": "protect-yuv",
+  "base": "4fff14f870cb76087d4c77a3b5666d308fafcdfd",
+  "tests_of": "dc8bc1aab851a3c16ba49e67ee52ff5c9d9879cf",
+  "fault": "#5 line 114 drop_statement",
+  "result": "admitted",
+  "reason": "the tests with the pin pass on the unchanged code and fail on the fault",
+  "remaining_unnoticed": [
+    "#6 line 174 arg_literal:string->empty@174:24",
+    "#7 line 188 arg_literal:string->empty@188:24",
+    "#10 line 206 arg_literal:string->empty@206:24",
+    "#11 line 211 arg_literal:string->empty@211:24",
+    "#14 line 236 arg_literal:string->empty@236:24",
+    "#16 line 295 arg_literal:string->empty@296:12",
+    "#17 line 304 arg_literal:string->empty@305:20",
+    "#18 line 311 arg_literal:string->empty@312:20",
+    "#19 line 321 arg_literal:string->empty@322:20",
+    "#22 line 333 arg_literal:string->empty@333:24",
+    "#23 line 358 arg_literal:string->empty@358:28"
+  ]
+}
