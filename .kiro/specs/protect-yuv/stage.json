@@ -1,0 +1,150 @@
+{
+  "base": "4fff14f870cb76087d4c77a3b5666d308fafcdfd",
+  "chosen": [
+    {
+      "faults": [
+        {
+          "column": 24,
+          "id": "arg_literal:string->empty@296:12",
+          "line": 295,
+          "operator": "arg_literal:string->empty@296:12",
+          "seconds": 40.0,
+          "text": "(\r\n            \"yuv-y\",\r\n            wgpu::TextureFormat::R8Unorm,\r\n            size,\r\n            &frame.y,\r\n            frame.y_stride,\r\n        )"
+        },
+        {
+          "column": 21,
+          "id": "arg_literal:string->empty@305:20",
+          "line": 304,
+          "operator": "arg_literal:string->empty@305:20",
+          "seconds": 40.8,
+          "text": "(\r\n                    \"yuv-u\",\r\n                    wgpu::TextureFormat::R8Unorm,\r\n                    chroma_size,\r\n                    u,\r\n                    frame.chroma_stride,\r\n                )"
+        },
+        {
+          "column": 21,
+          "id": "arg_literal:string->empty@312:20",
+          "line": 311,
+          "operator": "arg_literal:string->empty@312:20",
+          "seconds": 38.2,
+          "text": "(\r\n                    \"yuv-v\",\r\n                    wgpu::TextureFormat::R8Unorm,\r\n                    chroma_size,\r\n                    v,\r\n                    frame.chroma_stride,\r\n                )"
+        },
+        {
+          "column": 32,
+          "id": "arg_literal:string->empty@322:20",
+          "line": 321,
+          "operator": "arg_literal:string->empty@322:20",
+          "seconds": 40.5,
+          "text": "(\r\n                    \"yuv-uv\",\r\n                    wgpu::TextureFormat::Rg8Unorm,\r\n                    chroma_size,\r\n                    uv,\r\n                    frame.chroma_stride,\r\n                )"
+        },
+        {
+          "column": 23,
+          "id": "arg_literal:string->empty@333:24",
+          "line": 333,
+          "operator": "arg_literal:string->empty@333:24",
+          "seconds": 36.5,
+          "text": "(\"yuv-convert\")"
+        },
+        {
+          "column": 27,
+          "id": "arg_literal:string->empty@358:28",
+          "line": 358,
+          "operator": "arg_literal:string->empty@358:28",
+          "seconds": 39.2,
+          "text": "(\"yuv-convert\")"
+        }
+      ],
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "convert",
+      "noticed": 8,
+      "other": 0,
+      "unnoticed": 6
+    },
+    {
+      "faults": [
+        {
+          "column": 23,
+          "id": "arg_literal:string->empty@174:24",
+          "line": 174,
+          "operator": "arg_literal:string->empty@174:24",
+          "seconds": 39.4,
+          "text": "(\"yuv-convert\")"
+        },
+        {
+          "column": 23,
+          "id": "arg_literal:string->empty@188:24",
+          "line": 188,
+          "operator": "arg_literal:string->empty@188:24",
+          "seconds": 39.5,
+          "text": "(\"yuv-convert\")"
+        },
+        {
+          "column": 23,
+          "id": "arg_literal:string->empty@206:24",
+          "line": 206,
+          "operator": "arg_literal:string->empty@206:24",
+          "seconds": 39.3,
+          "text": "(\"yuv-convert\")"
+        },
+        {
+          "column": 23,
+          "id": "arg_literal:string->empty@211:24",
+          "line": 211,
+          "operator": "arg_literal:string->empty@211:24",
+          "seconds": 39.6,
+          "text": "(\"yuv-convert\")"
+        },
+        {
+          "column": 23,
+          "id": "arg_literal:string->empty@236:24",
+          "line": 236,
+          "operator": "arg_literal:string->empty@236:24",
+          "seconds": 39.7,
+          "text": "(\"yuv-convert\")"
+        }
+      ],
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "new",
+      "noticed": 4,
+      "other": 0,
+      "unnoticed": 5
+    },
+    {
+      "faults": [
+        {
+          "column": 8,
+          "id": "drop_statement@114:8",
+          "line": 114,
+          "operator": "drop_statement",
+          "seconds": 39.8,
+          "text": "out[80..84].copy_from_slice(&u32::from(interleaved).to_le_bytes())"
+        }
+      ],
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "uniform_bytes",
+      "noticed": 4,
+      "other": 0,
+      "unnoticed": 1
+    }
+  ],
+  "left_alone": [],
+  "left_out": [],
+  "plan": {
+    "file": "D:/BuildArtifacts/lesscode/brownfield-test-stage/yuv/plan.json",
+    "sha256": "f300bbf9b39704b30f04bd90faef30fad30c668026e48206717fc230fdeba862"
+  },
+  "receipt": "step-stage-v1",
+  "spec": "protect-yuv",
+  "test": [
+    "cargo",
+    "nextest",
+    "run",
+    "--locked",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--lib",
+    "--no-fail-fast"
+  ],
+  "to_run_again": {
+    "faults": 28,
+    "seconds": 1096.2
+  }
+}

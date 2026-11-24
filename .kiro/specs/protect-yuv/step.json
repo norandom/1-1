@@ -1,0 +1,63 @@
+{
+  "base": "4fff14f870cb76087d4c77a3b5666d308fafcdfd",
+  "branch": "protect/protect-yuv",
+  "env": {
+    "CARGO_TARGET_DIR": "target"
+  },
+  "focus": {
+    "src-tauri/src/renderer/yuv.rs": [
+      "convert",
+      "new",
+      "uniform_bytes"
+    ]
+  },
+  "language": "rust",
+  "max_token_growth": 0,
+  "outputs": {
+    "evidence": ".kiro/specs/protect-yuv/evidence.json",
+    "ledger": ".kiro/steps/ledger.jsonl",
+    "verdict": ".kiro/specs/protect-yuv/verdict.json"
+  },
+  "run": {
+    "error_output_patterns": [
+      "memory allocation of",
+      "found invalid metadata files",
+      "paging file is too small"
+    ],
+    "exclusions": [
+      "target",
+      "node_modules",
+      ".git"
+    ],
+    "invalid_output_patterns": [
+      "could not compile",
+      "error[E"
+    ],
+    "runner_evidence_patterns": [
+      "Starting ",
+      "Summary ["
+    ],
+    "timeout_ceiling_s": 1800,
+    "timeout_floor_s": 300,
+    "workers": 2
+  },
+  "scope": [
+    "src-tauri/src/renderer/yuv.rs"
+  ],
+  "spec": "protect-yuv",
+  "step": "protect-yuv",
+  "test": [
+    "cargo",
+    "nextest",
+    "run",
+    "--locked",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--lib",
+    "--no-fail-fast"
+  ],
+  "test_paths": [
+    "src-tauri/tests/",
+    "src-tauri/src/renderer/yuv/"
+  ]
+}
