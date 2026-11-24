@@ -27,3 +27,27 @@ fn an_empty_rectangle_leaves_no_damage() {
     let damage = sf.take_damage().expect("a 1x1 rectangle is damage");
     assert_eq!((damage.x, damage.y, damage.width, damage.height), (1, 1, 1, 1));
 }
+
+/// Data shorter than the new size is ignored: the frame keeps its size,
+/// its pixels and its damage, and the call says it did nothing.
+#[test]
+fn data_too_short_for_a_new_size_leaves_the_frame_as_it_was() {
+    let sf = SharedFrame::new(2, 2);
+
+    let mut guard = sf.begin_write();
+    let applied = guard.update_full(4, 4, &[0xEE; 4 * 4 * 4 - 1]);
+    assert!(!applied, "too short is not applied");
+    assert_eq!((guard.width(), guard.height()), (2, 2), "the guard still sees 2x2");
+    drop(guard);
+    assert_eq!(sf.dimensions(), (2, 2), "the size is kept");
+    assert_eq!(sf.take_damage(), None, "nothing to upload");
+    let whole = sf.take_full();
+    assert_eq!((whole.frame_width, whole.frame_height), (2, 2));
+    assert!(whole.data.iter().all(|&b| b == 0), "the pixels are kept");
+
+    // The same through the frame itself: not marked dirty either.
+    let before = sf.version();
+    sf.update_full(4, 4, &[0xEE; 10]);
+    assert_eq!(sf.dimensions(), (2, 2));
+    assert_eq!(sf.version(), before);
+}
