@@ -51,3 +51,18 @@ fn data_too_short_for_a_new_size_leaves_the_frame_as_it_was() {
     assert_eq!(sf.dimensions(), (2, 2));
     assert_eq!(sf.version(), before);
 }
+
+/// A single rectangle written through the frame itself is announced: the
+/// version goes up and the picture is published once.
+#[test]
+fn a_single_rect_update_marks_the_frame_dirty() {
+    let sf = SharedFrame::new(2, 2);
+    let before = sf.version();
+
+    sf.update_rect(0, 0, 1, 1, &[0x11; 4], 4);
+
+    assert_eq!(sf.version(), before + 1, "one change, one version");
+    let snapshot = sf.publish().expect("published after update_rect");
+    assert!(snapshot.data[..4].iter().all(|&b| b == 0x11));
+    assert!(sf.publish().is_none(), "published once");
+}
