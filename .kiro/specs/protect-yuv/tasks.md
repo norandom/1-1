@@ -21,4 +21,9 @@ unchanged code (`lesscode-core step pin`; the receipts are in `pins/`). All test
 
 ## Result, 2026-11-24
 
-Not judged yet.
+`lesscode-core step check`: accepted (`verdict.json`, `9508f87`). Noticed before and now, of the
+faults planted: `convert` 8 of 14 and 8 of 14; `new` 4 of 9 and 4 of 9; `uniform_bytes` 4 of 5
+and 5 of 5. The eleven faults left each blank a wgpu debug label and are written off with the
+owner's approval (`write-offs.json`, `6602eb1`). `lesscode-core step protect result`: exit 0,
+"Protected enough: nothing waits in any chosen function" (`protection.json`). `yuv.rs` is
+unchanged since the base.
