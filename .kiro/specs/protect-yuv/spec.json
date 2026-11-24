@@ -7,7 +7,7 @@
   "approvals": {
     "requirements": {
       "generated": true,
-      "approved": false
+      "approved": true
     },
     "design": {
       "generated": false,
@@ -15,9 +15,9 @@
     },
     "tasks": {
       "generated": true,
-      "approved": false
+      "approved": true
     }
   },
   "ready_for_implementation": false,
-  "notes": "A stage spec of lesscode's brownfield test stage (task 5.1 of brownfield-test-stage, 2026-11-24): tests that protect yuv.rs before it is reduced. No design: the stage writes tests and changes no code. The owner chose convert, new and uniform_bytes, all functions of the file with unnoticed faults, and reviews once at the end. Reviewed by the owner on 2026-11-24: all eleven write-offs approved (6602eb1); step protect result exit 0. The requirements and tasks phases are not marked approved: the owner's review named the write-offs, not the spec phases."
+  "notes": "A stage spec of lesscode's brownfield test stage (task 5.1 of brownfield-test-stage, 2026-11-24): tests that protect yuv.rs before it is reduced. No design: the stage writes tests and changes no code. The owner chose convert, new and uniform_bytes, all functions of the file with unnoticed faults, and reviews once at the end. Reviewed by the owner on 2026-11-24: all eleven write-offs approved (6602eb1); step protect result exit 0. Asked afterwards, the owner counted the one review as approving the requirements and tasks phases as well."
 }
