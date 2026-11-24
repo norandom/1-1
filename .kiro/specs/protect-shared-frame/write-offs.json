@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "base": "a8f34429c8e4ead6ec144dcf47f104105a66beab",
+  "write_offs": [
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_rect",
+      "fault": "drop_statement@210:8",
+      "kind": "nothing_a_caller_sees",
+      "reason": "Without drop(guard) the guard is released at the end of SharedFrame::update_rect, right after mark_dirty, on the same thread; no pixel, damage, version or return value changes, and a woken render thread waits only that moment for the lock.",
+      "proposed_by": "agent",
+      "approved_by": null,
+      "approved_at": null
+    },
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_full",
+      "fault": "arg_literal:0->1@133:50",
+      "kind": "nothing_a_caller_sees",
+      "reason": "write_buf is resized to exactly `expected` bytes and the next line overwrites all of them from `data`, so the fill value of the resize is never read.",
+      "proposed_by": "agent",
+      "approved_by": null,
+      "approved_at": null
+    },
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_full",
+      "fault": "drop_statement@199:8",
+      "kind": "nothing_a_caller_sees",
+      "reason": "Without drop(guard) the guard is released at the end of SharedFrame::update_full, right after mark_dirty, on the same thread; nothing a caller reads changes, and a woken render thread waits only that moment for the lock.",
+      "proposed_by": "agent",
+      "approved_by": null,
+      "approved_at": null
+    }
+  ]
+}
