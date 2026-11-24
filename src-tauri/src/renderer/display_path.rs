@@ -576,3 +576,7 @@ mod linux {
             .find(|name| !advertised.iter().any(|global| global.interface == *name));
     }
 }
+
+// Tests written to protect this file before it is reduced live in a file of their own.
+#[cfg(test)]
+mod protect;
