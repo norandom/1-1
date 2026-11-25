@@ -7,7 +7,7 @@
   "approvals": {
     "requirements": {
       "generated": true,
-      "approved": false
+      "approved": true
     },
     "design": {
       "generated": false,
@@ -15,9 +15,9 @@
     },
     "tasks": {
       "generated": true,
-      "approved": false
+      "approved": true
     }
   },
   "ready_for_implementation": false,
-  "notes": "A stage spec of lesscode's brownfield test stage (task 6.4 of brownfield-test-stage, 2026-11-24): tests that protect shared_frame.rs before it is reduced. No design: the stage writes tests and changes no code. The whole scope of the plan was taken (no --function): update_rect and update_full. The owner reviews once at the end. Reviewed by the owner: the three write-offs approved on 2026-11-25 (0b5fe69), the write-off of the fault taken from the base run the same day (39e09d4); step protect result exit 0. The requirements and tasks phases are not marked approved: the owner approved write-offs, not the spec phases."
+  "notes": "A stage spec of lesscode's brownfield test stage (task 6.4 of brownfield-test-stage, 2026-11-24): tests that protect shared_frame.rs before it is reduced. No design: the stage writes tests and changes no code. The whole scope of the plan was taken (no --function): update_rect and update_full. The owner reviews once at the end. Reviewed by the owner: the three write-offs approved on 2026-11-25 (0b5fe69), the write-off of the fault taken from the base run the same day (39e09d4); step protect result exit 0. Asked afterwards, the owner counted the review as approving the requirements and tasks phases as well (2026-11-25)."
 }
