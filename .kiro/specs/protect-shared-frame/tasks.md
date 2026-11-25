@@ -39,6 +39,30 @@ changed.
     refuses a fault the stage does not have, so it cannot be proposed here.
   - _Requirements: 1.3, 2.2, 2.3_
 
-## Result, 2026-11-24
+## Result, 2026-11-25
 
-Not judged yet.
+`lesscode-core step check`: accepted (`verdict.json`, `1d381f1`, the second check, with the base
+run's unnoticed faults). `lesscode-core step protect result`: exit 0 (`protection.json`).
+
+| Function | Noticed before | Noticed now | Written off | Waiting |
+| --- | --- | --- | --- | --- |
+| `update_rect` | 8 of 13 | 11 of 13 | 2 | 0 |
+| `update_full` | 14 of 17 | 15 of 17 | 2 | 0 |
+
+Written off, with the owner's approval (`write-offs.json`), all `nothing_a_caller_sees`:
+
+- `drop_statement@210:8` and `drop_statement@199:8`: without `drop(guard)` the guard is released
+  at the end of the same function, right after `mark_dirty`;
+- `arg_literal:0->1@133:50`: every byte the resize adds is overwritten on the next line;
+- `swap:>=->>@100:18`: taken into the stage from the base run (the plan counted it noticed). The
+  bounds check below it skips the row.
+
+The first three were approved by Marius Ciepluch on 2026-11-25 (`0b5fe69`), and the fourth the
+same day (`39e09d4`).
+
+All 2 functions are protected enough. `src-tauri/src/renderer/shared_frame.rs` is unchanged since
+the base.
+
+Known gap: nothing checks that `SharedFrame::update_rect` and `update_full` release the write lock
+before they wake the render thread. A reduction of them has to keep `drop(guard)` before
+`mark_dirty` by review.

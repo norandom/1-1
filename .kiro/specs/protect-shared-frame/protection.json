@@ -1,0 +1,83 @@
+{
+  "receipt": "step-protection-v1",
+  "spec": "protect-shared-frame",
+  "base": "a8f34429c8e4ead6ec144dcf47f104105a66beab",
+  "revision": "1d381f1c55ce062a277b3cb3f86ab8555dd29498",
+  "verdict_sha256": "c0cad3c03bc3ebc7b09a81445f2be21b329876b8009a7b245ac742b4e6e309c2",
+  "result": "protected_enough",
+  "unnoticed_rose": false,
+  "functions": [
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_rect",
+      "noticed_before": 8,
+      "noticed_now": 11,
+      "written_off": 2,
+      "waiting": 0,
+      "write_offs": [
+        {
+          "file": "src-tauri/src/renderer/shared_frame.rs",
+          "function": "update_rect",
+          "fault": "swap:>=->>@100:18",
+          "kind": "nothing_a_caller_sees",
+          "reason": "The plan counted this fault noticed; the base run of the check did not, and planted by hand all 536 tests pass. With `dy > fh` the loop goes on at dy == fh, but the bounds check below it then skips the row (its destination lies past the buffer unless the rectangle has no width), so no pixel changes.",
+          "proposed_by": "agent",
+          "approved_by": "Marius Ciepluch",
+          "approved_at": "2026-11-25"
+        },
+        {
+          "file": "src-tauri/src/renderer/shared_frame.rs",
+          "function": "update_rect",
+          "fault": "drop_statement@210:8",
+          "kind": "nothing_a_caller_sees",
+          "reason": "Without drop(guard) the guard is released at the end of SharedFrame::update_rect, right after mark_dirty, on the same thread; no pixel, damage, version or return value changes, and a woken render thread waits only that moment for the lock.",
+          "proposed_by": "agent",
+          "approved_by": "Marius Ciepluch",
+          "approved_at": "2026-11-25"
+        }
+      ],
+      "waiting_faults": [],
+      "noticed_write_offs": []
+    },
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_full",
+      "noticed_before": 14,
+      "noticed_now": 15,
+      "written_off": 2,
+      "waiting": 0,
+      "write_offs": [
+        {
+          "file": "src-tauri/src/renderer/shared_frame.rs",
+          "function": "update_full",
+          "fault": "arg_literal:0->1@133:50",
+          "kind": "nothing_a_caller_sees",
+          "reason": "write_buf is resized to exactly `expected` bytes and the next line overwrites all of them from `data`, so the fill value of the resize is never read.",
+          "proposed_by": "agent",
+          "approved_by": "Marius Ciepluch",
+          "approved_at": "2026-11-25"
+        },
+        {
+          "file": "src-tauri/src/renderer/shared_frame.rs",
+          "function": "update_full",
+          "fault": "drop_statement@199:8",
+          "kind": "nothing_a_caller_sees",
+          "reason": "Without drop(guard) the guard is released at the end of SharedFrame::update_full, right after mark_dirty, on the same thread; nothing a caller reads changes, and a woken render thread waits only that moment for the lock.",
+          "proposed_by": "agent",
+          "approved_by": "Marius Ciepluch",
+          "approved_at": "2026-11-25"
+        }
+      ],
+      "waiting_faults": [],
+      "noticed_write_offs": []
+    }
+  ],
+  "reported": [],
+  "from_the_base_run": [
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_rect",
+      "fault": "swap:>=->>@100:18"
+    }
+  ]
+}
