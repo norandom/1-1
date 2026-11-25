@@ -3,7 +3,7 @@
   "step": "protect-shared-frame",
   "spec": "protect-shared-frame",
   "base": "a8f34429c8e4ead6ec144dcf47f104105a66beab",
-  "revision": "e7adbaf01da0b9bc54d3f3881d876ee7f322f0c4",
+  "revision": "66ed02961205537729c1318d952d828891327200",
   "hashes": {
     "scope": {
       "src-tauri/src/renderer/shared_frame.rs": "931abe024ab7c05e78a502710260e2c4776db596"
@@ -15,7 +15,7 @@
     {
       "name": "declaration and revisions",
       "result": "pass",
-      "detail": "base a8f3442, step e7adbaf"
+      "detail": "base a8f3442, step 66ed029"
     },
     {
       "name": "changes stay in scope",
@@ -68,6 +68,11 @@
         "unnoticed": 2,
         "other": 0
       },
+      "unnoticed_before": [
+        "#11 line 127 swap_next",
+        "#21 line 133 arg_literal:0->1@133:50",
+        "#25 line 199 drop_statement"
+      ],
       "unnoticed_after": [
         "#21 line 133 arg_literal:0->1@133:50",
         "#25 line 199 drop_statement"
@@ -86,6 +91,13 @@
         "unnoticed": 2,
         "other": 0
       },
+      "unnoticed_before": [
+        "#2 line 93 swap:<-><=@93:21",
+        "#3 line 93 swap:&&->||@93:33",
+        "#6 line 100 swap:>=->>@100:18",
+        "#29 line 210 drop_statement",
+        "#30 line 211 drop_statement"
+      ],
       "unnoticed_after": [
         "#6 line 100 swap:>=->>@100:18",
         "#29 line 210 drop_statement"
