@@ -39,8 +39,8 @@
       "kind": "nothing_a_caller_sees",
       "reason": "The plan counted this fault noticed; the base run of the check did not, and planted by hand all 536 tests pass. With `dy > fh` the loop goes on at dy == fh, but the bounds check below it then skips the row (its destination lies past the buffer unless the rectangle has no width), so no pixel changes.",
       "proposed_by": "agent",
-      "approved_by": null,
-      "approved_at": null
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-25"
     }
   ]
 }
