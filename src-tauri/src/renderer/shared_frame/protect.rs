@@ -25,7 +25,10 @@ fn an_empty_rectangle_leaves_no_damage() {
     guard.update_rect(1, 1, 1, 1, &[0xAA; 4], 4);
     drop(guard);
     let damage = sf.take_damage().expect("a 1x1 rectangle is damage");
-    assert_eq!((damage.x, damage.y, damage.width, damage.height), (1, 1, 1, 1));
+    assert_eq!(
+        (damage.x, damage.y, damage.width, damage.height),
+        (1, 1, 1, 1)
+    );
 }
 
 /// Data shorter than the new size is ignored: the frame keeps its size,
@@ -37,7 +40,11 @@ fn data_too_short_for_a_new_size_leaves_the_frame_as_it_was() {
     let mut guard = sf.begin_write();
     let applied = guard.update_full(4, 4, &[0xEE; 4 * 4 * 4 - 1]);
     assert!(!applied, "too short is not applied");
-    assert_eq!((guard.width(), guard.height()), (2, 2), "the guard still sees 2x2");
+    assert_eq!(
+        (guard.width(), guard.height()),
+        (2, 2),
+        "the guard still sees 2x2"
+    );
     drop(guard);
     assert_eq!(sf.dimensions(), (2, 2), "the size is kept");
     assert_eq!(sf.take_damage(), None, "nothing to upload");
