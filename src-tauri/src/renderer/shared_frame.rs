@@ -518,3 +518,7 @@ mod tests {
         assert!(sf.publish().is_none(), "no visible effect");
     }
 }
+
+// Tests written to protect this file before it is reduced live in a file of their own.
+#[cfg(test)]
+mod protect;
