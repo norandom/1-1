@@ -2,7 +2,7 @@
   "step": "display-path-in-force", "spec": "display-path-in-force", "branch": "lesscode/renderer-rework",
   "base": "949127d9dfa1663e5cff8acbf92052e17a24cd7a",
   "language": "rust",
-  "scope": ["src-tauri/src/renderer/display_path.rs", "src-tauri/src/renderer/frame_stores.rs", "src-tauri/src/renderer/gpu.rs", "src-tauri/src/renderer/mod.rs", "src-tauri/src/commands/session.rs", "src-tauri/src/lib.rs"],
+  "scope": ["src-tauri/src/renderer/display_path.rs", "src-tauri/src/renderer/frame_stores.rs", "src-tauri/src/renderer/gpu.rs", "src-tauri/src/renderer/mod.rs", "src-tauri/src/renderer/shared_frame.rs", "src-tauri/src/commands/session.rs", "src-tauri/src/lib.rs"],
   "test_paths": ["src-tauri/tests/", "src-tauri/src/renderer/display_path/", "src-tauri/src/renderer/shared_frame/"],
   "test": ["cargo", "nextest", "run", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "--lib", "--no-fail-fast"],
   "env": {"CARGO_TARGET_DIR": "target"},
