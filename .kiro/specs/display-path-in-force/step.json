@@ -1,0 +1,20 @@
+{
+  "step": "display-path-in-force", "spec": "display-path-in-force", "branch": "lesscode/renderer-rework",
+  "base": "949127d9dfa1663e5cff8acbf92052e17a24cd7a",
+  "language": "rust",
+  "scope": ["src-tauri/src/renderer/display_path.rs", "src-tauri/src/renderer/frame_stores.rs", "src-tauri/src/renderer/gpu.rs", "src-tauri/src/renderer/mod.rs", "src-tauri/src/commands/session.rs", "src-tauri/src/lib.rs"],
+  "test_paths": ["src-tauri/tests/", "src-tauri/src/renderer/display_path/", "src-tauri/src/renderer/shared_frame/"],
+  "test": ["cargo", "nextest", "run", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "--lib", "--no-fail-fast"],
+  "env": {"CARGO_TARGET_DIR": "target"},
+  "run": {"timeout_floor_s": 300, "timeout_ceiling_s": 1800, "exclusions": ["target", "node_modules"],
+          "invalid_output_patterns": ["could not compile", "error[E"],
+          "error_output_patterns": ["memory allocation of", "found invalid metadata files", "paging file is too small"],
+          "runner_evidence_patterns": ["Starting ", "Summary ["], "workers": 2},
+  "focus": {"src-tauri/src/renderer/display_path.rs": ["new", "info", "path", "fall_back", "runtime_fallback", "get_display_path"],
+            "src-tauri/src/renderer/frame_stores.rs": ["register", "get", "wake"],
+            "src-tauri/src/commands/session.rs": ["connect"]},
+  "max_token_growth": 0,
+  "outputs": {"verdict": ".kiro/specs/display-path-in-force/verdict.json",
+              "evidence": ".kiro/specs/display-path-in-force/evidence.json",
+              "ledger": ".kiro/steps/ledger.jsonl"}
+}
