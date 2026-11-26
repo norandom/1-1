@@ -67,3 +67,7 @@ mod tests {
         assert_eq!(stores.stores.lock().unwrap().len(), 1);
     }
 }
+
+// Tests written to protect this file before it is reduced live in a file of their own.
+#[cfg(test)]
+mod protect;
