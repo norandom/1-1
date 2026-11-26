@@ -149,7 +149,8 @@ pub fn run() {
             // native path makes the window transparent; only a failure
             // changes it later.
             let (path, reason) = renderer::display_path::decide(&renderer_setting);
-            let display_path = renderer::display_path::DisplayPathState::new(path, reason);
+            let display_path =
+                Arc::new(renderer::display_path::DisplayPathState::new(path, reason));
             let main_window = {
                 let config = app
                     .config()
@@ -165,11 +166,10 @@ pub fn run() {
                 let builder = builder.transparent(path == renderer::display_path::Path::Native);
                 builder.build()?
             };
-            let frame_stores = Arc::new(renderer::frame_stores::FrameStores::default());
-            let render_shared = renderer::gpu::RenderShared::new(Arc::clone(&frame_stores));
+            let render_shared = renderer::gpu::RenderShared::new(Arc::clone(&display_path));
             #[cfg(any(target_os = "linux", windows))]
             if path == renderer::display_path::Path::Native {
-                let started = renderer::native_layer::attach(&main_window, frame_stores.wake())
+                let started = renderer::native_layer::attach(&main_window, display_path.wake())
                     .and_then(|target| {
                         let handle = app.handle().clone();
                         renderer::gpu::spawn(
@@ -200,7 +200,6 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             keyboard::detect::watch_wayland();
             keyboard::detect::remember_ui_thread();
-            app.manage(frame_stores);
             app.manage(render_shared);
 
             Ok(())

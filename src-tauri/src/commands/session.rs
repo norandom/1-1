@@ -142,8 +142,7 @@ pub async fn connect(
     cred_store: State<'_, CredentialStore>,
     session_mgr: State<'_, SessionManager>,
     settings_store: State<'_, SettingsStore>,
-    display_path: State<'_, crate::renderer::display_path::DisplayPathState>,
-    frame_stores: State<'_, Arc<crate::renderer::frame_stores::FrameStores>>,
+    display_path: State<'_, Arc<crate::renderer::display_path::DisplayPathState>>,
     share_grants: State<'_, Arc<crate::store::share_grants::ShareGrantStore>>,
 ) -> Result<String, String> {
     // Task 7.1 (Req 2.2/11.8/11.9): the session cap and per-connection
@@ -218,17 +217,15 @@ pub async fn connect(
             share_source(Arc::clone(&share_grants)),
         )
         .await?;
-    if let Some(store) = &registered_frame {
-        frame_stores.register(&session_id, store);
-        // The layer may have failed while this session was being created,
-        // after the fallback told the sessions it knew about.
-        if display_path.path() != crate::renderer::display_path::Path::Native
-            && let Some(sender) = session_mgr.get_cmd_sender(&session_id).await
-        {
-            let _ = sender
-                .send(crate::rdp::client::SessionCommand::UseCanvas)
-                .await;
-        }
+    // The layer may have failed while this session was being created, after
+    // the fallback told the sessions it knew about; then the store is refused.
+    if let Some(store) = &registered_frame
+        && !display_path.register(&session_id, store)
+        && let Some(sender) = session_mgr.get_cmd_sender(&session_id).await
+    {
+        let _ = sender
+            .send(crate::rdp::client::SessionCommand::UseCanvas)
+            .await;
     }
 
     // Update last_connected_at on the connection

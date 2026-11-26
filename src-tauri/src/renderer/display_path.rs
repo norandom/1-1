@@ -5,9 +5,14 @@
 //! fallback reason is tested without a GPU or a window. The canvas is always
 //! possible; the native layer only where every fact allows it.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, Mutex, Weak};
 
 use serde::Serialize;
+
+use super::native_layer::Wake;
+use super::shared_frame::SharedFrame;
 
 /// The environment variable that overrides the automatic choice.
 pub const RENDERER_ENV: &str = "ONE_ONE_RENDERER";
@@ -409,6 +414,40 @@ mod tests {
             serde_json::json!("native")
         );
     }
+
+    fn on_the_layer() -> DisplayPathState {
+        DisplayPathState::new(Path::Native, Reason::Available)
+    }
+
+    #[test]
+    fn a_store_lives_as_long_as_its_session() {
+        let stores = on_the_layer();
+        let store = SharedFrame::new(2, 2);
+        stores.register("a", &store);
+        assert!(Arc::ptr_eq(&stores.get("a").unwrap(), &store));
+        assert!(stores.get("b").is_none());
+        let seen = stores.wake().wait(u64::MAX, std::time::Duration::ZERO);
+        store.mark_dirty();
+        assert_eq!(
+            stores.wake().wait(seen, std::time::Duration::from_secs(5)),
+            seen + 1,
+            "a change in a registered store wakes the render thread"
+        );
+        drop(store);
+        assert!(stores.get("a").is_none(), "the session ended");
+    }
+
+    #[test]
+    fn closed_sessions_are_pruned_when_another_registers() {
+        let stores = on_the_layer();
+        stores.register("a", &SharedFrame::new(1, 1));
+        let b = SharedFrame::new(1, 1);
+        stores.register("b", &b);
+        let InForce::Layer(_, held) = &*stores.in_force.lock().unwrap() else {
+            panic!("the layer is in force");
+        };
+        assert_eq!(held.len(), 1);
+    }
 }
 
 /// The path in force, shared with the frontend.
@@ -419,33 +458,83 @@ pub struct DisplayPathInfo {
     pub reason: String,
 }
 
-/// App state: the path chosen at startup, changed only by a runtime fallback.
-pub struct DisplayPathState(std::sync::Mutex<(Path, Reason)>);
+/// App state: the path chosen at startup, changed only by a fallback, and
+/// the frame store of every session the layer draws (spec
+/// rdp-native-renderer, task 2.1). Stores are taken under the same lock as a
+/// fallback, so none is taken once the canvas is in force.
+pub struct DisplayPathState {
+    in_force: Mutex<InForce>,
+    /// The render thread's signal; every registered store rings it.
+    wake: Arc<Wake>,
+}
+
+enum InForce {
+    /// The layer, with the stores of its sessions by id. The references are
+    /// weak, so a store goes with its session and the render thread never
+    /// keeps a closed session alive.
+    Layer(Reason, HashMap<String, Weak<SharedFrame>>),
+    Canvas(Reason),
+}
 
 /// Emitted when the path changes while the app runs.
 pub const DISPLAY_PATH_EVENT: &str = "display-path";
 
 impl DisplayPathState {
     pub fn new(path: Path, reason: Reason) -> Self {
-        Self(std::sync::Mutex::new((path, reason)))
-    }
-
-    pub fn info(&self) -> DisplayPathInfo {
-        let guard = self.0.lock().unwrap();
-        DisplayPathInfo {
-            path: guard.0,
-            reason: guard.1.to_string(),
+        let in_force = match path {
+            Path::Native => InForce::Layer(reason, HashMap::new()),
+            Path::Canvas => InForce::Canvas(reason),
+        };
+        Self {
+            in_force: Mutex::new(in_force),
+            wake: Arc::default(),
         }
     }
 
+    pub fn info(&self) -> DisplayPathInfo {
+        let (path, reason) = match &*self.in_force.lock().unwrap() {
+            InForce::Layer(reason, _) => (Path::Native, reason.to_string()),
+            InForce::Canvas(reason) => (Path::Canvas, reason.to_string()),
+        };
+        DisplayPathInfo { path, reason }
+    }
+
     pub fn path(&self) -> Path {
-        self.0.lock().unwrap().0
+        match *self.in_force.lock().unwrap() {
+            InForce::Layer(..) => Path::Native,
+            InForce::Canvas(_) => Path::Canvas,
+        }
     }
 
     /// Records a fallback after startup (the layer could not be built, or
-    /// failed while running).
+    /// failed while running); the layer's stores are dropped with it.
     pub fn fall_back(&self, reason: Reason) {
-        *self.0.lock().unwrap() = (Path::Canvas, reason);
+        *self.in_force.lock().unwrap() = InForce::Canvas(reason);
+    }
+
+    /// Takes a session's store for the layer once the session has its id;
+    /// false when the canvas is in force, and the session is to use it.
+    pub fn register(&self, id: &str, store: &Arc<SharedFrame>) -> bool {
+        let InForce::Layer(_, stores) = &mut *self.in_force.lock().unwrap() else {
+            return false;
+        };
+        store.set_wake(Arc::clone(&self.wake));
+        stores.retain(|_, weak| weak.strong_count() > 0);
+        stores.insert(id.to_owned(), Arc::downgrade(store));
+        true
+    }
+
+    /// The live store of a session, if it is still open and on the layer.
+    pub fn get(&self, id: &str) -> Option<Arc<SharedFrame>> {
+        match &*self.in_force.lock().unwrap() {
+            InForce::Layer(_, stores) => stores.get(id)?.upgrade(),
+            InForce::Canvas(_) => None,
+        }
+    }
+
+    /// The signal the render thread waits on.
+    pub fn wake(&self) -> Arc<Wake> {
+        Arc::clone(&self.wake)
     }
 }
 
@@ -454,7 +543,7 @@ impl DisplayPathState {
 pub fn runtime_fallback(app: &tauri::AppHandle, error: String) {
     use tauri::{Emitter, Manager};
     log::warn!("Native layer failed, switching to the web canvas: {error}");
-    let state = app.state::<DisplayPathState>();
+    let state = app.state::<Arc<DisplayPathState>>();
     state.fall_back(Reason::RuntimeFailure(error));
     let _ = app.emit(DISPLAY_PATH_EVENT, state.info());
     let app = app.clone();
@@ -466,7 +555,7 @@ pub fn runtime_fallback(app: &tauri::AppHandle, error: String) {
 }
 
 #[tauri::command]
-pub fn get_display_path(state: tauri::State<'_, DisplayPathState>) -> DisplayPathInfo {
+pub fn get_display_path(state: tauri::State<'_, Arc<DisplayPathState>>) -> DisplayPathInfo {
     state.info()
 }
 

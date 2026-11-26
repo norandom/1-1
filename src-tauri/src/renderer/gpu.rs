@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::frame_stores::FrameStores;
+use super::display_path::DisplayPathState;
 use super::native_layer::{Geometry, LayerTarget, SurfaceSource, Wake};
 use super::shared_frame::Damage;
 use super::yuv::{FrameSource, YuvConverter};
@@ -47,16 +47,16 @@ pub struct View {
 /// The view, shared between the page's commands and the render thread.
 pub struct RenderShared {
     view: Mutex<View>,
-    stores: Arc<FrameStores>,
+    in_force: Arc<DisplayPathState>,
     /// Frames presented per session, for the Performance HUD's FPS.
     presented: Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl RenderShared {
-    pub fn new(stores: Arc<FrameStores>) -> Arc<Self> {
+    pub fn new(in_force: Arc<DisplayPathState>) -> Arc<Self> {
         Arc::new(Self {
             view: Mutex::new(View::default()),
-            stores,
+            in_force,
             presented: Mutex::default(),
         })
     }
@@ -67,7 +67,7 @@ impl RenderShared {
         if *current != view {
             *current = view;
             drop(current);
-            self.stores.wake().notify();
+            self.in_force.wake().notify();
         }
     }
 
@@ -398,7 +398,10 @@ impl Renderer {
             }
 
             // Bring the texture up to date with the visible session.
-            let store = view.session.as_deref().and_then(|id| shared.stores.get(id));
+            let store = view
+                .session
+                .as_deref()
+                .and_then(|id| shared.in_force.get(id));
             if view.session != self.shown {
                 self.shown = view.session.clone();
                 if let Some(store) = &store {
@@ -635,6 +638,7 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::display_path::{Path, Reason};
     use super::*;
 
     fn view(dest: Rect, source: Rect) -> View {
@@ -718,7 +722,7 @@ mod tests {
 
     #[test]
     fn setting_the_same_view_does_not_wake_the_render_thread() {
-        let stores = Arc::new(FrameStores::default());
+        let stores = Arc::new(DisplayPathState::new(Path::Native, Reason::Available));
         let shared = RenderShared::new(Arc::clone(&stores));
         let start = stores.wake().wait(u64::MAX, Duration::ZERO);
         let v = view(rect(0.0, 0.0, 1.0, 1.0), rect(0.0, 0.0, 1.0, 1.0));

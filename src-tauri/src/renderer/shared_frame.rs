@@ -186,7 +186,7 @@ impl SharedFrame {
         }
     }
 
-    /// Rings `wake` on every later change (set once, by `FrameStores`).
+    /// Rings `wake` on every later change (set once, by `DisplayPathState::register`).
     pub fn set_wake(&self, wake: Arc<super::native_layer::Wake>) {
         let _ = self.wake.set(wake);
     }
