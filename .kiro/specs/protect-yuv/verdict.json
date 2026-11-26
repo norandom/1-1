@@ -1,0 +1,131 @@
+{
+  "receipt": "step-verdict-v1",
+  "step": "protect-yuv",
+  "spec": "protect-yuv",
+  "base": "4fff14f870cb76087d4c77a3b5666d308fafcdfd",
+  "revision": "4d21edcb1b8716d076182c044a60c882cfa34b04",
+  "hashes": {
+    "scope": {
+      "src-tauri/src/renderer/yuv.rs": "2c345a43b03bb5f2abc8f990d95ac2cdf05c5e72"
+    },
+    "tests": "e952280f67b3ed5aefb4ac1ee8b3448a19b0617888d99fc245060c6f7fc08e19",
+    "declaration": "0614cd25c7e25ff5288f221f710160bfee9fa7ed"
+  },
+  "checks": [
+    {
+      "name": "declaration and revisions",
+      "result": "pass",
+      "detail": "base 4fff14f, step 4d21edc"
+    },
+    {
+      "name": "changes stay in scope",
+      "result": "pass",
+      "detail": "only scope, tests and the step's own files change"
+    },
+    {
+      "name": "pins apart from the change",
+      "result": "pass",
+      "detail": "no commit changes tests and code under test together"
+    },
+    {
+      "name": "size",
+      "result": "pass",
+      "detail": "within the declared growth"
+    },
+    {
+      "name": "state frame",
+      "result": "pass",
+      "detail": "no state write outside the declared frame, or none declared"
+    },
+    {
+      "name": "tests and fault runs",
+      "result": "pass",
+      "detail": "the project's tests pass on the base and on the step"
+    },
+    {
+      "name": "planted faults",
+      "result": "pass",
+      "detail": "in no function are more faults unnoticed after the step than before"
+    }
+  ],
+  "functions_run": {
+    "src-tauri/src/renderer/yuv.rs": [
+      "convert",
+      "new",
+      "uniform_bytes"
+    ]
+  },
+  "functions": [
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "convert",
+      "before": {
+        "noticed": 8,
+        "unnoticed": 6,
+        "other": 0
+      },
+      "after": {
+        "noticed": 8,
+        "unnoticed": 6,
+        "other": 0
+      },
+      "unnoticed_after": [
+        "#16 line 295 arg_literal:string->empty@296:12",
+        "#17 line 304 arg_literal:string->empty@305:20",
+        "#18 line 311 arg_literal:string->empty@312:20",
+        "#19 line 321 arg_literal:string->empty@322:20",
+        "#22 line 333 arg_literal:string->empty@333:24",
+        "#23 line 358 arg_literal:string->empty@358:28"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "new",
+      "before": {
+        "noticed": 4,
+        "unnoticed": 5,
+        "other": 0
+      },
+      "after": {
+        "noticed": 4,
+        "unnoticed": 5,
+        "other": 0
+      },
+      "unnoticed_after": [
+        "#6 line 174 arg_literal:string->empty@174:24",
+        "#7 line 188 arg_literal:string->empty@188:24",
+        "#10 line 206 arg_literal:string->empty@206:24",
+        "#11 line 211 arg_literal:string->empty@211:24",
+        "#14 line 236 arg_literal:string->empty@236:24"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "uniform_bytes",
+      "before": {
+        "noticed": 4,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "after": {
+        "noticed": 5,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_after": []
+    }
+  ],
+  "unmatched_functions": [],
+  "size": {
+    "tokens": [
+      3305,
+      3305
+    ],
+    "nodes": [
+      2666,
+      2666
+    ]
+  },
+  "result": "accepted",
+  "reasons": []
+}

@@ -529,3 +529,7 @@ mod tests {
         }
     }
 }
+
+// Tests written to protect this file before it is reduced live in a file of their own.
+#[cfg(test)]
+mod protect;

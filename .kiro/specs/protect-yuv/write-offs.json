@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "base": "4fff14f870cb76087d4c77a3b5666d308fafcdfd",
+  "write_offs": [
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "convert",
+      "fault": "arg_literal:string->empty@296:12",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "convert",
+      "fault": "arg_literal:string->empty@305:20",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "convert",
+      "fault": "arg_literal:string->empty@312:20",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "convert",
+      "fault": "arg_literal:string->empty@322:20",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "convert",
+      "fault": "arg_literal:string->empty@333:24",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "convert",
+      "fault": "arg_literal:string->empty@358:28",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "new",
+      "fault": "arg_literal:string->empty@174:24",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "new",
+      "fault": "arg_literal:string->empty@188:24",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "new",
+      "fault": "arg_literal:string->empty@206:24",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "new",
+      "fault": "arg_literal:string->empty@211:24",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    },
+    {
+      "file": "src-tauri/src/renderer/yuv.rs",
+      "function": "new",
+      "fault": "arg_literal:string->empty@236:24",
+      "kind": "nothing_a_caller_sees",
+      "reason": "A wgpu debug label, shown only by graphics debuggers and in wgpu's validation messages; no pixel and no return value depends on it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24"
+    }
+  ]
+}
