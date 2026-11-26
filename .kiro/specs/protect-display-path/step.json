@@ -1,0 +1,64 @@
+{
+  "step": "protect-display-path",
+  "spec": "protect-display-path",
+  "branch": "protect/display-path",
+  "base": "72507e194e1342a3e10af14bb7138999335598b9",
+  "language": "rust",
+  "scope": [
+    "src-tauri/src/renderer/display_path.rs"
+  ],
+  "test_paths": [
+    "src-tauri/tests/",
+    "src-tauri/src/renderer/display_path/"
+  ],
+  "test": [
+    "cargo",
+    "nextest",
+    "run",
+    "--locked",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--lib",
+    "--no-fail-fast"
+  ],
+  "env": {
+    "CARGO_TARGET_DIR": "target"
+  },
+  "run": {
+    "timeout_floor_s": 300,
+    "timeout_ceiling_s": 1800,
+    "exclusions": [
+      "target",
+      "node_modules",
+      ".git"
+    ],
+    "invalid_output_patterns": [
+      "could not compile",
+      "error[E"
+    ],
+    "error_output_patterns": [
+      "memory allocation of",
+      "found invalid metadata files",
+      "paging file is too small"
+    ],
+    "runner_evidence_patterns": [
+      "Starting ",
+      "Summary ["
+    ]
+  },
+  "focus": {
+    "src-tauri/src/renderer/display_path.rs": [
+      "decide",
+      "current",
+      "runtime_fallback",
+      "fall_back",
+      "layer_backends"
+    ]
+  },
+  "max_token_growth": 0,
+  "outputs": {
+    "verdict": ".kiro/specs/protect-display-path/verdict.json",
+    "evidence": ".kiro/specs/protect-display-path/evidence.json",
+    "ledger": ".kiro/steps/ledger.jsonl"
+  }
+}
