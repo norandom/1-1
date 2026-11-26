@@ -55,3 +55,17 @@ fn decide_tries_the_gpu_when_nothing_rules_the_layer_out() {
         "decide answered without trying the GPU: {answer:?}"
     );
 }
+
+/// After a fallback the layer takes no store, and holds none it took before:
+/// a session created while the layer failed is sent to the canvas.
+#[test]
+fn after_a_fallback_the_layer_takes_no_store() {
+    let state = DisplayPathState::new(Path::Native, Reason::Available);
+    let before = crate::renderer::shared_frame::SharedFrame::new(1, 1);
+    assert!(state.register("a", &before));
+    state.fall_back(Reason::RuntimeFailure("lost device".into()));
+    assert!(state.get("a").is_none());
+    let after = crate::renderer::shared_frame::SharedFrame::new(1, 1);
+    assert!(!state.register("b", &after));
+    assert!(state.get("b").is_none());
+}
