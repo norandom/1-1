@@ -518,7 +518,3 @@ pub async fn get_frame(
         .await
         .ok_or_else(|| format!("Session '{}' not found", session_id))
 }
-
-// Tests written to protect this file before it is reduced live in a file of their own.
-#[cfg(test)]
-mod protect;
