@@ -415,13 +415,9 @@ mod tests {
         );
     }
 
-    fn on_the_layer() -> DisplayPathState {
-        DisplayPathState::new(Path::Native, Reason::Available)
-    }
-
     #[test]
     fn a_store_lives_as_long_as_its_session() {
-        let stores = on_the_layer();
+        let stores = DisplayPathState::new(Path::Native, Reason::Available);
         let store = SharedFrame::new(2, 2);
         stores.register("a", &store);
         assert!(Arc::ptr_eq(&stores.get("a").unwrap(), &store));
@@ -439,14 +435,12 @@ mod tests {
 
     #[test]
     fn closed_sessions_are_pruned_when_another_registers() {
-        let stores = on_the_layer();
+        let stores = DisplayPathState::new(Path::Native, Reason::Available);
         stores.register("a", &SharedFrame::new(1, 1));
         let b = SharedFrame::new(1, 1);
         stores.register("b", &b);
-        let InForce::Layer(_, held) = &*stores.in_force.lock().unwrap() else {
-            panic!("the layer is in force");
-        };
-        assert_eq!(held.len(), 1);
+        let held = stores.in_force.lock().unwrap().1.as_ref().map(HashMap::len);
+        assert_eq!(held, Some(1));
     }
 }
 
@@ -458,64 +452,56 @@ pub struct DisplayPathInfo {
     pub reason: String,
 }
 
-/// App state: the path chosen at startup, changed only by a fallback, and
-/// the frame store of every session the layer draws (spec
-/// rdp-native-renderer, task 2.1). Stores are taken under the same lock as a
+/// App state: the path chosen at startup, changed only by a fallback, and why;
+/// on the layer, the frame store of every session it draws by id, none on the
+/// canvas (spec rdp-native-renderer, task 2.1). The references are weak, so a
+/// store goes with its session. Stores are taken under the same lock as a
 /// fallback, so none is taken once the canvas is in force.
 pub struct DisplayPathState {
-    in_force: Mutex<InForce>,
+    in_force: Mutex<(Reason, Option<Stores>)>,
     /// The render thread's signal; every registered store rings it.
     wake: Arc<Wake>,
 }
 
-enum InForce {
-    /// The layer, with the stores of its sessions by id. The references are
-    /// weak, so a store goes with its session and the render thread never
-    /// keeps a closed session alive.
-    Layer(Reason, HashMap<String, Weak<SharedFrame>>),
-    Canvas(Reason),
-}
+type Stores = HashMap<String, Weak<SharedFrame>>;
 
 /// Emitted when the path changes while the app runs.
 pub const DISPLAY_PATH_EVENT: &str = "display-path";
 
 impl DisplayPathState {
     pub fn new(path: Path, reason: Reason) -> Self {
-        let in_force = match path {
-            Path::Native => InForce::Layer(reason, HashMap::new()),
-            Path::Canvas => InForce::Canvas(reason),
-        };
         Self {
-            in_force: Mutex::new(in_force),
+            in_force: Mutex::new((reason, (path == Path::Native).then(HashMap::new))),
             wake: Arc::default(),
         }
     }
 
     pub fn info(&self) -> DisplayPathInfo {
-        let (path, reason) = match &*self.in_force.lock().unwrap() {
-            InForce::Layer(reason, _) => (Path::Native, reason.to_string()),
-            InForce::Canvas(reason) => (Path::Canvas, reason.to_string()),
-        };
-        DisplayPathInfo { path, reason }
+        let guard = self.in_force.lock().unwrap();
+        DisplayPathInfo {
+            path: if guard.1.is_some() {
+                Path::Native
+            } else {
+                Path::Canvas
+            },
+            reason: guard.0.to_string(),
+        }
     }
 
     pub fn path(&self) -> Path {
-        match *self.in_force.lock().unwrap() {
-            InForce::Layer(..) => Path::Native,
-            InForce::Canvas(_) => Path::Canvas,
-        }
+        self.info().path
     }
 
     /// Records a fallback after startup (the layer could not be built, or
     /// failed while running); the layer's stores are dropped with it.
     pub fn fall_back(&self, reason: Reason) {
-        *self.in_force.lock().unwrap() = InForce::Canvas(reason);
+        *self.in_force.lock().unwrap() = (reason, None);
     }
 
     /// Takes a session's store for the layer once the session has its id;
     /// false when the canvas is in force, and the session is to use it.
     pub fn register(&self, id: &str, store: &Arc<SharedFrame>) -> bool {
-        let InForce::Layer(_, stores) = &mut *self.in_force.lock().unwrap() else {
+        let Some(stores) = &mut self.in_force.lock().unwrap().1 else {
             return false;
         };
         store.set_wake(Arc::clone(&self.wake));
@@ -526,10 +512,7 @@ impl DisplayPathState {
 
     /// The live store of a session, if it is still open and on the layer.
     pub fn get(&self, id: &str) -> Option<Arc<SharedFrame>> {
-        match &*self.in_force.lock().unwrap() {
-            InForce::Layer(_, stores) => stores.get(id)?.upgrade(),
-            InForce::Canvas(_) => None,
-        }
+        self.in_force.lock().unwrap().1.as_ref()?.get(id)?.upgrade()
     }
 
     /// The signal the render thread waits on.
