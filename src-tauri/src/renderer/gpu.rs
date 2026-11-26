@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::display_path::DisplayPathState;
+use super::display_path::*;
 use super::native_layer::{Geometry, LayerTarget, SurfaceSource, Wake};
 use super::shared_frame::Damage;
 use super::yuv::{FrameSource, YuvConverter};
@@ -638,7 +638,6 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::display_path::*;
     use super::*;
 
     fn view(dest: Rect, source: Rect) -> View {

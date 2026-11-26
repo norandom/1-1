@@ -453,9 +453,8 @@ pub struct DisplayPathInfo {
     pub reason: String,
 }
 
-/// App state: the path chosen at startup, changed only by a fallback, and why;
-/// on the layer, the weak frame store of each of its sessions, taken under the
-/// same lock as a fallback (spec rdp-native-renderer, task 2.1).
+/// App state: the path in force and why (spec rdp-native-renderer, task 2.1);
+/// on the layer, its sessions' weak frame stores, taken under the fallback's lock.
 pub struct DisplayPathState {
     in_force: Mutex<(Reason, Option<Stores>)>,
     /// The render thread's signal; every registered store rings it.
