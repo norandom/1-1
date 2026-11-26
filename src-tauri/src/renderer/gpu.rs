@@ -638,7 +638,7 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::display_path::{Path, Reason};
+    use super::super::display_path::*;
     use super::*;
 
     fn view(dest: Rect, source: Rect) -> View {
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn setting_the_same_view_does_not_wake_the_render_thread() {
-        let stores = Arc::new(DisplayPathState::new(Path::Native, Reason::Available));
+        let stores = DisplayPathState::new(Path::Native, Reason::Available);
         let shared = RenderShared::new(Arc::clone(&stores));
         let start = stores.wake().wait(u64::MAX, Duration::ZERO);
         let v = view(rect(0.0, 0.0, 1.0, 1.0), rect(0.0, 0.0, 1.0, 1.0));

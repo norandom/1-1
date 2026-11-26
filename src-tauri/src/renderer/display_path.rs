@@ -5,9 +5,11 @@
 //! fallback reason is tested without a GPU or a window. The canvas is always
 //! possible; the native layer only where every fact allows it.
 
-use std::collections::HashMap;
-use std::fmt;
-use std::sync::{Arc, Mutex, Weak};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{Arc, Mutex, Weak},
+};
 
 use serde::Serialize;
 
@@ -439,8 +441,7 @@ mod tests {
         stores.register("a", &SharedFrame::new(1, 1));
         let b = SharedFrame::new(1, 1);
         stores.register("b", &b);
-        let held = stores.in_force.lock().unwrap().1.as_ref().map(HashMap::len);
-        assert_eq!(held, Some(1));
+        assert_eq!(stores.in_force.lock().unwrap().1.as_ref().unwrap().len(), 1);
     }
 }
 
@@ -453,10 +454,8 @@ pub struct DisplayPathInfo {
 }
 
 /// App state: the path chosen at startup, changed only by a fallback, and why;
-/// on the layer, the frame store of every session it draws by id, none on the
-/// canvas (spec rdp-native-renderer, task 2.1). The references are weak, so a
-/// store goes with its session. Stores are taken under the same lock as a
-/// fallback, so none is taken once the canvas is in force.
+/// on the layer, the weak frame store of each of its sessions, taken under the
+/// same lock as a fallback (spec rdp-native-renderer, task 2.1).
 pub struct DisplayPathState {
     in_force: Mutex<(Reason, Option<Stores>)>,
     /// The render thread's signal; every registered store rings it.
@@ -469,11 +468,11 @@ type Stores = HashMap<String, Weak<SharedFrame>>;
 pub const DISPLAY_PATH_EVENT: &str = "display-path";
 
 impl DisplayPathState {
-    pub fn new(path: Path, reason: Reason) -> Self {
-        Self {
+    pub fn new(path: Path, reason: Reason) -> Arc<Self> {
+        Arc::new(Self {
             in_force: Mutex::new((reason, (path == Path::Native).then(HashMap::new))),
             wake: Arc::default(),
-        }
+        })
     }
 
     pub fn info(&self) -> DisplayPathInfo {
@@ -498,8 +497,7 @@ impl DisplayPathState {
         *self.in_force.lock().unwrap() = (reason, None);
     }
 
-    /// Takes a session's store for the layer once the session has its id;
-    /// false when the canvas is in force, and the session is to use it.
+    /// Takes a session's store for the layer; false once the canvas is in force.
     pub fn register(&self, id: &str, store: &Arc<SharedFrame>) -> bool {
         let Some(stores) = &mut self.in_force.lock().unwrap().1 else {
             return false;

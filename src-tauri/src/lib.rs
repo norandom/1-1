@@ -149,8 +149,7 @@ pub fn run() {
             // native path makes the window transparent; only a failure
             // changes it later.
             let (path, reason) = renderer::display_path::decide(&renderer_setting);
-            let display_path =
-                Arc::new(renderer::display_path::DisplayPathState::new(path, reason));
+            let display_path = renderer::display_path::DisplayPathState::new(path, reason);
             let main_window = {
                 let config = app
                     .config()
