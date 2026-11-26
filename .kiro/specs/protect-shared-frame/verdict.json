@@ -1,0 +1,120 @@
+{
+  "receipt": "step-verdict-v1",
+  "step": "protect-shared-frame",
+  "spec": "protect-shared-frame",
+  "base": "a8f34429c8e4ead6ec144dcf47f104105a66beab",
+  "revision": "66ed02961205537729c1318d952d828891327200",
+  "hashes": {
+    "scope": {
+      "src-tauri/src/renderer/shared_frame.rs": "931abe024ab7c05e78a502710260e2c4776db596"
+    },
+    "tests": "a50cfa9cbb1d21852112163487d14846a5711dfb53ed062ffbc9f6e36950ce17",
+    "declaration": "e6d5d35fe73ae802b893683588749bff64ff65a9"
+  },
+  "checks": [
+    {
+      "name": "declaration and revisions",
+      "result": "pass",
+      "detail": "base a8f3442, step 66ed029"
+    },
+    {
+      "name": "changes stay in scope",
+      "result": "pass",
+      "detail": "only scope, tests and the step's own files change"
+    },
+    {
+      "name": "pins apart from the change",
+      "result": "pass",
+      "detail": "no commit changes tests and code under test together"
+    },
+    {
+      "name": "size",
+      "result": "pass",
+      "detail": "within the declared growth"
+    },
+    {
+      "name": "state frame",
+      "result": "pass",
+      "detail": "no state write outside the declared frame, or none declared"
+    },
+    {
+      "name": "tests and fault runs",
+      "result": "pass",
+      "detail": "the project's tests pass on the base and on the step"
+    },
+    {
+      "name": "planted faults",
+      "result": "pass",
+      "detail": "in no function are more faults unnoticed after the step than before"
+    }
+  ],
+  "functions_run": {
+    "src-tauri/src/renderer/shared_frame.rs": [
+      "update_full",
+      "update_rect"
+    ]
+  },
+  "functions": [
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_full",
+      "before": {
+        "noticed": 14,
+        "unnoticed": 3,
+        "other": 0
+      },
+      "after": {
+        "noticed": 15,
+        "unnoticed": 2,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#11 line 127 swap_next",
+        "#21 line 133 arg_literal:0->1@133:50",
+        "#25 line 199 drop_statement"
+      ],
+      "unnoticed_after": [
+        "#21 line 133 arg_literal:0->1@133:50",
+        "#25 line 199 drop_statement"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_rect",
+      "before": {
+        "noticed": 8,
+        "unnoticed": 5,
+        "other": 0
+      },
+      "after": {
+        "noticed": 11,
+        "unnoticed": 2,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#2 line 93 swap:<-><=@93:21",
+        "#3 line 93 swap:&&->||@93:33",
+        "#6 line 100 swap:>=->>@100:18",
+        "#29 line 210 drop_statement",
+        "#30 line 211 drop_statement"
+      ],
+      "unnoticed_after": [
+        "#6 line 100 swap:>=->>@100:18",
+        "#29 line 210 drop_statement"
+      ]
+    }
+  ],
+  "unmatched_functions": [],
+  "size": {
+    "tokens": [
+      3560,
+      3560
+    ],
+    "nodes": [
+      2711,
+      2711
+    ]
+  },
+  "result": "accepted",
+  "reasons": []
+}

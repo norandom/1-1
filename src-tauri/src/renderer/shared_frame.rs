@@ -186,7 +186,7 @@ impl SharedFrame {
         }
     }
 
-    /// Rings `wake` on every later change (set once, by `FrameStores`).
+    /// Rings `wake` on every later change (set once, by `DisplayPathState::register`).
     pub fn set_wake(&self, wake: Arc<super::native_layer::Wake>) {
         let _ = self.wake.set(wake);
     }
@@ -518,3 +518,7 @@ mod tests {
         assert!(sf.publish().is_none(), "no visible effect");
     }
 }
+
+// Tests written to protect this file before it is reduced live in a file of their own.
+#[cfg(test)]
+mod protect;

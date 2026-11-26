@@ -167,11 +167,10 @@ pub fn run() {
                 let builder = builder.transparent(path == renderer::display_path::Path::Native);
                 builder.build()?
             };
-            let frame_stores = Arc::new(renderer::frame_stores::FrameStores::default());
-            let render_shared = renderer::gpu::RenderShared::new(Arc::clone(&frame_stores));
+            let render_shared = renderer::gpu::RenderShared::new(Arc::clone(&display_path));
             #[cfg(any(target_os = "linux", windows, target_os = "macos"))]
             if path == renderer::display_path::Path::Native {
-                let started = renderer::native_layer::attach(&main_window, frame_stores.wake())
+                let started = renderer::native_layer::attach(&main_window, display_path.wake())
                     .and_then(|target| {
                         let handle = app.handle().clone();
                         renderer::gpu::spawn(
@@ -202,7 +201,6 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             keyboard::detect::watch_wayland();
             keyboard::detect::remember_ui_thread();
-            app.manage(frame_stores);
             app.manage(render_shared);
 
             Ok(())

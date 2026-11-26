@@ -1,0 +1,101 @@
+{
+  "base": "a8f34429c8e4ead6ec144dcf47f104105a66beab",
+  "chosen": [
+    {
+      "faults": [
+        {
+          "column": 11,
+          "id": "swap:<-><=@93:21",
+          "line": 93,
+          "operator": "swap:<-><=@93:21",
+          "seconds": 43.1,
+          "text": "region.x0 < region.x1 && region.y0 < region.y1"
+        },
+        {
+          "column": 11,
+          "id": "swap:&&->||@93:33",
+          "line": 93,
+          "operator": "swap:&&->||@93:33",
+          "seconds": 43.5,
+          "text": "region.x0 < region.x1 && region.y0 < region.y1"
+        },
+        {
+          "column": 8,
+          "id": "drop_statement@210:8",
+          "line": 210,
+          "operator": "drop_statement",
+          "seconds": 40.1,
+          "text": "drop(guard)"
+        },
+        {
+          "column": 8,
+          "id": "drop_statement@211:8",
+          "line": 211,
+          "operator": "drop_statement",
+          "seconds": 39.9,
+          "text": "self.mark_dirty()"
+        }
+      ],
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_rect",
+      "noticed": 9,
+      "other": 0,
+      "unnoticed": 4
+    },
+    {
+      "faults": [
+        {
+          "column": 8,
+          "id": "swap_next@127:8",
+          "line": 127,
+          "operator": "swap_next",
+          "seconds": 36.8,
+          "text": "if data.len() < expected {\r\n            return false;\r\n        }"
+        },
+        {
+          "column": 39,
+          "id": "arg_literal:0->1@133:50",
+          "line": 133,
+          "operator": "arg_literal:0->1@133:50",
+          "seconds": 35.5,
+          "text": "(expected, 0)"
+        },
+        {
+          "column": 8,
+          "id": "drop_statement@199:8",
+          "line": 199,
+          "operator": "drop_statement",
+          "seconds": 39.0,
+          "text": "drop(guard)"
+        }
+      ],
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "update_full",
+      "noticed": 14,
+      "other": 0,
+      "unnoticed": 3
+    }
+  ],
+  "left_out": [],
+  "plan": {
+    "file": "D:/BuildArtifacts/lesscode/brownfield-test-stage/stage-6/sf-plan.json",
+    "sha256": "80aca99b0675828c264e09343dbe52e7ba95c0c1944ddba916aec80a4a41c08d"
+  },
+  "receipt": "step-stage-v1",
+  "reported": [],
+  "spec": "protect-shared-frame",
+  "test": [
+    "cargo",
+    "nextest",
+    "run",
+    "--locked",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--lib",
+    "--no-fail-fast"
+  ],
+  "to_run_again": {
+    "faults": 30,
+    "seconds": 1137.6
+  }
+}

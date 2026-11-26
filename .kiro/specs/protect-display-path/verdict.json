@@ -1,0 +1,155 @@
+{
+  "receipt": "step-verdict-v1",
+  "step": "protect-display-path",
+  "spec": "protect-display-path",
+  "base": "72507e194e1342a3e10af14bb7138999335598b9",
+  "revision": "7fe95574c19319efaffca2a66779adccafc1b45f",
+  "hashes": {
+    "scope": {
+      "src-tauri/src/renderer/display_path.rs": "30543551b460132d5e8fe5645067b001f6d62c90"
+    },
+    "tests": "7f5d7b97eb7fdf5f12e0c2572988e18c8b3fa29cde6eeee29b2b9115cb524a49",
+    "declaration": "d55b33c4081ef941cb3747273edb97433e6bdada"
+  },
+  "checks": [
+    {
+      "name": "declaration and revisions",
+      "result": "pass",
+      "detail": "base 72507e1, step 7fe9557"
+    },
+    {
+      "name": "changes stay in scope",
+      "result": "pass",
+      "detail": "only scope, tests and the step's own files change"
+    },
+    {
+      "name": "pins apart from the change",
+      "result": "pass",
+      "detail": "no commit changes tests and code under test together"
+    },
+    {
+      "name": "size",
+      "result": "pass",
+      "detail": "within the declared growth"
+    },
+    {
+      "name": "state frame",
+      "result": "pass",
+      "detail": "no state write outside the declared frame, or none declared"
+    },
+    {
+      "name": "tests and fault runs",
+      "result": "pass",
+      "detail": "the project's tests pass on the base and on the step"
+    },
+    {
+      "name": "planted faults",
+      "result": "pass",
+      "detail": "in no function are more faults unnoticed after the step than before"
+    }
+  ],
+  "functions_run": {
+    "src-tauri/src/renderer/display_path.rs": [
+      "current",
+      "decide",
+      "fall_back",
+      "layer_backends",
+      "runtime_fallback"
+    ]
+  },
+  "functions": [
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "current",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 2,
+        "other": 0
+      },
+      "after": {
+        "noticed": 2,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "decide",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 3,
+        "other": 1
+      },
+      "after": {
+        "noticed": 2,
+        "unnoticed": 1,
+        "other": 1
+      },
+      "unnoticed_after": [
+        "#6 line 481 arg_literal:string->empty@481:47"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "fall_back",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "after": {
+        "noticed": 1,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "layer_backends",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "after": {
+        "noticed": 1,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "runtime_fallback",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 2,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 2,
+        "other": 0
+      },
+      "unnoticed_after": [
+        "#4 line 458 drop_statement",
+        "#5 line 461 drop_statement"
+      ]
+    }
+  ],
+  "unmatched_functions": [],
+  "size": {
+    "tokens": [
+      3095,
+      3095
+    ],
+    "nodes": [
+      2388,
+      2388
+    ]
+  },
+  "result": "accepted",
+  "reasons": []
+}

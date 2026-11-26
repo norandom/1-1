@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "base": "72507e194e1342a3e10af14bb7138999335598b9",
+  "write_offs": [
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "decide",
+      "fault": "arg_literal:string->empty@481:47",
+      "kind": "nothing_a_caller_sees",
+      "reason": "The variable names the Hyprland compositor, a fact only the Linux branch of precondition reads. On Windows decide answers the same with any name. On Linux a test could notice it; this system does not build that code.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24",
+      "approval_recorded_by": "the agent, from the owner's answer \"Write off all three\" in the session"
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "runtime_fallback",
+      "fault": "drop_statement@458:4",
+      "kind": "not_testable_as_it_stands",
+      "reason": "runtime_fallback takes the handle of the running Tauri app. The crate has no way to make one in a test (tauri is built without its test feature). What the dropped call does to the state is covered by the test of fall_back.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24",
+      "approval_recorded_by": "the agent, from the owner's answer \"Write off all three\" in the session"
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "runtime_fallback",
+      "fault": "drop_statement@461:4",
+      "kind": "not_testable_as_it_stands",
+      "reason": "The dropped statement spawns the task that moves every session to the canvas. It needs the app handle and the session manager of a running app. A reduction of this function has to keep that call by review; nothing checks it.",
+      "proposed_by": "agent",
+      "approved_by": "Marius Ciepluch",
+      "approved_at": "2026-11-24",
+      "approval_recorded_by": "the agent, from the owner's answer \"Write off all three\" in the session"
+    }
+  ]
+}

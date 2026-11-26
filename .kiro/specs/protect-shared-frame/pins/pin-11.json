@@ -1,0 +1,16 @@
+{
+  "receipt": "step-pin-v1",
+  "step": "protect-shared-frame",
+  "base": "a8f34429c8e4ead6ec144dcf47f104105a66beab",
+  "tests_of": "c9eeae31c8254f8bde758314e0309290b131327a",
+  "fault": "#11 line 127 swap_next",
+  "result": "admitted",
+  "reason": "the tests with the pin pass on the unchanged code and fail on the fault",
+  "remaining_unnoticed": [
+    "#6 line 100 swap:>=->>@100:18",
+    "#21 line 133 arg_literal:0->1@133:50",
+    "#25 line 199 drop_statement",
+    "#29 line 210 drop_statement",
+    "#30 line 211 drop_statement"
+  ]
+}
