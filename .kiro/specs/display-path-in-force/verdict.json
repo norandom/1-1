@@ -1,0 +1,769 @@
+{
+  "receipt": "step-verdict-v1",
+  "step": "display-path-in-force",
+  "spec": "display-path-in-force",
+  "base": "949127d9dfa1663e5cff8acbf92052e17a24cd7a",
+  "revision": "ba2963bc5338f26b113af3cc104491cc467b4115",
+  "hashes": {
+    "scope": {
+      "src-tauri/src/commands/session.rs": "b95087cece83f99c23e6c845c432fd53a2cd70b0",
+      "src-tauri/src/lib.rs": "cf0cd075523dfa04248f2b74379f1c7097b6eb52",
+      "src-tauri/src/renderer/display_path.rs": "323a39c6dd1136a6ee27a49f93a1c9704dd8f111",
+      "src-tauri/src/renderer/frame_stores.rs": "",
+      "src-tauri/src/renderer/gpu.rs": "42d887b2afee4132f7c5b853bc4bc21490fe93fc",
+      "src-tauri/src/renderer/mod.rs": "d27b793c7a011349918ad18a5f7777e137c0a43d",
+      "src-tauri/src/renderer/shared_frame.rs": "334b5f1f385aee860c473a72990dbf2e98a034ef"
+    },
+    "tests": "5ffa517c3c02d0f4167fd46787ba63f66d4febe8bc2438e1b0632a0e0e30ef0b",
+    "declaration": "66f219927eb4fa8c7c2cc79182e75d21746c8e7c"
+  },
+  "checks": [
+    {
+      "name": "declaration and revisions",
+      "result": "pass",
+      "detail": "base 949127d, step ba2963b"
+    },
+    {
+      "name": "changes stay in scope",
+      "result": "pass",
+      "detail": "only scope, tests and the step's own files change"
+    },
+    {
+      "name": "pins apart from the change",
+      "result": "pass",
+      "detail": "no commit changes tests and code under test together"
+    },
+    {
+      "name": "size",
+      "result": "pass",
+      "detail": "within the declared growth"
+    },
+    {
+      "name": "state frame",
+      "result": "pass",
+      "detail": "no state write outside the declared frame, or none declared"
+    },
+    {
+      "name": "tests and fault runs",
+      "result": "pass",
+      "detail": "the project's tests pass on the base and on the step"
+    },
+    {
+      "name": "planted faults",
+      "result": "pass",
+      "detail": "in no function are more faults unnoticed after the step than before"
+    }
+  ],
+  "functions_run": {
+    "src-tauri/src/commands/session.rs": [
+      "connect",
+      "share_source"
+    ],
+    "src-tauri/src/lib.rs": [
+      "run"
+    ],
+    "src-tauri/src/renderer/display_path.rs": [
+      "fall_back",
+      "get",
+      "get_display_path",
+      "info",
+      "new",
+      "path",
+      "register",
+      "runtime_fallback",
+      "try_gpu",
+      "wake"
+    ],
+    "src-tauri/src/renderer/frame_stores.rs": [
+      "get",
+      "register",
+      "wake"
+    ],
+    "src-tauri/src/renderer/gpu.rs": [
+      "draw",
+      "native_view",
+      "new",
+      "presented",
+      "run",
+      "set_view",
+      "spawn",
+      "upload_source"
+    ],
+    "src-tauri/src/renderer/mod.rs": [],
+    "src-tauri/src/renderer/shared_frame.rs": [
+      "mark_dirty",
+      "new",
+      "publish"
+    ]
+  },
+  "functions": [
+    {
+      "file": "src-tauri/src/commands/session.rs",
+      "function": "connect",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 8,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 7,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#85 line 155 rewrite:try_expression",
+        "#86 line 155 rewrite:try_expression",
+        "#87 line 164 rewrite:try_expression",
+        "#88 line 165 rewrite:try_expression",
+        "#89 line 166 drop_statement",
+        "#90 line 210 rewrite:try_expression",
+        "#91 line 222 drop_statement",
+        "#92 line 235 rewrite:try_expression"
+      ],
+      "unnoticed_after": [
+        "#88 line 154 rewrite:try_expression",
+        "#89 line 154 rewrite:try_expression",
+        "#90 line 163 rewrite:try_expression",
+        "#91 line 164 rewrite:try_expression",
+        "#92 line 165 drop_statement",
+        "#93 line 209 rewrite:try_expression",
+        "#94 line 232 rewrite:try_expression"
+      ]
+    },
+    {
+      "file": "src-tauri/src/commands/session.rs",
+      "function": "share_source",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/lib.rs",
+      "function": "run",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 38,
+        "other": 1
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 37,
+        "other": 1
+      },
+      "unnoticed_before": [
+        "#93 line 27 drop_statement",
+        "#94 line 29 arg_literal:string->empty@29:16",
+        "#95 line 35 drop_statement",
+        "#96 line 43 drop_statement",
+        "#97 line 67 arg_literal:string->empty@67:27",
+        "#98 line 68 arg_literal:string->empty@68:27",
+        "#99 line 69 arg_literal:string->empty@69:27",
+        "#100 line 70 arg_literal:string->empty@70:27",
+        "#101 line 88 arg_literal:string->empty@88:28",
+        "#102 line 94 arg_literal:string->empty@94:24",
+        "#103 line 97 drop_statement",
+        "#104 line 97 arg_literal:string->empty@97:54",
+        "#105 line 110 arg_literal:string->empty@110:30",
+        "#106 line 111 arg_literal:string->empty@111:30",
+        "#107 line 113 drop_statement",
+        "#108 line 114 arg_literal:string->empty@114:30",
+        "#109 line 119 arg_literal:string->empty@119:30",
+        "#110 line 121 drop_statement",
+        "#111 line 122 drop_statement",
+        "#112 line 142 drop_statement",
+        "#113 line 143 drop_statement",
+        "#114 line 144 drop_statement",
+        "#115 line 145 drop_statement",
+        "#116 line 154 rewrite:try_expression",
+        "#117 line 159 arg_literal:string->empty@159:27",
+        "#118 line 161 rewrite:try_expression",
+        "#119 line 166 rewrite:try_expression",
+        "#120 line 171 negate",
+        "#121 line 179 drop_statement",
+        "#122 line 192 drop_statement",
+        "#123 line 197 drop_statement",
+        "#125 line 202 drop_statement",
+        "#126 line 203 drop_statement",
+        "#127 line 204 drop_statement",
+        "#128 line 298 arg_literal:string->empty@298:16",
+        "#129 line 300 drop_statement",
+        "#130 line 305 negate",
+        "#131 line 313 drop_statement"
+      ],
+      "unnoticed_after": [
+        "#95 line 27 drop_statement",
+        "#96 line 29 arg_literal:string->empty@29:16",
+        "#97 line 35 drop_statement",
+        "#98 line 43 drop_statement",
+        "#99 line 67 arg_literal:string->empty@67:27",
+        "#100 line 68 arg_literal:string->empty@68:27",
+        "#101 line 69 arg_literal:string->empty@69:27",
+        "#102 line 70 arg_literal:string->empty@70:27",
+        "#103 line 88 arg_literal:string->empty@88:28",
+        "#104 line 94 arg_literal:string->empty@94:24",
+        "#105 line 97 drop_statement",
+        "#106 line 97 arg_literal:string->empty@97:54",
+        "#107 line 110 arg_literal:string->empty@110:30",
+        "#108 line 111 arg_literal:string->empty@111:30",
+        "#109 line 113 drop_statement",
+        "#110 line 114 arg_literal:string->empty@114:30",
+        "#111 line 119 arg_literal:string->empty@119:30",
+        "#112 line 121 drop_statement",
+        "#113 line 122 drop_statement",
+        "#114 line 142 drop_statement",
+        "#115 line 143 drop_statement",
+        "#116 line 144 drop_statement",
+        "#117 line 145 drop_statement",
+        "#118 line 154 rewrite:try_expression",
+        "#119 line 159 arg_literal:string->empty@159:27",
+        "#120 line 161 rewrite:try_expression",
+        "#121 line 166 rewrite:try_expression",
+        "#122 line 170 negate",
+        "#123 line 178 drop_statement",
+        "#124 line 191 drop_statement",
+        "#125 line 196 drop_statement",
+        "#127 line 201 drop_statement",
+        "#128 line 202 drop_statement",
+        "#129 line 296 arg_literal:string->empty@296:16",
+        "#130 line 298 drop_statement",
+        "#131 line 303 negate",
+        "#132 line 311 drop_statement"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "fall_back",
+      "before": {
+        "noticed": 1,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 1,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "get",
+      "before": null,
+      "after": {
+        "noticed": 2,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "get_display_path",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "info",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 1,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "new",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "path",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "register",
+      "before": null,
+      "after": {
+        "noticed": 4,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "runtime_fallback",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 2,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 2,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#2 line 458 drop_statement",
+        "#3 line 461 drop_statement"
+      ],
+      "unnoticed_after": [
+        "#9 line 527 drop_statement",
+        "#10 line 530 drop_statement"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "try_gpu",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/display_path.rs",
+      "function": "wake",
+      "before": null,
+      "after": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/frame_stores.rs",
+      "function": "get",
+      "before": {
+        "noticed": 1,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": null,
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/frame_stores.rs",
+      "function": "register",
+      "before": {
+        "noticed": 3,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": null,
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/frame_stores.rs",
+      "function": "wake",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": null,
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/gpu.rs",
+      "function": "draw",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 9,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 9,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#67 line 598 rewrite:try_expression",
+        "#68 line 624 drop_statement",
+        "#69 line 624 arg_literal:0->1@624:56",
+        "#70 line 625 drop_statement",
+        "#71 line 626 drop_statement",
+        "#72 line 626 arg_literal:0->1@626:36",
+        "#73 line 627 drop_statement",
+        "#74 line 630 drop_statement",
+        "#75 line 631 drop_statement"
+      ],
+      "unnoticed_after": [
+        "#70 line 601 rewrite:try_expression",
+        "#71 line 627 drop_statement",
+        "#72 line 627 arg_literal:0->1@627:56",
+        "#73 line 628 drop_statement",
+        "#74 line 629 drop_statement",
+        "#75 line 629 arg_literal:0->1@629:36",
+        "#76 line 630 drop_statement",
+        "#77 line 633 drop_statement",
+        "#78 line 634 drop_statement"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/gpu.rs",
+      "function": "native_view",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#13 line 102 drop_statement"
+      ],
+      "unnoticed_after": [
+        "#16 line 102 drop_statement"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/gpu.rs",
+      "function": "new",
+      "before": {
+        "noticed": 3,
+        "unnoticed": 11,
+        "other": 0
+      },
+      "after": {
+        "noticed": 3,
+        "unnoticed": 11,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#18 line 218 rewrite:try_expression",
+        "#19 line 233 rewrite:try_expression",
+        "#20 line 238 arg_literal:string->empty@238:15",
+        "#21 line 239 rewrite:try_expression",
+        "#22 line 247 drop_statement",
+        "#23 line 252 rewrite:try_expression",
+        "#24 line 263 arg_literal:string->empty@263:19",
+        "#25 line 283 arg_literal:0->1@284:20",
+        "#26 line 291 arg_literal:1->0@292:20",
+        "#27 line 319 arg_literal:string->empty@319:34",
+        "#28 line 325 arg_literal:string->empty@325:34"
+      ],
+      "unnoticed_after": [
+        "#21 line 218 rewrite:try_expression",
+        "#22 line 233 rewrite:try_expression",
+        "#23 line 238 arg_literal:string->empty@238:15",
+        "#24 line 239 rewrite:try_expression",
+        "#25 line 247 drop_statement",
+        "#26 line 252 rewrite:try_expression",
+        "#27 line 263 arg_literal:string->empty@263:19",
+        "#28 line 283 arg_literal:0->1@284:20",
+        "#29 line 291 arg_literal:1->0@292:20",
+        "#30 line 319 arg_literal:string->empty@319:34",
+        "#31 line 325 arg_literal:string->empty@325:34"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/gpu.rs",
+      "function": "presented",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#12 line 94 arg_literal:0->1@94:23"
+      ],
+      "unnoticed_after": [
+        "#15 line 94 arg_literal:0->1@94:23"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/gpu.rs",
+      "function": "run",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 29,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 29,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#29 line 382 arg_literal:string->empty@382:56",
+        "#30 line 389 drop_statement",
+        "#31 line 389 arg_literal:1->0@389:55",
+        "#32 line 391 negate",
+        "#33 line 396 negate",
+        "#34 line 397 drop_statement",
+        "#35 line 402 swap_next",
+        "#36 line 402 negate",
+        "#37 line 403 drop_statement",
+        "#38 line 405 drop_statement",
+        "#39 line 409 drop_statement",
+        "#40 line 413 drop_statement",
+        "#41 line 414 drop_statement",
+        "#42 line 416 negate",
+        "#43 line 422 drop_statement",
+        "#44 line 423 swap_next",
+        "#45 line 424 negate",
+        "#46 line 427 drop_statement",
+        "#47 line 430 drop_statement",
+        "#48 line 432 drop_statement",
+        "#49 line 435 drop_statement",
+        "#50 line 436 drop_statement",
+        "#51 line 437 drop_statement",
+        "#52 line 441 drop_statement",
+        "#53 line 444 drop_statement",
+        "#54 line 445 drop_statement",
+        "#55 line 447 negate",
+        "#56 line 447 swap:>=->>@447:32",
+        "#57 line 447 swap:||->&&@448:24"
+      ],
+      "unnoticed_after": [
+        "#32 line 382 arg_literal:string->empty@382:56",
+        "#33 line 389 drop_statement",
+        "#34 line 389 arg_literal:1->0@389:55",
+        "#35 line 391 negate",
+        "#36 line 396 negate",
+        "#37 line 397 drop_statement",
+        "#38 line 405 swap_next",
+        "#39 line 405 negate",
+        "#40 line 406 drop_statement",
+        "#41 line 408 drop_statement",
+        "#42 line 412 drop_statement",
+        "#43 line 416 drop_statement",
+        "#44 line 417 drop_statement",
+        "#45 line 419 negate",
+        "#46 line 425 drop_statement",
+        "#47 line 426 swap_next",
+        "#48 line 427 negate",
+        "#49 line 430 drop_statement",
+        "#50 line 433 drop_statement",
+        "#51 line 435 drop_statement",
+        "#52 line 438 drop_statement",
+        "#53 line 439 drop_statement",
+        "#54 line 440 drop_statement",
+        "#55 line 444 drop_statement",
+        "#56 line 447 drop_statement",
+        "#57 line 448 drop_statement",
+        "#58 line 450 negate",
+        "#59 line 450 swap:>=->>@450:32",
+        "#60 line 450 swap:||->&&@451:24"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/gpu.rs",
+      "function": "set_view",
+      "before": {
+        "noticed": 3,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "after": {
+        "noticed": 3,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#10 line 69 drop_statement"
+      ],
+      "unnoticed_after": [
+        "#13 line 69 drop_statement"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/gpu.rs",
+      "function": "spawn",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 1,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#17 line 173 drop_statement"
+      ],
+      "unnoticed_after": [
+        "#20 line 173 drop_statement"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/gpu.rs",
+      "function": "upload_source",
+      "before": {
+        "noticed": 0,
+        "unnoticed": 9,
+        "other": 0
+      },
+      "after": {
+        "noticed": 0,
+        "unnoticed": 9,
+        "other": 0
+      },
+      "unnoticed_before": [
+        "#58 line 490 swap_next",
+        "#59 line 490 negate",
+        "#60 line 490 swap:==->!=@490:26",
+        "#61 line 490 swap:||->&&@490:31",
+        "#62 line 493 negate",
+        "#63 line 493 swap:!=->==@493:63",
+        "#64 line 494 drop_statement",
+        "#65 line 499 arg_literal:string->empty@499:59",
+        "#66 line 500 drop_statement"
+      ],
+      "unnoticed_after": [
+        "#61 line 493 swap_next",
+        "#62 line 493 negate",
+        "#63 line 493 swap:==->!=@493:26",
+        "#64 line 493 swap:||->&&@493:31",
+        "#65 line 496 negate",
+        "#66 line 496 swap:!=->==@496:63",
+        "#67 line 497 drop_statement",
+        "#68 line 502 arg_literal:string->empty@502:59",
+        "#69 line 503 drop_statement"
+      ]
+    },
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "mark_dirty",
+      "before": {
+        "noticed": 5,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 5,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "new",
+      "before": {
+        "noticed": 2,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 2,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    },
+    {
+      "file": "src-tauri/src/renderer/shared_frame.rs",
+      "function": "publish",
+      "before": {
+        "noticed": 2,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "after": {
+        "noticed": 2,
+        "unnoticed": 0,
+        "other": 0
+      },
+      "unnoticed_before": [],
+      "unnoticed_after": []
+    }
+  ],
+  "unmatched_functions": [
+    "src-tauri/src/renderer/display_path.rs: get",
+    "src-tauri/src/renderer/display_path.rs: register",
+    "src-tauri/src/renderer/display_path.rs: wake",
+    "src-tauri/src/renderer/frame_stores.rs: get",
+    "src-tauri/src/renderer/frame_stores.rs: register",
+    "src-tauri/src/renderer/frame_stores.rs: wake"
+  ],
+  "size": {
+    "tokens": [
+      16769,
+      16761
+    ],
+    "nodes": [
+      13111,
+      13094
+    ]
+  },
+  "result": "accepted",
+  "reasons": []
+}
